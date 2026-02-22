@@ -119,3 +119,14 @@ cd /tmp/vps-panel-src
 sudo bash install_panel.sh
 ```
 
+
+如果你之前执行失败过，可能会留下损坏的 `.venv` 目录。新版脚本会自动重建；你也可以手动清理后重试：
+
+```bash
+cd /opt/vps-panel
+sudo rm -rf .venv
+cd /tmp/vps-panel-src
+sudo bash install_panel.sh
+```
+
+

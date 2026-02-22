@@ -43,7 +43,9 @@ cp -f static/style.css "$APP_DIR/static/"
 
 cd "$APP_DIR"
 
-if [ ! -d .venv ]; then
+# 兼容上次失败后留下的半成品 .venv 目录
+if [ ! -x .venv/bin/python ] || [ ! -f .venv/bin/activate ]; then
+  rm -rf .venv
   "$PYTHON_BIN" -m venv .venv
 fi
 
