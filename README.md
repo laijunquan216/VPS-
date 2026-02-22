@@ -12,7 +12,7 @@
 #### 方式A：推荐（一键安装）
 
 ```bash
-git clone <你的仓库地址> /tmp/vps-panel-src
+git clone https://github.com/laijunquan216/VPS-.git /tmp/vps-panel-src
 cd /tmp/vps-panel-src
 sudo bash install_panel.sh
 ```
@@ -45,13 +45,36 @@ python app.py
 
 默认监听 `0.0.0.0:5000`。
 
+### 3) 仓库地址（用于同步更新）
+
+- GitHub：`https://github.com/laijunquan216/VPS-`
+- 后续每次有新改动，直接在服务器执行：
+
+```bash
+cd /tmp/vps-panel-src
+git pull
+sudo bash install_panel.sh
+```
+
 ---
+
+
+## DD 重装密码自动化（重要）
+
+如果你在 SSH任务栏里使用类似下面命令：
+
+```bash
+wget --no-check-certificate -qO InstallNET.sh 'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' && chmod a+x InstallNET.sh && bash InstallNET.sh -debian 11 -pwd 'YwjnPc28j6l2p1'
+```
+
+系统会在执行时自动把 `-pwd` 替换为随机密码，并回写到面板中的 root 密码字段（显示板块也会同步展示）。
 
 ## 功能
 
-- Web UI 管理服务器（名称、IP、SSH 信息、每月重置日期）。
-- 按月自动检测到期服务器，支持开启/关闭每台服务器的自动重置。
-- 支持填写 DD 系统命令与 PT 盒子安装脚本，自动执行并记录日志。
+- Web UI 分为设置板块和显示板块，设置板块支持填写名称/IP/root密码/重置日期/SSH代码1~3。
+- 按月自动检测到期服务器（北京时间凌晨1点检测），支持开启/关闭每台服务器自动重置。
+- SSH任务栏支持代码1、代码2、代码3按顺序执行，并自动抽取Vertex/qBittorrent/FileBrowser结果摘要到显示板块。
+- 若SSH任务中包含 `InstallNET.sh ... -pwd`，系统会在每次执行时自动生成随机 root 密码，替换命令中的 `-pwd` 参数并自动回写到面板。
 - 支持手动触发单台服务器重置任务。
 
 ## 配置

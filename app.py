@@ -1,42 +1,37 @@
 import os
+import re
+import secrets
 import sqlite3
+import string
 import threading
 from contextlib import closing
-from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import paramiko
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, flash, redirect, render_template, request, url_for
 
 DB_PATH = os.environ.get("VPS_PANEL_DB", "panel.db")
-CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "60"))
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "5000"))
+TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
-
-
-@dataclass
-class Server:
-    id: int
-    name: str
-    ip: str
-    ssh_port: int
-    ssh_user: str
-    ssh_password: str
-    reset_day: int
-    auto_reset: int
-    dd_command: str
-    install_script: str
-    last_reset_at: str
 
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def ensure_column(conn, table_name, col_def):
+    col_name = col_def.split()[0]
+    current_cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if col_name not in current_cols:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_def}")
 
 
 def init_db():
@@ -48,12 +43,13 @@ def init_db():
                 name TEXT NOT NULL,
                 ip TEXT NOT NULL,
                 ssh_port INTEGER NOT NULL DEFAULT 22,
-                ssh_user TEXT NOT NULL,
+                ssh_user TEXT NOT NULL DEFAULT 'root',
                 ssh_password TEXT NOT NULL,
                 reset_day INTEGER NOT NULL,
                 auto_reset INTEGER NOT NULL DEFAULT 1,
-                dd_command TEXT NOT NULL,
-                install_script TEXT NOT NULL,
+                ssh_command_1 TEXT NOT NULL DEFAULT '',
+                ssh_command_2 TEXT NOT NULL DEFAULT '',
+                ssh_command_3 TEXT NOT NULL DEFAULT '',
                 last_reset_at TEXT
             )
             """
@@ -64,24 +60,30 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
                 output TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(server_id) REFERENCES servers(id)
             )
             """
         )
+
+        # migration for existing db
+        ensure_column(conn, "servers", "ssh_command_1 TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "ssh_command_2 TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "ssh_command_3 TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
 
 def list_servers():
     with closing(get_conn()) as conn:
-        rows = conn.execute("SELECT * FROM servers ORDER BY id").fetchall()
-    return rows
+        return conn.execute("SELECT * FROM servers ORDER BY id").fetchall()
 
 
 def list_logs(limit=200):
     with closing(get_conn()) as conn:
-        rows = conn.execute(
+        return conn.execute(
             """
             SELECT l.*, s.name AS server_name
             FROM job_logs l
@@ -91,42 +93,114 @@ def list_logs(limit=200):
             """,
             (limit,),
         ).fetchall()
-    return rows
 
 
-def save_log(server_id: int, status: str, output: str):
+def list_display_rows():
+    with closing(get_conn()) as conn:
+        return conn.execute(
+            """
+            SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day,
+                   l.summary, l.created_at AS latest_run_at
+            FROM servers s
+            LEFT JOIN job_logs l ON l.id = (
+                SELECT l2.id FROM job_logs l2
+                WHERE l2.server_id = s.id
+                ORDER BY l2.id DESC
+                LIMIT 1
+            )
+            ORDER BY s.id
+            """
+        ).fetchall()
+
+
+def save_log(server_id, status, summary, output):
     with closing(get_conn()) as conn:
         conn.execute(
-            "INSERT INTO job_logs(server_id, status, output, created_at) VALUES(?,?,?,?)",
-            (server_id, status, output, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "INSERT INTO job_logs(server_id, status, summary, output, created_at) VALUES(?,?,?,?,?)",
+            (
+                server_id,
+                status,
+                summary,
+                output,
+                datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         )
         conn.commit()
 
 
-def update_last_reset(server_id: int):
+def update_last_reset(server_id):
     with closing(get_conn()) as conn:
         conn.execute(
             "UPDATE servers SET last_reset_at = ? WHERE id = ?",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), server_id),
+            (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), server_id),
         )
         conn.commit()
 
 
+def update_server_password(server_id, new_password):
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET ssh_password = ? WHERE id = ?", (new_password, server_id))
+        conn.commit()
+
+
+def generate_root_password(length=16):
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def inject_random_password_if_needed(command, server_row, generated_password):
+    # 支持 InstallNET.sh -pwd 'xxx' / -pwd "xxx" / -pwd xxx
+    if "InstallNET.sh" not in command or "-pwd" not in command:
+        return command, generated_password
+
+    pwd = generated_password or generate_root_password()
+    command = re.sub(r"-pwd\s+'[^']*'", f"-pwd '{pwd}'", command)
+    command = re.sub(r'-pwd\s+"[^"]*"', f'-pwd "{pwd}"', command)
+    command = re.sub(r"-pwd\s+([^\s'\"]+)", f"-pwd '{pwd}'", command)
+
+    update_server_password(server_row["id"], pwd)
+    return command, pwd
+
+
 def should_reset(server_row):
-    now = datetime.now()
+    now = datetime.now(TIMEZONE)
     if not server_row["auto_reset"]:
         return False
     if server_row["reset_day"] != now.day:
         return False
+    if now.hour != 1:
+        return False
+
     if not server_row["last_reset_at"]:
         return True
 
     try:
-        last = datetime.strptime(server_row["last_reset_at"], "%Y-%m-%d %H:%M:%S")
+        last = datetime.strptime(server_row["last_reset_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
     except ValueError:
         return True
 
     return not (last.year == now.year and last.month == now.month)
+
+
+def extract_summary(server_row, raw_output):
+    ip_match = re.search(r"IP\s*address\s*:\s*([\d\.]+)", raw_output, flags=re.IGNORECASE)
+    pass_match = re.search(r"Your new root passw(?:o|or)t\s+is\s*([^\n\r]+)", raw_output, flags=re.IGNORECASE)
+
+    vertex = re.search(r"🌐\s*Vertex[\s\S]*?--------", raw_output)
+    qb = re.search(r"🧩\s*qBittorrent[\s\S]*?--------", raw_output)
+    fb = re.search(r"📁\s*FileBrowser[\s\S]*?--------", raw_output)
+
+    lines = [
+        f"{server_row['name']}（名称），{server_row['reset_day']}日凌晨1点（北京时间）刷新流量",
+        f"IP address: {ip_match.group(1) if ip_match else server_row['ip']}",
+        f"Your new root passwort is {pass_match.group(1).strip() if pass_match else server_row['ssh_password']}",
+    ]
+
+    for block in (vertex, qb, fb):
+        if block:
+            lines.append(block.group(0).strip())
+
+    return "\n".join(lines)
 
 
 def run_remote(server_row):
@@ -145,52 +219,52 @@ def run_remote(server_row):
         )
         output_lines.append("SSH 连接成功")
 
-        dd_command = server_row["dd_command"].strip()
-        if dd_command:
-            output_lines.append(f"执行 DD 指令: {dd_command}")
-            _, stdout, stderr = client.exec_command(dd_command)
-            dd_out = stdout.read().decode("utf-8", errors="ignore")
-            dd_err = stderr.read().decode("utf-8", errors="ignore")
-            if dd_out:
-                output_lines.append("DD输出:\n" + dd_out)
-            if dd_err:
-                output_lines.append("DD错误:\n" + dd_err)
+        generated_password = None
+        mutable_server = dict(server_row)
 
-        install_script = server_row["install_script"].strip()
-        if install_script:
-            output_lines.append("开始执行 PT 盒子安装脚本")
-            _, stdout, stderr = client.exec_command(install_script)
-            inst_out = stdout.read().decode("utf-8", errors="ignore")
-            inst_err = stderr.read().decode("utf-8", errors="ignore")
-            if inst_out:
-                output_lines.append("安装输出:\n" + inst_out)
-            if inst_err:
-                output_lines.append("安装错误:\n" + inst_err)
+        for idx in (1, 2, 3):
+            command = (mutable_server.get(f"ssh_command_{idx}") or "").strip()
+            if not command:
+                continue
+
+            command, generated_password = inject_random_password_if_needed(command, mutable_server, generated_password)
+            if generated_password:
+                mutable_server["ssh_password"] = generated_password
+                output_lines.append(f"检测到DD重装命令，已自动生成新root密码: {generated_password}")
+
+            output_lines.append(f"执行 SSH 任务代码{idx}: {command}")
+            _, stdout, stderr = client.exec_command(command)
+            out = stdout.read().decode("utf-8", errors="ignore")
+            err = stderr.read().decode("utf-8", errors="ignore")
+            if out:
+                output_lines.append(f"代码{idx}输出:\n{out}")
+            if err:
+                output_lines.append(f"代码{idx}错误:\n{err}")
 
         output_lines.append("任务执行完成")
-        save_log(server_row["id"], "success", "\n\n".join(output_lines))
+        all_output = "\n\n".join(output_lines)
+        summary = extract_summary(mutable_server, all_output)
+        save_log(server_row["id"], "success", summary, all_output)
         update_last_reset(server_row["id"])
     except Exception as exc:
         output_lines.append(f"任务失败: {exc}")
-        save_log(server_row["id"], "failed", "\n\n".join(output_lines))
+        all_output = "\n\n".join(output_lines)
+        summary = extract_summary(locals().get("mutable_server", dict(server_row)), all_output)
+        save_log(server_row["id"], "failed", summary, all_output)
     finally:
         client.close()
 
 
-def run_for_server(server_id: int):
+def run_for_server(server_id):
     with closing(get_conn()) as conn:
-        server_row = conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone()
-
-    if not server_row:
-        return
-
-    threading.Thread(target=run_remote, args=(server_row,), daemon=True).start()
+        row = conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone()
+    if row:
+        threading.Thread(target=run_remote, args=(row,), daemon=True).start()
 
 
 def check_scheduled_jobs():
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM servers").fetchall()
-
     for row in rows:
         if should_reset(row):
             run_for_server(row["id"])
@@ -198,7 +272,12 @@ def check_scheduled_jobs():
 
 @app.route("/")
 def index():
-    return render_template("index.html", servers=list_servers(), logs=list_logs())
+    return render_template(
+        "index.html",
+        servers=list_servers(),
+        display_rows=list_display_rows(),
+        logs=list_logs(),
+    )
 
 
 @app.route("/servers", methods=["POST"])
@@ -208,24 +287,24 @@ def add_server():
         conn.execute(
             """
             INSERT INTO servers(
-                name, ip, ssh_port, ssh_user, ssh_password,
-                reset_day, auto_reset, dd_command, install_script
-            ) VALUES(?,?,?,?,?,?,?,?,?)
+                name, ip, ssh_port, ssh_user, ssh_password, reset_day,
+                auto_reset, ssh_command_1, ssh_command_2, ssh_command_3
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
                 form["ip"].strip(),
                 int(form.get("ssh_port", 22)),
-                form["ssh_user"].strip(),
+                form.get("ssh_user", "root").strip() or "root",
                 form["ssh_password"],
                 int(form["reset_day"]),
                 1 if form.get("auto_reset") == "on" else 0,
-                form.get("dd_command", "").strip(),
-                form.get("install_script", "").strip(),
+                form.get("ssh_command_1", "").strip(),
+                form.get("ssh_command_2", "").strip(),
+                form.get("ssh_command_3", "").strip(),
             ),
         )
         conn.commit()
-
     flash("服务器已添加", "success")
     return redirect(url_for("index"))
 
@@ -238,24 +317,24 @@ def update_server(server_id):
             """
             UPDATE servers
             SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?,
-                reset_day=?, auto_reset=?, dd_command=?, install_script=?
+                reset_day=?, auto_reset=?, ssh_command_1=?, ssh_command_2=?, ssh_command_3=?
             WHERE id=?
             """,
             (
                 form["name"].strip(),
                 form["ip"].strip(),
                 int(form.get("ssh_port", 22)),
-                form["ssh_user"].strip(),
+                form.get("ssh_user", "root").strip() or "root",
                 form["ssh_password"],
                 int(form["reset_day"]),
                 1 if form.get("auto_reset") == "on" else 0,
-                form.get("dd_command", "").strip(),
-                form.get("install_script", "").strip(),
+                form.get("ssh_command_1", "").strip(),
+                form.get("ssh_command_2", "").strip(),
+                form.get("ssh_command_3", "").strip(),
                 server_id,
             ),
         )
         conn.commit()
-
     flash("服务器信息已更新", "success")
     return redirect(url_for("index"))
 
@@ -264,8 +343,8 @@ def update_server(server_id):
 def delete_server(server_id):
     with closing(get_conn()) as conn:
         conn.execute("DELETE FROM servers WHERE id = ?", (server_id,))
+        conn.execute("DELETE FROM job_logs WHERE server_id = ?", (server_id,))
         conn.commit()
-
     flash("服务器已删除", "success")
     return redirect(url_for("index"))
 
@@ -273,13 +352,13 @@ def delete_server(server_id):
 @app.route("/servers/<int:server_id>/run", methods=["POST"])
 def run_now(server_id):
     run_for_server(server_id)
-    flash("任务已开始执行，请稍后查看日志", "success")
+    flash("任务已开始执行，请稍后查看结果", "success")
     return redirect(url_for("index"))
 
 
 def start_scheduler():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(check_scheduled_jobs, "interval", minutes=CHECK_INTERVAL_MINUTES)
+    scheduler = BackgroundScheduler(timezone=TIMEZONE)
+    scheduler.add_job(check_scheduled_jobs, "cron", minute="*/5")
     scheduler.start()
     return scheduler
 
