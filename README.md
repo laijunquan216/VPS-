@@ -4,6 +4,32 @@
 
 ## 你关心的问题
 
+
+### 0) 重启后 /tmp 丢失导致无法更新（你这次遇到的问题）
+
+`/tmp` 是临时目录，重启后可能被清空，所以之前放在 `/tmp/vps-panel-src` 的源码目录会消失。
+现在建议固定使用 `/opt/vps-panel-src`，并使用内置更新命令：
+
+```bash
+sudo vps-panel-update
+```
+
+如果是首次恢复，请执行：
+
+```bash
+git clone https://github.com/laijunquan216/VPS-.git /opt/vps-panel-src
+cd /opt/vps-panel-src
+sudo bash install_panel.sh
+```
+
+服务排查命令：
+
+```bash
+systemctl status vps-panel.service --no-pager
+journalctl -u vps-panel.service -n 200 --no-pager
+sudo systemctl restart vps-panel.service
+```
+
 ### 1) 面板现在能不能安装？
 可以。仓库已经包含完整代码与一键安装脚本 `install_panel.sh`，可直接在一台 Linux VPS（建议 Ubuntu 22.04+/Debian 12+）部署。
 
@@ -12,8 +38,8 @@
 #### 方式A：推荐（一键安装）
 
 ```bash
-git clone https://github.com/laijunquan216/VPS-.git /tmp/vps-panel-src
-cd /tmp/vps-panel-src
+git clone https://github.com/laijunquan216/VPS-.git /opt/vps-panel-src
+cd /opt/vps-panel-src
 sudo bash install_panel.sh
 ```
 
@@ -51,7 +77,7 @@ python app.py
 - 后续每次有新改动，直接在服务器执行：
 
 ```bash
-cd /tmp/vps-panel-src
+cd /opt/vps-panel-src
 git pull
 sudo bash install_panel.sh
 ```
@@ -116,7 +142,7 @@ sudo apt-get install -y python3-venv python3-pip
 然后重新执行：
 
 ```bash
-cd /tmp/vps-panel-src
+cd /opt/vps-panel-src
 sudo bash install_panel.sh
 ```
 
@@ -126,7 +152,7 @@ sudo bash install_panel.sh
 ```bash
 cd /opt/vps-panel
 sudo rm -rf .venv
-cd /tmp/vps-panel-src
+cd /opt/vps-panel-src
 sudo bash install_panel.sh
 ```
 
