@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VPS 自动重置面板</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <h1>VPS 自动重置与 PT 盒子部署面板</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-wrap">
+          {% for category, msg in messages %}
+            <div class="flash {{ category }}">{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <section class="panel">
+      <h2>新增服务器</h2>
+      <form method="post" action="/servers" class="grid-form">
+        <label>名称<input name="name" required /></label>
+        <label>IP<input name="ip" required /></label>
+        <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
+        <label>SSH用户<input name="ssh_user" required /></label>
+        <label>SSH密码<input name="ssh_password" type="password" required /></label>
+        <label>每月重置日（1-31）<input name="reset_day" type="number" min="1" max="31" required /></label>
+        <label class="inline">
+          <input name="auto_reset" type="checkbox" checked /> 到期自动重置
+        </label>
+        <label class="full">DD系统命令
+          <textarea name="dd_command" rows="3" placeholder="例如：bash <(curl -L ...)"></textarea>
+        </label>
+        <label class="full">PT 盒子安装脚本
+          <textarea name="install_script" rows="6" placeholder="例如：wget -qO- ... | bash"></textarea>
+        </label>
+        <button type="submit">添加服务器</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>服务器列表</h2>
+      {% for s in servers %}
+      <details>
+        <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 重置日: {{ s.reset_day }} | 自动重置: {{ '是' if s.auto_reset else '否' }} | 上次: {{ s.last_reset_at or '从未' }}</summary>
+        <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
+          <label>名称<input name="name" value="{{ s.name }}" required /></label>
+          <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
+          <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
+          <label>SSH用户<input name="ssh_user" value="{{ s.ssh_user }}" required /></label>
+          <label>SSH密码<input name="ssh_password" type="password" value="{{ s.ssh_password }}" required /></label>
+          <label>每月重置日<input name="reset_day" type="number" min="1" max="31" value="{{ s.reset_day }}" required /></label>
+          <label class="inline">
+            <input name="auto_reset" type="checkbox" {% if s.auto_reset %}checked{% endif %}/> 到期自动重置
+          </label>
+          <label class="full">DD系统命令<textarea name="dd_command" rows="3">{{ s.dd_command }}</textarea></label>
+          <label class="full">PT 盒子安装脚本<textarea name="install_script" rows="5">{{ s.install_script }}</textarea></label>
+          <div class="button-row">
+            <button type="submit">保存修改</button>
+          </div>
+        </form>
+        <div class="button-row">
+          <form method="post" action="/servers/{{ s.id }}/run">
+            <button type="submit">立即执行重置+安装</button>
+          </form>
+          <form method="post" action="/servers/{{ s.id }}/delete" onsubmit="return confirm('确认删除该服务器?')">
+            <button class="danger" type="submit">删除</button>
+          </form>
+        </div>
+      </details>
+      {% else %}
+      <p>暂无服务器。</p>
+      {% endfor %}
+    </section>
+
+    <section class="panel">
+      <h2>任务日志</h2>
+      <div class="logs">
+      {% for log in logs %}
+        <article class="log-card {{ log.status }}">
+          <h3>{{ log.created_at }} | {{ log.server_name }} | {{ log.status }}</h3>
+          <pre>{{ log.output }}</pre>
+        </article>
+      {% else %}
+        <p>暂无日志。</p>
+      {% endfor %}
+      </div>
+    </section>
+  </main>
+</body>
+</html>
