@@ -1,9 +1,11 @@
 import os
 import re
 import secrets
+import shlex
 import sqlite3
 import string
 import threading
+import time
 from contextlib import closing
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -16,6 +18,10 @@ DB_PATH = os.environ.get("VPS_PANEL_DB", "panel.db")
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "5000"))
 TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECONDS", "1800"))
+SSH_RETRY_INTERVAL_SECONDS = int(os.environ.get("SSH_RETRY_INTERVAL_SECONDS", "15"))
+POST_REINSTALL_WAIT_SECONDS = int(os.environ.get("POST_REINSTALL_WAIT_SECONDS", "30"))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
@@ -47,10 +53,18 @@ def init_db():
                 ssh_password TEXT NOT NULL,
                 reset_day INTEGER NOT NULL,
                 auto_reset INTEGER NOT NULL DEFAULT 1,
-                ssh_command_1 TEXT NOT NULL DEFAULT '',
+                last_reset_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS global_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                reset_command TEXT NOT NULL DEFAULT '',
                 ssh_command_2 TEXT NOT NULL DEFAULT '',
                 ssh_command_3 TEXT NOT NULL DEFAULT '',
-                last_reset_at TEXT
+                updated_at TEXT
             )
             """
         )
@@ -68,17 +82,47 @@ def init_db():
             """
         )
 
-        # migration for existing db
-        ensure_column(conn, "servers", "ssh_command_1 TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "servers", "ssh_command_2 TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "servers", "ssh_command_3 TEXT NOT NULL DEFAULT ''")
+        # migration for old db versions
+        ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         conn.commit()
 
 
 def list_servers():
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM servers ORDER BY id").fetchall()
+
+
+def get_server(server_id):
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
+
+
+def get_global_config():
+    with closing(get_conn()) as conn:
+        conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
+        row = conn.execute("SELECT * FROM global_config WHERE id=1").fetchone()
+        conn.commit()
+        return row
+
+
+def update_global_config(reset_command, ssh_command_2, ssh_command_3):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            UPDATE global_config
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, updated_at=?
+            WHERE id=1
+            """,
+            (
+                reset_command.strip(),
+                ssh_command_2.strip(),
+                ssh_command_3.strip(),
+                datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
 
 
 def list_logs(limit=200):
@@ -95,12 +139,12 @@ def list_logs(limit=200):
         ).fetchall()
 
 
-def list_display_rows():
+def list_detail_rows():
     with closing(get_conn()) as conn:
         return conn.execute(
             """
             SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day,
-                   l.summary, l.created_at AS latest_run_at
+                   s.auto_reset, l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
                 SELECT l2.id FROM job_logs l2
@@ -145,11 +189,10 @@ def update_server_password(server_id, new_password):
 
 def generate_root_password(length=16):
     alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def inject_random_password_if_needed(command, server_row, generated_password):
-    # 支持 InstallNET.sh -pwd 'xxx' / -pwd "xxx" / -pwd xxx
     if "InstallNET.sh" not in command or "-pwd" not in command:
         return command, generated_password
 
@@ -157,7 +200,6 @@ def inject_random_password_if_needed(command, server_row, generated_password):
     command = re.sub(r"-pwd\s+'[^']*'", f"-pwd '{pwd}'", command)
     command = re.sub(r'-pwd\s+"[^"]*"', f'-pwd "{pwd}"', command)
     command = re.sub(r"-pwd\s+([^\s'\"]+)", f"-pwd '{pwd}'", command)
-
     update_server_password(server_row["id"], pwd)
     return command, pwd
 
@@ -180,6 +222,49 @@ def should_reset(server_row):
         return True
 
     return not (last.year == now.year and last.month == now.month)
+
+
+def is_reinstall_command(command):
+    return "InstallNET.sh" in command and "-pwd" in command
+
+
+def connect_ssh(server_row, timeout=20):
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        hostname=server_row["ip"],
+        port=server_row["ssh_port"],
+        username=server_row["ssh_user"],
+        password=server_row["ssh_password"],
+        timeout=timeout,
+    )
+    return client
+
+
+def wait_for_ssh_reconnect(server_row, output_lines):
+    output_lines.append("等待服务器重装并重启后重新连线...")
+    deadline = time.time() + SSH_RECONNECT_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        try:
+            client = connect_ssh(server_row, timeout=15)
+            output_lines.append("服务器已重新上线，SSH重连成功")
+            return client
+        except Exception as exc:
+            output_lines.append(f"等待重连中: {exc}")
+            time.sleep(SSH_RETRY_INTERVAL_SECONDS)
+
+    raise TimeoutError("等待服务器重连超时，请检查重装是否成功")
+
+
+def execute_command_and_collect(client, title, command, output_lines):
+    output_lines.append(f"执行 {title}: {command}")
+    _, stdout, stderr = client.exec_command(command)
+    out = stdout.read().decode("utf-8", errors="ignore")
+    err = stderr.read().decode("utf-8", errors="ignore")
+    if out:
+        output_lines.append(f"{title}输出:\n{out}")
+    if err:
+        output_lines.append(f"{title}错误:\n{err}")
 
 
 def extract_summary(server_row, raw_output):
@@ -206,40 +291,54 @@ def extract_summary(server_row, raw_output):
 def run_remote(server_row):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = [f"开始执行重置任务 {title}"]
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
 
     try:
-        client.connect(
-            hostname=server_row["ip"],
-            port=server_row["ssh_port"],
-            username=server_row["ssh_user"],
-            password=server_row["ssh_password"],
-            timeout=20,
-        )
+        mutable_server = dict(server_row)
+        generated_password = None
+        global_cfg = get_global_config()
+
+        reset_command = (global_cfg["reset_command"] or "").strip()
+        ssh_command_2 = (global_cfg["ssh_command_2"] or "").strip()
+        ssh_command_3 = (global_cfg["ssh_command_3"] or "").strip()
+
+        client = connect_ssh(mutable_server)
         output_lines.append("SSH 连接成功")
 
-        generated_password = None
-        mutable_server = dict(server_row)
-
-        for idx in (1, 2, 3):
-            command = (mutable_server.get(f"ssh_command_{idx}") or "").strip()
-            if not command:
-                continue
-
-            command, generated_password = inject_random_password_if_needed(command, mutable_server, generated_password)
+        if reset_command:
+            reset_command, generated_password = inject_random_password_if_needed(
+                reset_command,
+                mutable_server,
+                generated_password,
+            )
             if generated_password:
                 mutable_server["ssh_password"] = generated_password
                 output_lines.append(f"检测到DD重装命令，已自动生成新root密码: {generated_password}")
 
-            output_lines.append(f"执行 SSH 任务代码{idx}: {command}")
-            _, stdout, stderr = client.exec_command(command)
-            out = stdout.read().decode("utf-8", errors="ignore")
-            err = stderr.read().decode("utf-8", errors="ignore")
-            if out:
-                output_lines.append(f"代码{idx}输出:\n{out}")
-            if err:
-                output_lines.append(f"代码{idx}错误:\n{err}")
+            if is_reinstall_command(reset_command):
+                wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
+                output_lines.append(f"执行 重置任务(后台): {reset_command}")
+                client.exec_command(wrapped)
+                output_lines.append("重置任务已后台启动，等待后续重连")
+                client.close()
+                client = None
+                time.sleep(POST_REINSTALL_WAIT_SECONDS)
+                if ssh_command_2 or ssh_command_3:
+                    client = wait_for_ssh_reconnect(mutable_server, output_lines)
+            else:
+                execute_command_and_collect(client, "重置任务", reset_command, output_lines)
+
+        if ssh_command_2:
+            if client is None:
+                client = connect_ssh(mutable_server)
+                output_lines.append("执行 SSH任务2 前重新建立SSH连接成功")
+            execute_command_and_collect(client, "SSH任务2", ssh_command_2, output_lines)
+
+        if ssh_command_3:
+            if client is None:
+                client = connect_ssh(mutable_server)
+                output_lines.append("执行 SSH任务3 前重新建立SSH连接成功")
+            execute_command_and_collect(client, "SSH任务3", ssh_command_3, output_lines)
 
         output_lines.append("任务执行完成")
         all_output = "\n\n".join(output_lines)
@@ -252,12 +351,12 @@ def run_remote(server_row):
         summary = extract_summary(locals().get("mutable_server", dict(server_row)), all_output)
         save_log(server_row["id"], "failed", summary, all_output)
     finally:
-        client.close()
+        if client:
+            client.close()
 
 
 def run_for_server(server_id):
-    with closing(get_conn()) as conn:
-        row = conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone()
+    row = get_server(server_id)
     if row:
         threading.Thread(target=run_remote, args=(row,), daemon=True).start()
 
@@ -271,13 +370,47 @@ def check_scheduled_jobs():
 
 
 @app.route("/")
-def index():
+def home():
+    return redirect(url_for("details_page"))
+
+
+@app.route("/details")
+def details_page():
+    rows = list_detail_rows()
+    total = len(rows)
+    success = len([r for r in rows if r["status"] == "success"])
+    failed = len([r for r in rows if r["status"] == "failed"])
+    never = len([r for r in rows if not r["latest_run_at"]])
     return render_template(
-        "index.html",
-        servers=list_servers(),
-        display_rows=list_display_rows(),
-        logs=list_logs(),
+        "details.html",
+        rows=rows,
+        total=total,
+        success=success,
+        failed=failed,
+        never=never,
     )
+
+
+@app.route("/settings")
+def settings_page():
+    return render_template(
+        "settings.html",
+        servers=list_servers(),
+        logs=list_logs(),
+        global_cfg=get_global_config(),
+    )
+
+
+@app.route("/global-tasks", methods=["POST"])
+def update_global_tasks():
+    form = request.form
+    update_global_config(
+        form.get("reset_command", ""),
+        form.get("ssh_command_2", ""),
+        form.get("ssh_command_3", ""),
+    )
+    flash("全局任务配置已更新", "success")
+    return redirect(url_for("settings_page"))
 
 
 @app.route("/servers", methods=["POST"])
@@ -286,10 +419,8 @@ def add_server():
     with closing(get_conn()) as conn:
         conn.execute(
             """
-            INSERT INTO servers(
-                name, ip, ssh_port, ssh_user, ssh_password, reset_day,
-                auto_reset, ssh_command_1, ssh_command_2, ssh_command_3
-            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset)
+            VALUES(?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -299,14 +430,11 @@ def add_server():
                 form["ssh_password"],
                 int(form["reset_day"]),
                 1 if form.get("auto_reset") == "on" else 0,
-                form.get("ssh_command_1", "").strip(),
-                form.get("ssh_command_2", "").strip(),
-                form.get("ssh_command_3", "").strip(),
             ),
         )
         conn.commit()
     flash("服务器已添加", "success")
-    return redirect(url_for("index"))
+    return redirect(url_for("settings_page"))
 
 
 @app.route("/servers/<int:server_id>/update", methods=["POST"])
@@ -316,8 +444,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?,
-                reset_day=?, auto_reset=?, ssh_command_1=?, ssh_command_2=?, ssh_command_3=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, auto_reset=?
             WHERE id=?
             """,
             (
@@ -328,15 +455,12 @@ def update_server(server_id):
                 form["ssh_password"],
                 int(form["reset_day"]),
                 1 if form.get("auto_reset") == "on" else 0,
-                form.get("ssh_command_1", "").strip(),
-                form.get("ssh_command_2", "").strip(),
-                form.get("ssh_command_3", "").strip(),
                 server_id,
             ),
         )
         conn.commit()
     flash("服务器信息已更新", "success")
-    return redirect(url_for("index"))
+    return redirect(url_for("settings_page"))
 
 
 @app.route("/servers/<int:server_id>/delete", methods=["POST"])
@@ -346,14 +470,14 @@ def delete_server(server_id):
         conn.execute("DELETE FROM job_logs WHERE server_id = ?", (server_id,))
         conn.commit()
     flash("服务器已删除", "success")
-    return redirect(url_for("index"))
+    return redirect(url_for("settings_page"))
 
 
 @app.route("/servers/<int:server_id>/run", methods=["POST"])
 def run_now(server_id):
     run_for_server(server_id)
     flash("任务已开始执行，请稍后查看结果", "success")
-    return redirect(url_for("index"))
+    return redirect(url_for("details_page"))
 
 
 def start_scheduler():

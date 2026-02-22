@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% set active = 'details' %}
+{% set title = '服务器详情' %}
+{% block content %}
+<section class="stats-grid">
+  <article class="stat-card focus"><h3>{{ total }}</h3><p>总服务器</p></article>
+  <article class="stat-card ok"><h3>{{ success }}</h3><p>最近任务成功</p></article>
+  <article class="stat-card bad"><h3>{{ failed }}</h3><p>最近任务失败</p></article>
+  <article class="stat-card"><h3>{{ never }}</h3><p>从未执行</p></article>
+</section>
+
+<section class="panel">
+  <h2>服务器详情</h2>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>名称</th><th>IP</th><th>root密码</th><th>重置日</th><th>状态</th><th>最后执行</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td>{{ row.ip }}</td>
+        <td>{{ row.ssh_password }}</td>
+        <td>{{ row.reset_day }}日 01:00</td>
+        <td>
+          {% if row.status == 'success' %}<span class="badge ok">正常</span>
+          {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
+          {% else %}<span class="badge">未执行</span>{% endif %}
+        </td>
+        <td>{{ row.latest_run_at or '-' }}</td>
+        <td>
+          <form method="post" action="/servers/{{ row.id }}/run">
+            <button type="submit">立即执行</button>
+          </form>
+        </td>
+      </tr>
+      <tr>
+        <td colspan="7"><pre>{{ row.summary or '暂无摘要，先执行一次任务。' }}</pre></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7">暂无服务器</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
