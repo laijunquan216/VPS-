@@ -98,3 +98,24 @@ wget --no-check-certificate -qO InstallNET.sh 'https://raw.githubusercontent.com
 
 1. DD 系统命令可能导致机器重启、断开 SSH，这是预期行为。
 2. 受目标机器网络、镜像源、系统兼容性影响，DD/安装脚本可能失败，请从日志排查。
+
+
+## 常见安装问题
+
+### 报错：`ensurepip is not available` / `python3-venv` 缺失
+
+这个项目的安装脚本现在会自动尝试安装 `python3-venv` 和 `python3-pip`（Debian/Ubuntu 会走 `apt-get`）。
+如果你的系统源有问题，也可以手动执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-venv python3-pip
+```
+
+然后重新执行：
+
+```bash
+cd /tmp/vps-panel-src
+sudo bash install_panel.sh
+```
+

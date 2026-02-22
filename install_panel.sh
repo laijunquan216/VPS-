@@ -8,10 +8,32 @@ PANEL_HOST=${PANEL_HOST:-0.0.0.0}
 CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-60}
 FLASK_SECRET=${FLASK_SECRET:-change-me-please}
 
+install_python_venv_deps() {
+  if "$PYTHON_BIN" -m ensurepip --version >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "[INFO] 检测到 ensurepip 不可用，尝试自动安装 python3-venv/python3-pip ..."
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y python3-venv python3-pip
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y python3 python3-pip
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y python3 python3-pip
+  else
+    echo "[ERROR] 无法自动安装 Python 依赖，请手动安装 python3-venv 和 python3-pip 后重试。"
+    exit 1
+  fi
+}
+
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "[ERROR] python3 未安装，请先安装 Python 3.10+"
   exit 1
 fi
+
+install_python_venv_deps
 
 mkdir -p "$APP_DIR"
 cp -f app.py requirements.txt "$APP_DIR"/
