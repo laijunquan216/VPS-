@@ -25,6 +25,7 @@ POST_REINSTALL_WAIT_SECONDS = int(os.environ.get("POST_REINSTALL_WAIT_SECONDS", 
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
+ANSI_ESCAPE_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
 
 
 def get_conn():
@@ -231,6 +232,14 @@ def normalize_shell_command(command):
     )
 
 
+def sanitize_terminal_text(text):
+    if not text:
+        return ""
+    text = ANSI_ESCAPE_RE.sub("", text)
+    text = text.replace("\r", "")
+    return text
+
+
 def should_reset(server_row):
     now = datetime.now(TIMEZONE)
     if not server_row["auto_reset"]:
@@ -291,28 +300,38 @@ def execute_command_and_collect(client, title, command, output_lines):
 
     wrapped_command = f"export TERM=xterm; {command}"
     _, stdout, stderr = client.exec_command(wrapped_command)
-    out = stdout.read().decode("utf-8", errors="ignore")
-    err = stderr.read().decode("utf-8", errors="ignore")
+    out = sanitize_terminal_text(stdout.read().decode("utf-8", errors="ignore"))
+    err = sanitize_terminal_text(stderr.read().decode("utf-8", errors="ignore"))
 
     if out:
         output_lines.append(f"{title}输出:\n{out}")
 
     if err:
+        benign_patterns = (
+            "tput: No value for $TERM",
+            "检测到虚拟化环境,跳过部分硬件优化",
+            "建议重启系统以确保所有优化生效",
+        )
+
         benign_lines = []
         real_error_lines = []
         for line in err.splitlines():
-            if "tput: No value for $TERM" in line:
+            line = line.strip()
+            if not line:
+                continue
+            if any(pattern in line for pattern in benign_patterns):
                 benign_lines.append(line)
-            elif line.strip():
+            else:
                 real_error_lines.append(line)
 
         if real_error_lines:
             output_lines.append(f"{title}错误:\n" + "\n".join(real_error_lines))
-        elif benign_lines:
-            output_lines.append(f"{title}提示: 终端变量告警已忽略({len(benign_lines)}条)")
+        if benign_lines:
+            output_lines.append(f"{title}提示:\n" + "\n".join(dict.fromkeys(benign_lines)))
 
 
 def extract_summary(server_row, raw_output):
+    raw_output = sanitize_terminal_text(raw_output)
     ip_match = re.search(r"IP\s*address\s*:\s*([\d\.]+)", raw_output, flags=re.IGNORECASE)
     pass_match = re.search(r"Your new root passw(?:o|or)t\s+is\s*([^\n\r]+)", raw_output, flags=re.IGNORECASE)
 

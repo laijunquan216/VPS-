@@ -104,7 +104,7 @@ wget --no-check-certificate -qO InstallNET.sh 'https://raw.githubusercontent.com
 - 当重置任务是 `InstallNET.sh -pwd` 时，会自动生成随机 root 密码并回写到面板。
 - 重装后重连会优先尝试新生成密码，同时回退尝试旧密码；若最终可登录密码与预设不同，会自动回写面板。
 - 系统会自动纠正常见中文引号（“”‘’），避免命令粘贴后执行异常。
-- SSH任务执行时会自动设置 `TERM=xterm`，并过滤 `tput: No value for $TERM` 这类非致命告警。
+- SSH任务执行时会自动设置 `TERM=xterm`，并清理 ANSI 颜色控制符；`tput`/优化建议等非致命告警会归类为提示，不再误报为错误。
 - SSH任务2中的 `-p` 参数会在每次执行时自动替换为随机 12 位密码，避免固定密码。
 - 服务器详情摘要支持“一键复制结果”。
 - `服务器详情` 页面展示运行状态、摘要信息和一键执行入口。
