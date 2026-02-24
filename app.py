@@ -8,11 +8,23 @@ import threading
 import time
 from contextlib import closing
 from datetime import datetime
+from functools import wraps
+from io import BytesIO
 from zoneinfo import ZoneInfo
 
 import paramiko
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    flash,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
+from werkzeug.security import check_password_hash, generate_password_hash
 
 DB_PATH = os.environ.get("VPS_PANEL_DB", "panel.db")
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
@@ -65,6 +77,7 @@ def init_db():
                 reset_command TEXT NOT NULL DEFAULT '',
                 ssh_command_2 TEXT NOT NULL DEFAULT '',
                 ssh_command_3 TEXT NOT NULL DEFAULT '',
+                panel_password_hash TEXT,
                 updated_at TEXT
             )
             """
@@ -83,10 +96,16 @@ def init_db():
             """
         )
 
-        # migration for old db versions
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "panel_password_hash TEXT")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
+        current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
+        if not current_hash:
+            conn.execute(
+                "UPDATE global_config SET panel_password_hash = ?, updated_at = ? WHERE id = 1",
+                (generate_password_hash("admin"), datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+            )
         conn.commit()
 
 
@@ -126,6 +145,23 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3):
         conn.commit()
 
 
+def verify_panel_password(password):
+    global_cfg = get_global_config()
+    stored_hash = global_cfg["panel_password_hash"] if global_cfg else None
+    if not stored_hash:
+        return password == "admin"
+    return check_password_hash(stored_hash, password)
+
+
+def update_panel_password(new_password):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET panel_password_hash = ?, updated_at = ? WHERE id = 1",
+            (generate_password_hash(new_password), datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+
 def list_logs(limit=200):
     with closing(get_conn()) as conn:
         return conn.execute(
@@ -138,6 +174,25 @@ def list_logs(limit=200):
             """,
             (limit,),
         ).fetchall()
+
+
+def list_logs_grouped_by_server(limit_per_server=50):
+    with closing(get_conn()) as conn:
+        servers = conn.execute("SELECT id, name, ip FROM servers ORDER BY id").fetchall()
+        grouped = []
+        for server in servers:
+            logs = conn.execute(
+                """
+                SELECT id, status, summary, output, created_at
+                FROM job_logs
+                WHERE server_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (server["id"], limit_per_server),
+            ).fetchall()
+            grouped.append({"server": server, "logs": logs})
+        return grouped
 
 
 def list_detail_rows():
@@ -158,6 +213,91 @@ def list_detail_rows():
         ).fetchall()
 
 
+def export_backup_payload():
+    with closing(get_conn()) as conn:
+        servers = [dict(row) for row in conn.execute("SELECT * FROM servers ORDER BY id").fetchall()]
+        logs = [dict(row) for row in conn.execute("SELECT * FROM job_logs ORDER BY id").fetchall()]
+        global_cfg = conn.execute("SELECT * FROM global_config WHERE id = 1").fetchone()
+
+    payload = {
+        "meta": {
+            "exported_at": datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+            "version": 1,
+        },
+        "global_config": dict(global_cfg) if global_cfg else {},
+        "servers": servers,
+        "job_logs": logs,
+    }
+    return payload
+
+
+def restore_backup_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("备份文件格式无效")
+
+    servers = payload.get("servers")
+    logs = payload.get("job_logs")
+    global_cfg = payload.get("global_config")
+
+    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict):
+        raise ValueError("备份文件缺少必要字段")
+
+    with closing(get_conn()) as conn:
+        conn.execute("DELETE FROM job_logs")
+        conn.execute("DELETE FROM servers")
+        conn.execute("DELETE FROM global_config")
+
+        conn.execute(
+            """
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?)
+            """,
+            (
+                global_cfg.get("reset_command", ""),
+                global_cfg.get("ssh_command_2", ""),
+                global_cfg.get("ssh_command_3", ""),
+                global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
+                global_cfg.get("updated_at"),
+            ),
+        )
+
+        for server in servers:
+            conn.execute(
+                """
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, last_reset_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    server.get("id"),
+                    server.get("name", ""),
+                    server.get("ip", ""),
+                    int(server.get("ssh_port", 22)),
+                    server.get("ssh_user", "root") or "root",
+                    server.get("ssh_password", ""),
+                    int(server.get("reset_day", 1)),
+                    int(server.get("auto_reset", 0)),
+                    server.get("last_reset_at"),
+                ),
+            )
+
+        for log in logs:
+            conn.execute(
+                """
+                INSERT INTO job_logs(id, server_id, status, summary, output, created_at)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    log.get("id"),
+                    log.get("server_id"),
+                    log.get("status", "failed"),
+                    log.get("summary", ""),
+                    log.get("output", ""),
+                    log.get("created_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+        conn.commit()
+
+
 def save_log(server_id, status, summary, output):
     with closing(get_conn()) as conn:
         cur = conn.execute(
@@ -172,8 +312,6 @@ def save_log(server_id, status, summary, output):
         )
         conn.commit()
         return cur.lastrowid
-
-
 
 
 def update_log(log_id, status, summary, output):
@@ -223,9 +361,7 @@ def inject_random_password_if_needed(command, server_row, generated_password):
     return command, pwd
 
 
-
 def inject_random_ssh2_password_if_needed(command):
-    # 针对 PT 安装脚本自动生成 12 位随机面板密码
     if "qb_fb_vertex_installer.sh" not in command:
         return command, None
 
@@ -241,13 +377,7 @@ def inject_random_ssh2_password_if_needed(command):
 
 
 def normalize_shell_command(command):
-    # 兼容从网页复制时出现的中文引号
-    return (
-        command.replace("“", '"')
-        .replace("”", '"')
-        .replace("‘", "'")
-        .replace("’", "'")
-    )
+    return command.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
 
 def sanitize_terminal_text(text):
@@ -472,12 +602,59 @@ def check_scheduled_jobs():
             run_for_server(row["id"])
 
 
+def login_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login_page"))
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@app.before_request
+def require_login():
+    public_endpoints = {"login_page", "login_submit", "static"}
+    if request.endpoint in public_endpoints:
+        return None
+    if not session.get("logged_in"):
+        return redirect(url_for("login_page"))
+    return None
+
+
+@app.route("/login", methods=["GET"])
+def login_page():
+    if session.get("logged_in"):
+        return redirect(url_for("details_page"))
+    return render_template("login.html", title="面板登录")
+
+
+@app.route("/login", methods=["POST"])
+def login_submit():
+    password = request.form.get("password", "")
+    if verify_panel_password(password):
+        session["logged_in"] = True
+        flash("登录成功", "success")
+        return redirect(url_for("details_page"))
+    flash("密码错误", "error")
+    return redirect(url_for("login_page"))
+
+
+@app.route("/logout", methods=["POST"])
+def logout_submit():
+    session.clear()
+    flash("已退出登录", "success")
+    return redirect(url_for("login_page"))
+
+
 @app.route("/")
+@login_required
 def home():
     return redirect(url_for("details_page"))
 
 
 @app.route("/details")
+@login_required
 def details_page():
     rows = list_detail_rows()
     total = len(rows)
@@ -495,16 +672,85 @@ def details_page():
 
 
 @app.route("/settings")
+@login_required
 def settings_page():
     return render_template(
         "settings.html",
         servers=list_servers(),
-        logs=list_logs(),
+        logs_grouped=list_logs_grouped_by_server(),
         global_cfg=get_global_config(),
     )
 
 
+@app.route("/management")
+@login_required
+def management_page():
+    return render_template("management.html", title="面板管理")
+
+
+@app.route("/management/change-password", methods=["POST"])
+@login_required
+def change_panel_password():
+    current_password = request.form.get("current_password", "")
+    new_password = request.form.get("new_password", "")
+    confirm_password = request.form.get("confirm_password", "")
+
+    if not verify_panel_password(current_password):
+        flash("当前密码不正确", "error")
+        return redirect(url_for("management_page"))
+
+    if len(new_password) < 4:
+        flash("新密码至少 4 位", "error")
+        return redirect(url_for("management_page"))
+
+    if new_password != confirm_password:
+        flash("两次输入的新密码不一致", "error")
+        return redirect(url_for("management_page"))
+
+    update_panel_password(new_password)
+    flash("面板登录密码修改成功", "success")
+    return redirect(url_for("management_page"))
+
+
+@app.route("/management/backup", methods=["GET"])
+@login_required
+def download_backup():
+    import json
+
+    payload = export_backup_payload()
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    buf = BytesIO(content)
+    ts = datetime.now(TIMEZONE).strftime("%Y%m%d-%H%M%S")
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f"vps-panel-backup-{ts}.json",
+        mimetype="application/json",
+    )
+
+
+@app.route("/management/restore", methods=["POST"])
+@login_required
+def restore_backup():
+    import json
+
+    file = request.files.get("backup_file")
+    if not file or not file.filename:
+        flash("请先选择备份文件", "error")
+        return redirect(url_for("management_page"))
+
+    try:
+        payload = json.load(file.stream)
+        restore_backup_payload(payload)
+        flash("数据恢复成功", "success")
+    except Exception as exc:
+        flash(f"数据恢复失败: {exc}", "error")
+
+    return redirect(url_for("management_page"))
+
+
 @app.route("/global-tasks", methods=["POST"])
+@login_required
 def update_global_tasks():
     form = request.form
     update_global_config(
@@ -517,6 +763,7 @@ def update_global_tasks():
 
 
 @app.route("/servers", methods=["POST"])
+@login_required
 def add_server():
     form = request.form
     with closing(get_conn()) as conn:
@@ -541,6 +788,7 @@ def add_server():
 
 
 @app.route("/servers/<int:server_id>/update", methods=["POST"])
+@login_required
 def update_server(server_id):
     form = request.form
     with closing(get_conn()) as conn:
@@ -567,6 +815,7 @@ def update_server(server_id):
 
 
 @app.route("/servers/<int:server_id>/delete", methods=["POST"])
+@login_required
 def delete_server(server_id):
     with closing(get_conn()) as conn:
         conn.execute("DELETE FROM servers WHERE id = ?", (server_id,))
@@ -577,6 +826,7 @@ def delete_server(server_id):
 
 
 @app.route("/servers/<int:server_id>/run", methods=["POST"])
+@login_required
 def run_now(server_id):
     run_for_server(server_id)
     flash("任务已开始执行，请稍后查看结果", "success")

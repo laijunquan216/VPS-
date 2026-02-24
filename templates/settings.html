@@ -59,14 +59,23 @@
 </section>
 
 <section class="panel">
-  <h2>完整任务日志</h2>
-  {% for log in logs %}
-  <article class="log-card {{ log.status }}">
-    <h3>{{ log.created_at }} | {{ log.server_name }} | {{ log.status }}</h3>
-    <pre>{{ log.output }}</pre>
-  </article>
+  <h2>完整任务日志（按服务器分类）</h2>
+  {% for item in logs_grouped %}
+  <details class="log-group">
+    <summary>{{ item.server.name }} ({{ item.server.ip }}) - {{ item.logs|length }} 条日志</summary>
+    {% if item.logs %}
+      {% for log in item.logs %}
+      <article class="log-card {{ log.status }}">
+        <h3>{{ log.created_at }} | {{ log.status }}</h3>
+        <pre>{{ log.output }}</pre>
+      </article>
+      {% endfor %}
+    {% else %}
+      <p>暂无日志。</p>
+    {% endif %}
+  </details>
   {% else %}
-  <p>暂无日志。</p>
+  <p>暂无服务器。</p>
   {% endfor %}
 </section>
 {% endblock %}

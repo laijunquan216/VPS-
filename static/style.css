@@ -25,3 +25,15 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
 .summary-toolbar{display:flex;justify-content:flex-end;margin-bottom:8px}
 .copy-btn{background:#0f172a;color:#fff;padding:8px 12px;border-radius:8px;border:none;cursor:pointer}
 .copy-btn:hover{opacity:.9}
+
+
+.ghost-btn{background:#fff;color:#334155;border:1px solid #cbd5e1;padding:8px 12px}
+.flash.error{background:#fee2e2;color:#991b1b}
+.log-group{margin-bottom:10px;border:1px solid #e5e7eb;border-radius:10px;padding:8px;background:#f8fafc}
+.log-group > summary{cursor:pointer;font-weight:700}
+.button-link{display:inline-block;background:var(--primary);color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px}
+.login-page{display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-wrap{width:100%;max-width:420px;padding:16px}
+.login-card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:20px}
+.login-card h1{margin:0 0 8px 0}
+.login-card p{margin:0 0 14px 0;color:var(--muted)}
