@@ -106,8 +106,12 @@ wget --no-check-certificate -qO InstallNET.sh 'https://raw.githubusercontent.com
 - Agent 安装过程中 systemd 可能输出 `Created symlink ...`，该信息为正常行为（代表定时器已启用），面板会按“提示”而非“错误”显示。
 - 流量统计周期按服务器重置日计算（北京时间 01:00 切周期），即使当月未实际重置也会按该周期累计。
 - 需在全局任务里填写“面板公网地址（Agent上报地址）”，例如 `http://你的面板IP:5000`，确保目标 VPS 可回连。
+<<<<<<< codex/create-vps-management-control-panel-tlwv78
 - 支持重置结果邮件通知：可配置 SMTP（host/port/user/password）与收件人，并支持“邮箱测试”按钮。
 - 定时重置时邮件会按批次合并发送：同一时刻触发的服务器在全部完成后统一发一封汇总邮件（成功/失败/续租跳过）。
+=======
+- 支持重置结果邮件通知：可配置 SMTP（host/port/user/password）与收件人，服务器重置成功或失败后自动发邮件。
+>>>>>>> main
 - 当重置任务是 `InstallNET.sh -pwd` 时，会自动生成随机 root 密码并回写到面板。
 - 重装后重连会优先尝试新生成密码，同时回退尝试旧密码；若最终可登录密码与预设不同，会自动回写面板。
 - 系统会自动纠正常见中文引号（“”‘’），避免命令粘贴后执行异常。
