@@ -25,7 +25,7 @@ POST_REINSTALL_WAIT_SECONDS = int(os.environ.get("POST_REINSTALL_WAIT_SECONDS", 
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
-ANSI_ESCAPE_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|\([A-Za-z0-9])")
 
 
 def get_conn():
@@ -160,7 +160,7 @@ def list_detail_rows():
 
 def save_log(server_id, status, summary, output):
     with closing(get_conn()) as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO job_logs(server_id, status, summary, output, created_at) VALUES(?,?,?,?,?)",
             (
                 server_id,
@@ -168,6 +168,24 @@ def save_log(server_id, status, summary, output):
                 summary,
                 output,
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+
+
+def update_log(log_id, status, summary, output):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE job_logs SET status=?, summary=?, output=?, created_at=? WHERE id=?",
+            (
+                status,
+                summary,
+                output,
+                datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                log_id,
             ),
         )
         conn.commit()
@@ -236,6 +254,8 @@ def sanitize_terminal_text(text):
     if not text:
         return ""
     text = ANSI_ESCAPE_RE.sub("", text)
+    text = text.replace("\x1b(B", "")
+    text = text.replace("\x1b[m", "")
     text = text.replace("\r", "")
     return text
 
@@ -311,6 +331,7 @@ def execute_command_and_collect(client, title, command, output_lines):
             "tput: No value for $TERM",
             "检测到虚拟化环境,跳过部分硬件优化",
             "建议重启系统以确保所有优化生效",
+            "如果无法打开网页，可能是防火墙没有放通端口",
         )
 
         benign_lines = []
@@ -352,7 +373,7 @@ def extract_summary(server_row, raw_output):
     return "\n".join(lines)
 
 
-def run_remote(server_row):
+def run_remote(server_row, running_log_id):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = [f"开始执行重置任务 {title}"]
     client = None
@@ -419,13 +440,13 @@ def run_remote(server_row):
         output_lines.append("任务执行完成")
         all_output = "\n\n".join(output_lines)
         summary = extract_summary(mutable_server, all_output)
-        save_log(server_row["id"], "success", summary, all_output)
+        update_log(running_log_id, "success", summary, all_output)
         update_last_reset(server_row["id"])
     except Exception as exc:
         output_lines.append(f"任务失败: {exc}")
         all_output = "\n\n".join(output_lines)
         summary = extract_summary(locals().get("mutable_server", dict(server_row)), all_output)
-        save_log(server_row["id"], "failed", summary, all_output)
+        update_log(running_log_id, "failed", summary, all_output)
     finally:
         if client:
             client.close()
@@ -434,7 +455,13 @@ def run_remote(server_row):
 def run_for_server(server_id):
     row = get_server(server_id)
     if row:
-        threading.Thread(target=run_remote, args=(row,), daemon=True).start()
+        log_id = save_log(
+            row["id"],
+            "running",
+            "任务执行中，请稍后刷新查看结果...",
+            f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中",
+        )
+        threading.Thread(target=run_remote, args=(row, log_id), daemon=True).start()
 
 
 def check_scheduled_jobs():

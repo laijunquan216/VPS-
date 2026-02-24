@@ -27,6 +27,7 @@
         <td>
           {% if row.status == 'success' %}<span class="badge ok">正常</span>
           {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
+          {% elif row.status == 'running' %}<span class="badge running">执行中</span>
           {% else %}<span class="badge">未执行</span>{% endif %}
         </td>
         <td>{{ row.latest_run_at or '-' }}</td>
