@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title or 'VPS 面板' }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">VPS Control <span>Pro</span></div>
+    <nav>
+      <a class="nav-link {% if active == 'details' %}active{% endif %}" href="{{ url_for('details_page') }}">服务器详情</a>
+      <a class="nav-link {% if active == 'settings' %}active{% endif %}" href="{{ url_for('settings_page') }}">服务器设置</a>
+      <a class="nav-link {% if active == 'management' %}active{% endif %}" href="{{ url_for('management_page') }}">面板管理</a>
+    </nav>
+    <form method="post" action="{{ url_for('logout_submit') }}">
+      <button type="submit" class="ghost-btn">退出登录</button>
+    </form>
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-wrap">
+          {% for category, msg in messages %}
+            <div class="flash {{ category }}">{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
