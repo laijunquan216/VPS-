@@ -1,0 +1,108 @@
+{% extends 'base.html' %}
+{% set active = 'settings' %}
+{% set title = '服务器设置' %}
+{% block content %}
+<section class="panel">
+  <h2>服务器设置：全局任务（所有服务器共用）</h2>
+  <form method="post" action="/global-tasks" class="grid-form">
+    <label class="full">重置任务代码（单独配置）
+      <textarea name="reset_command" rows="4" placeholder="例如 InstallNET.sh ...">{{ global_cfg.reset_command }}</textarea>
+    </label>
+    <label class="full">SSH任务2（安装PT环境）
+      <textarea name="ssh_command_2" rows="4">{{ global_cfg.ssh_command_2 }}</textarea>
+    </label>
+    <label class="full">SSH任务3（例如 reboot）
+      <textarea name="ssh_command_3" rows="3">{{ global_cfg.ssh_command_3 }}</textarea>
+    </label>
+    <label>面板公网地址（Agent上报地址）
+      <input name="panel_base_url" placeholder="例如 http://1.2.3.4:5000" value="{{ global_cfg.panel_base_url }}" />
+    </label>
+    <label class="full">重装后 Agent 安装命令（可选）
+      <textarea name="agent_install_command" rows="3" placeholder="例如 curl -fsSL https://example.com/install-agent.sh | bash -s -- --id xxx --key yyy">{{ global_cfg.agent_install_command }}</textarea>
+      <p class="hint">重装后会先自动安装内置上报 Agent（上传到本面板），这里可选填额外命令。支持变量：{ip}、{name}、{ssh_user}</p>
+    </label>
+        <label class="full">邮件通知（服务器重置成功/失败）</label>
+    <label class="inline"><input name="notify_email_enabled" type="checkbox" {% if global_cfg.notify_email_enabled %}checked{% endif %}/> 启用邮件通知</label>
+    <label>SMTP Host<input name="smtp_host" placeholder="smtp.example.com" value="{{ global_cfg.smtp_host }}" /></label>
+    <label>SMTP Port<input name="smtp_port" type="number" value="{{ global_cfg.smtp_port or 587 }}" /></label>
+    <label>SMTP User<input name="smtp_user" value="{{ global_cfg.smtp_user }}" /></label>
+    <label>SMTP Password<input type="password" name="smtp_password" value="{{ global_cfg.smtp_password }}" /></label>
+    <label>发件人邮箱<input name="smtp_from" placeholder="panel@example.com" value="{{ global_cfg.smtp_from }}" /></label>
+    <label>收件人邮箱<input name="notify_email_to" placeholder="you@example.com" value="{{ global_cfg.notify_email_to }}" /></label>
+
+    <button type="submit">保存全局任务</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>服务器设置：新增服务器</h2>
+  <form method="post" action="/servers" class="grid-form">
+    <label>名称<input name="name" required /></label>
+    <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
+    <label>IP<input name="ip" required /></label>
+    <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
+    <label>SSH用户<input name="ssh_user" value="root" required /></label>
+    <label>root密码<input name="ssh_password" type="password" required /></label>
+    <label>每月重置日<input name="reset_day" type="number" min="1" max="31" required /></label>
+    <label>重置时间-时<input name="reset_hour" type="number" min="0" max="23" value="1" required /></label>
+    <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="0" required /></label>
+    <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="2" required /></label>
+    <label>重试退避秒数<input name="retry_backoff_seconds" value="60,180" placeholder="例如 60,180" /></label>
+    <label class="inline"><input name="auto_reset" type="checkbox" checked /> 到期自动重置</label>
+    <button type="submit">添加服务器</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>服务器配置列表</h2>
+  {% for s in servers %}
+  <details>
+    <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 排序序号: {{ s.sort_order }} | 每月{{ s.reset_day }}日 {{ "%02d"|format(s.reset_hour or 1) }}:{{ "%02d"|format(s.reset_minute or 0) }} | 重试: {{ s.max_retries }}次 / 退避 {{ s.retry_backoff_seconds }} | 自动重置开关: {{ '开' if s.auto_reset else '关' }} | 续租状态: {{ '续租中（跳过定时重置）' if s.is_renewed else '未续租' }}</summary>
+    <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
+      <label>名称<input name="name" value="{{ s.name }}" required /></label>
+      <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
+      <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
+      <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
+      <label>SSH用户<input name="ssh_user" value="{{ s.ssh_user }}" required /></label>
+      <label>root密码<input name="ssh_password" type="password" value="{{ s.ssh_password }}" required /></label>
+      <label>每月重置日<input name="reset_day" type="number" min="1" max="31" value="{{ s.reset_day }}" required /></label>
+      <label>重置时间-时<input name="reset_hour" type="number" min="0" max="23" value="{{ s.reset_hour or 1 }}" required /></label>
+      <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="{{ s.reset_minute or 0 }}" required /></label>
+      <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="{{ s.max_retries or 2 }}" required /></label>
+      <label>重试退避秒数<input name="retry_backoff_seconds" value="{{ s.retry_backoff_seconds or "60,180" }}" /></label>
+      <label class="inline"><input name="auto_reset" type="checkbox" {% if s.auto_reset %}checked{% endif %}/> 到期自动重置</label>
+      <p class="hint">说明：当“服务器详情”里切到“续租中”时，即使这里是开启，也会跳过该服务器的定时重置。</p>
+      <div class="button-row"><button type="submit">保存</button></div>
+    </form>
+    <div class="button-row">
+      <form method="post" action="/servers/{{ s.id }}/delete" onsubmit="return confirm('确认删除?')">
+        <button class="danger" type="submit">删除</button>
+      </form>
+    </div>
+  </details>
+  {% else %}
+  <p>暂无服务器。</p>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <h2>完整任务日志（按服务器分类）</h2>
+  {% for item in logs_grouped %}
+  <details class="log-group">
+    <summary>{{ item.server.name }} ({{ item.server.ip }}) - {{ item.logs|length }} 条日志</summary>
+    {% if item.logs %}
+      {% for log in item.logs %}
+      <article class="log-card {{ log.status }}">
+        <h3>{{ log.created_at }} | {{ log.status }}</h3>
+        <pre>{{ log.output }}</pre>
+      </article>
+      {% endfor %}
+    {% else %}
+      <p>暂无日志。</p>
+    {% endif %}
+  </details>
+  {% else %}
+  <p>暂无服务器。</p>
+  {% endfor %}
+</section>
+{% endblock %}
