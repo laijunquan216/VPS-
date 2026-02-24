@@ -1391,14 +1391,22 @@ def details_page():
         item["traffic_total_text"] = format_bytes(upload + download)
         normalized_rows.append(item)
 
+    rented_rows = [r for r in normalized_rows if r["is_rented"]]
+    unrented_rows = [r for r in normalized_rows if not r["is_rented"]]
+
     total = len(normalized_rows)
+    rented_count = len(rented_rows)
+    unrented_count = len(unrented_rows)
     success = len([r for r in normalized_rows if r["status"] == "success"])
     failed = len([r for r in normalized_rows if r["status"] == "failed"])
     never = len([r for r in normalized_rows if not r["latest_run_at"]])
     return render_template(
         "details.html",
-        rows=normalized_rows,
+        rented_rows=rented_rows,
+        unrented_rows=unrented_rows,
         total=total,
+        rented_count=rented_count,
+        unrented_count=unrented_count,
         success=success,
         failed=failed,
         never=never,
