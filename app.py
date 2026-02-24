@@ -140,6 +140,34 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_key TEXT NOT NULL UNIQUE,
+                scheduled_for TEXT NOT NULL,
+                notified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_batch_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_key TEXT NOT NULL,
+                server_id INTEGER NOT NULL,
+                server_name TEXT NOT NULL,
+                server_ip TEXT NOT NULL,
+                status TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                log_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
@@ -157,6 +185,8 @@ def init_db():
         ensure_column(conn, "servers", "max_retries INTEGER NOT NULL DEFAULT 2")
         ensure_column(conn, "servers", "retry_backoff_seconds TEXT NOT NULL DEFAULT '60,180'")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "task_queue", "trigger_type TEXT NOT NULL DEFAULT 'manual'")
+        ensure_column(conn, "task_queue", "batch_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
         ensure_column(conn, "global_config", "agent_install_command TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_base_url TEXT NOT NULL DEFAULT ''")
@@ -296,6 +326,8 @@ def export_backup_payload():
         servers = [dict(row) for row in conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()]
         logs = [dict(row) for row in conn.execute("SELECT * FROM job_logs ORDER BY id").fetchall()]
         queued_tasks = [dict(row) for row in conn.execute("SELECT * FROM task_queue ORDER BY id").fetchall()]
+        notification_batches = [dict(row) for row in conn.execute("SELECT * FROM notification_batches ORDER BY id").fetchall()]
+        notification_batch_items = [dict(row) for row in conn.execute("SELECT * FROM notification_batch_items ORDER BY id").fetchall()]
         global_cfg = conn.execute("SELECT * FROM global_config WHERE id = 1").fetchone()
 
     payload = {
@@ -307,6 +339,8 @@ def export_backup_payload():
         "servers": servers,
         "job_logs": logs,
         "task_queue": queued_tasks,
+        "notification_batches": notification_batches,
+        "notification_batch_items": notification_batch_items,
     }
     return payload
 
@@ -318,9 +352,11 @@ def restore_backup_payload(payload):
     servers = payload.get("servers")
     logs = payload.get("job_logs")
     queued_tasks = payload.get("task_queue", [])
+    notification_batches = payload.get("notification_batches", [])
+    notification_batch_items = payload.get("notification_batch_items", [])
     global_cfg = payload.get("global_config")
 
-    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict) or not isinstance(queued_tasks, list):
+    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict) or not isinstance(queued_tasks, list) or not isinstance(notification_batches, list) or not isinstance(notification_batch_items, list):
         raise ValueError("备份文件缺少必要字段")
 
     with closing(get_conn()) as conn:
@@ -328,6 +364,8 @@ def restore_backup_payload(payload):
         conn.execute("DELETE FROM servers")
         conn.execute("DELETE FROM global_config")
         conn.execute("DELETE FROM task_queue")
+        conn.execute("DELETE FROM notification_batch_items")
+        conn.execute("DELETE FROM notification_batches")
 
         conn.execute(
             """
@@ -404,8 +442,8 @@ def restore_backup_payload(payload):
         for task in queued_tasks:
             conn.execute(
                 """
-                INSERT INTO task_queue(id, server_id, log_id, attempt, max_attempts, backoff_plan, status, next_run_at, last_error, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO task_queue(id, server_id, log_id, attempt, max_attempts, backoff_plan, status, next_run_at, last_error, trigger_type, batch_key, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     task.get("id"),
@@ -417,6 +455,8 @@ def restore_backup_payload(payload):
                     task.get("status", "queued"),
                     task.get("next_run_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
                     task.get("last_error", ""),
+                    task.get("trigger_type", "manual"),
+                    task.get("batch_key", ""),
                     task.get("created_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
                     task.get("updated_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
                 ),
@@ -787,10 +827,10 @@ def extract_summary(server_row, raw_output):
     return "\n".join(lines)
 
 
-def send_result_email(server_row, status, summary, output):
+def get_smtp_config():
     cfg = get_global_config()
     if not int(cfg["notify_email_enabled"] or 0):
-        return
+        return None
 
     smtp_host = (cfg["smtp_host"] or "").strip()
     smtp_user = (cfg["smtp_user"] or "").strip()
@@ -799,29 +839,133 @@ def send_result_email(server_row, status, summary, output):
     smtp_to = (cfg["notify_email_to"] or "").strip()
     smtp_port = int(cfg["smtp_port"] or 587)
     if not (smtp_host and smtp_from and smtp_to):
+        return None
+    return {
+        "host": smtp_host,
+        "user": smtp_user,
+        "password": smtp_password,
+        "from": smtp_from,
+        "to": smtp_to,
+        "port": smtp_port,
+    }
+
+
+def send_email_message(subject, body):
+    smtp = get_smtp_config()
+    if not smtp:
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp["from"]
+    msg["To"] = smtp["to"]
+    msg.set_content(body)
+
+    with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
+        server.starttls()
+        if smtp["user"]:
+            server.login(smtp["user"], smtp["password"])
+        server.send_message(msg)
+    return True
+
+
+def send_result_email(server_row, status, summary, output):
+    title_state = "成功" if status == "success" else "失败"
+    body = (
+        f"服务器: {server_row['name']} ({server_row['ip']})\\n"
+        f"状态: {title_state}\\n"
+        f"时间: {datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}\\n\\n"
+        f"摘要:\\n{summary}\\n\\n"
+        f"完整输出:\\n{output[:30000]}"
+    )
+    return send_email_message(f"[VPS面板] {server_row['name']} 重置任务{title_state}", body)
+
+
+def ensure_notification_batch(batch_key, scheduled_for):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO notification_batches(batch_key, scheduled_for, notified, created_at, updated_at)
+            VALUES(?,?,0,?,?)
+            """,
+            (batch_key, scheduled_for, now_text, now_text),
+        )
+        conn.commit()
+
+
+def upsert_notification_batch_item(batch_key, server_row, status, note="", log_id=None):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            "SELECT id FROM notification_batch_items WHERE batch_key = ? AND server_id = ?",
+            (batch_key, server_row["id"]),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE notification_batch_items SET status=?, note=?, log_id=?, updated_at=? WHERE id=?",
+                (status, note, log_id, now_text, row["id"]),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO notification_batch_items(batch_key, server_id, server_name, server_ip, status, note, log_id, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (batch_key, server_row["id"], server_row["name"], server_row["ip"], status, note, log_id, now_text, now_text),
+            )
+        conn.commit()
+
+
+def maybe_send_batch_email(batch_key):
+    with closing(get_conn()) as conn:
+        batch = conn.execute("SELECT * FROM notification_batches WHERE batch_key = ?", (batch_key,)).fetchone()
+        if not batch or int(batch["notified"] or 0):
+            return
+        items = conn.execute(
+            "SELECT * FROM notification_batch_items WHERE batch_key = ? ORDER BY server_id ASC",
+            (batch_key,),
+        ).fetchall()
+
+    if not items:
         return
 
-    title_state = "成功" if status == "success" else "失败"
-    msg = EmailMessage()
-    msg["Subject"] = f"[VPS面板] {server_row['name']} 重置任务{title_state}"
-    msg["From"] = smtp_from
-    msg["To"] = smtp_to
-    msg.set_content(
-        f"服务器: {server_row['name']} ({server_row['ip']})\n"
-        f"状态: {title_state}\n"
-        f"时间: {datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        f"摘要:\n{summary}\n\n"
-        f"完整输出:\n{output[:30000]}"
+    statuses = [item["status"] for item in items]
+    if any(st in ("pending", "queued", "running", "retrying") for st in statuses):
+        return
+
+    success_count = len([st for st in statuses if st == "success"])
+    failed_count = len([st for st in statuses if st == "failed"])
+    skipped_count = len([st for st in statuses if st == "skipped"])
+    total_count = len(statuses)
+
+    lines = [
+        f"批次: {batch_key}",
+        f"总计: {total_count}",
+        f"成功: {success_count}",
+        f"失败: {failed_count}",
+        f"跳过: {skipped_count}",
+        "",
+        "明细:",
+    ]
+    for item in items:
+        note = f"（{item['note']}）" if item["note"] else ""
+        lines.append(f"- {item['server_name']} ({item['server_ip']}): {item['status']}{note}")
+
+    sent = send_email_message(
+        f"[VPS面板] {batch_key} 重置批次结果（成功{success_count}/失败{failed_count}/跳过{skipped_count}）",
+        "\n".join(lines),
     )
+    if sent:
+        with closing(get_conn()) as conn:
+            conn.execute(
+                "UPDATE notification_batches SET notified = 1, updated_at = ? WHERE batch_key = ?",
+                (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), batch_key),
+            )
+            conn.commit()
 
-    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
-        server.starttls()
-        if smtp_user:
-            server.login(smtp_user, smtp_password)
-        server.send_message(msg)
 
-
-def run_remote(server_row, running_log_id, notify_on_failure=True):
+def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = [f"开始执行重置任务 {title}"]
     client = None
@@ -907,7 +1051,8 @@ def run_remote(server_row, running_log_id, notify_on_failure=True):
         update_log(running_log_id, "success", summary, all_output)
         update_last_reset(server_row["id"])
         try:
-            send_result_email(mutable_server, "success", summary, all_output)
+            if notify_on_success:
+                send_result_email(mutable_server, "success", summary, all_output)
         except Exception as mail_exc:
             output_lines.append(f"邮件通知发送失败: {mail_exc}")
     except Exception as exc:
@@ -967,17 +1112,19 @@ def is_retryable_failure(output_text):
     return any(pattern in text for pattern in patterns)
 
 
-def enqueue_task(server_row, log_id):
+def enqueue_task(server_row, log_id, trigger_type="manual", batch_key=""):
+    trigger_type = (trigger_type or "manual").strip()
+    batch_key = (batch_key or "").strip()
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     max_attempts = max(1, int(server_row["max_retries"] or DEFAULT_MAX_RETRIES))
     backoff_plan = (server_row["retry_backoff_seconds"] or DEFAULT_RETRY_BACKOFF_SECONDS).strip()
     with closing(get_conn()) as conn:
         cur = conn.execute(
             """
-            INSERT INTO task_queue(server_id, log_id, attempt, max_attempts, backoff_plan, status, next_run_at, last_error, created_at, updated_at)
-            VALUES(?,?,?,?,?,'queued',?,?,?,?)
+            INSERT INTO task_queue(server_id, log_id, attempt, max_attempts, backoff_plan, status, next_run_at, last_error, trigger_type, batch_key, created_at, updated_at)
+            VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?)
             """,
-            (server_row["id"], log_id, 0, max_attempts, backoff_plan, now_text, "", now_text, now_text),
+            (server_row["id"], log_id, 0, max_attempts, backoff_plan, now_text, "", trigger_type, batch_key, now_text, now_text),
         )
         conn.commit()
         task_id = cur.lastrowid
@@ -1037,7 +1184,7 @@ def task_worker_loop():
                 f"任务执行中（第{attempt_no}/{max_attempts}次尝试）...",
                 f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中（第{attempt_no}/{max_attempts}次尝试）",
             )
-            run_remote(row, task["log_id"], notify_on_failure=(attempt_no >= max_attempts))
+            run_remote(row, task["log_id"], notify_on_failure=(attempt_no >= max_attempts and not task["batch_key"]), notify_on_success=(not task["batch_key"]))
 
             with closing(get_conn()) as conn:
                 latest = conn.execute("SELECT status, output FROM job_logs WHERE id = ?", (task["log_id"],)).fetchone()
@@ -1049,6 +1196,9 @@ def task_worker_loop():
                         (attempt_no, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
                     )
                     conn.commit()
+                if task["batch_key"]:
+                    upsert_notification_batch_item(task["batch_key"], row, "success", note="任务执行完成", log_id=task["log_id"])
+                    maybe_send_batch_email(task["batch_key"])
                 continue
 
             output = latest["output"] if latest else ""
@@ -1077,17 +1227,21 @@ def task_worker_loop():
                 )
                 TASK_QUEUE.put(task_id)
             else:
+                fail_reason = "retry exhausted" if retryable else "non-retryable"
                 with closing(get_conn()) as conn:
                     conn.execute(
                         "UPDATE task_queue SET status='failed', attempt=?, last_error=?, updated_at=? WHERE id=?",
                         (
                             attempt_no,
-                            "retry exhausted" if retryable else "non-retryable",
+                            fail_reason,
                             datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
                             task_id,
                         ),
                     )
                     conn.commit()
+                if task["batch_key"]:
+                    upsert_notification_batch_item(task["batch_key"], row, "failed", note=fail_reason, log_id=task["log_id"])
+                    maybe_send_batch_email(task["batch_key"])
         finally:
             TASK_QUEUE.task_done()
 
@@ -1097,13 +1251,15 @@ def start_task_worker():
     threading.Thread(target=task_worker_loop, daemon=True).start()
 
 
-def run_for_server(server_id):
+def run_for_server(server_id, trigger_type="manual", batch_key=""):
+    trigger_type = (trigger_type or "manual").strip()
+    batch_key = (batch_key or "").strip()
     row = get_server(server_id)
     if not row:
-        return False, "服务器不存在"
+        return False, "服务器不存在", None
 
     if has_pending_or_running(server_id):
-        return False, "该服务器已有排队/执行中的任务，已跳过重复提交"
+        return False, "该服务器已有排队/执行中的任务，已跳过重复提交", None
 
     log_id = save_log(
         row["id"],
@@ -1111,16 +1267,40 @@ def run_for_server(server_id):
         "任务已进入队列，等待前序服务器执行完成...",
         f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 排队中（将按顺序依次执行）",
     )
-    enqueue_task(row, log_id)
-    return True, "任务已加入队列，将按顺序依次执行"
+    if batch_key:
+        upsert_notification_batch_item(batch_key, row, "queued", note="已加入执行队列", log_id=log_id)
+    enqueue_task(row, log_id, trigger_type=trigger_type, batch_key=batch_key)
+    return True, "任务已加入队列，将按顺序依次执行", log_id
 
 
 def check_scheduled_jobs():
+    now = datetime.now(TIMEZONE)
+    batch_key = now.strftime("%Y-%m-%d %H:%M")
+    scheduled_for = now.strftime("%Y-%m-%d %H:%M:%S")
+
     with closing(get_conn()) as conn:
-        rows = conn.execute("SELECT * FROM servers").fetchall()
-    for row in rows:
-        if should_reset(row):
-            run_for_server(row["id"])
+        rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
+    due_rows = [row for row in rows if row["auto_reset"] and row["reset_day"] == now.day and int(row["reset_hour"] or 1) == now.hour and int(row["reset_minute"] or 0) == now.minute]
+    if not due_rows:
+        return
+
+    ensure_notification_batch(batch_key, scheduled_for)
+
+    for row in due_rows:
+        if row["is_renewed"]:
+            upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置")
+            continue
+
+        if not should_reset(row):
+            upsert_notification_batch_item(batch_key, row, "skipped", note="本月已执行或不满足重置条件")
+            continue
+
+        ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
+        if not ok:
+            upsert_notification_batch_item(batch_key, row, "skipped", note=msg, log_id=log_id)
+
+    maybe_send_batch_email(batch_key)
 
 
 def login_required(func):
@@ -1426,6 +1606,27 @@ def update_global_tasks():
     return redirect(url_for("settings_page"))
 
 
+@app.route("/notify/test", methods=["POST"])
+@login_required
+def test_notify_email():
+    try:
+        ok = send_email_message(
+            "[VPS面板] 邮件通知测试",
+            (
+                "这是一封来自 VPS 管理面板的测试邮件。\n"
+                f"发送时间: {datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "若你收到本邮件，说明 SMTP 配置可用。"
+            ),
+        )
+        if ok:
+            flash("测试邮件已发送，请检查收件箱", "success")
+        else:
+            flash("测试邮件未发送：请先开启邮件通知并完整填写 SMTP 配置", "error")
+    except Exception as exc:
+        flash(f"测试邮件发送失败: {exc}", "error")
+    return redirect(url_for("settings_page"))
+
+
 def get_next_sort_order(conn):
     row = conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM servers").fetchone()
     return int(row["max_order"]) + 1
@@ -1547,7 +1748,7 @@ def toggle_rent(server_id):
 @app.route("/servers/<int:server_id>/run", methods=["POST"])
 @login_required
 def run_now(server_id):
-    ok, msg = run_for_server(server_id)
+    ok, msg, _ = run_for_server(server_id)
     flash(msg, "success" if ok else "error")
     return redirect(url_for("details_page"))
 
