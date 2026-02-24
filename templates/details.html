@@ -33,6 +33,10 @@
         <div><span>root密码</span><strong>{{ row.ssh_password }}</strong></div>
         <div><span>重置日</span><strong>{{ row.reset_day }}日 01:00</strong></div>
         <div><span>最后执行</span><strong>{{ row.latest_run_at or '-' }}</strong></div>
+        <div><span>上传流量（本周期）</span><strong>{{ row.traffic_upload_text }}</strong></div>
+        <div><span>下载流量（本周期）</span><strong>{{ row.traffic_download_text }}</strong></div>
+        <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
+        <div><span>最近上报</span><strong>{{ row.last_agent_report_at or '暂无' }}</strong></div>
       </div>
 
       <div class="server-actions">

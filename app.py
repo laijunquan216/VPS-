@@ -8,7 +8,7 @@ import threading
 import time
 from queue import Queue
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from io import BytesIO
 from zoneinfo import ZoneInfo
@@ -22,6 +22,8 @@ from flask import (
     render_template,
     request,
     send_file,
+    Response,
+    jsonify,
     session,
     url_for,
 )
@@ -35,6 +37,7 @@ TIMEZONE = ZoneInfo("Asia/Shanghai")
 SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECONDS", "1800"))
 SSH_RETRY_INTERVAL_SECONDS = int(os.environ.get("SSH_RETRY_INTERVAL_SECONDS", "15"))
 POST_REINSTALL_WAIT_SECONDS = int(os.environ.get("POST_REINSTALL_WAIT_SECONDS", "30"))
+AGENT_REPORT_INTERVAL_SECONDS = int(os.environ.get("AGENT_REPORT_INTERVAL_SECONDS", "60"))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
@@ -71,6 +74,13 @@ def init_db():
                 is_renewed INTEGER NOT NULL DEFAULT 0,
                 is_rented INTEGER NOT NULL DEFAULT 0,
                 sort_order INTEGER NOT NULL DEFAULT 0,
+                agent_token TEXT NOT NULL DEFAULT '',
+                period_key TEXT NOT NULL DEFAULT '',
+                period_upload_bytes INTEGER NOT NULL DEFAULT 0,
+                period_download_bytes INTEGER NOT NULL DEFAULT 0,
+                last_agent_rx_bytes INTEGER NOT NULL DEFAULT 0,
+                last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0,
+                last_agent_report_at TEXT,
                 last_reset_at TEXT
             )
             """
@@ -82,6 +92,8 @@ def init_db():
                 reset_command TEXT NOT NULL DEFAULT '',
                 ssh_command_2 TEXT NOT NULL DEFAULT '',
                 ssh_command_3 TEXT NOT NULL DEFAULT '',
+                agent_install_command TEXT NOT NULL DEFAULT '',
+                panel_base_url TEXT NOT NULL DEFAULT '',
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -105,8 +117,17 @@ def init_db():
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "is_rented INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "period_key TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "period_upload_bytes INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "period_download_bytes INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "last_agent_rx_bytes INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "last_agent_report_at TEXT")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
+        ensure_column(conn, "global_config", "agent_install_command TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "panel_base_url TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -134,18 +155,20 @@ def get_global_config():
         return row
 
 
-def update_global_config(reset_command, ssh_command_2, ssh_command_3):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, updated_at=?
             WHERE id=1
             """,
             (
                 reset_command.strip(),
                 ssh_command_2.strip(),
                 ssh_command_3.strip(),
+                agent_install_command.strip(),
+                panel_base_url.strip(),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -207,7 +230,9 @@ def list_detail_rows():
         return conn.execute(
             """
             SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day,
-                   s.auto_reset, s.is_renewed, s.is_rented, s.sort_order, l.summary, l.status, l.created_at AS latest_run_at
+                   s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
+                   s.period_upload_bytes, s.period_download_bytes, s.last_agent_report_at,
+                   l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
                 SELECT l2.id FROM job_logs l2
@@ -256,13 +281,15 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
                 global_cfg.get("ssh_command_2", ""),
                 global_cfg.get("ssh_command_3", ""),
+                global_cfg.get("agent_install_command", ""),
+                global_cfg.get("panel_base_url", ""),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -271,8 +298,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order, last_reset_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -286,6 +313,13 @@ def restore_backup_payload(payload):
                     int(server.get("is_renewed", 0)),
                     int(server.get("is_rented", 0)),
                     int(server.get("sort_order", 0)),
+                    server.get("agent_token", ""),
+                    server.get("period_key", ""),
+                    int(server.get("period_upload_bytes", 0)),
+                    int(server.get("period_download_bytes", 0)),
+                    int(server.get("last_agent_rx_bytes", 0)),
+                    int(server.get("last_agent_tx_bytes", 0)),
+                    server.get("last_agent_report_at"),
                     server.get("last_reset_at"),
                 ),
             )
@@ -354,6 +388,72 @@ def update_server_password(server_id, new_password):
         conn.commit()
 
 
+def generate_agent_token(length=40):
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def ensure_server_agent_token(server_id):
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT agent_token FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            return None
+        token = (row["agent_token"] or "").strip()
+        if token:
+            return token
+        token = generate_agent_token()
+        conn.execute("UPDATE servers SET agent_token = ? WHERE id = ?", (token, server_id))
+        conn.commit()
+        return token
+
+
+def month_day_safe(year, month, day):
+    import calendar
+
+    return min(day, calendar.monthrange(year, month)[1])
+
+
+def get_traffic_period_start(reset_day, now_dt):
+    day_this_month = month_day_safe(now_dt.year, now_dt.month, reset_day)
+    this_start = now_dt.replace(day=day_this_month, hour=1, minute=0, second=0, microsecond=0)
+    if now_dt >= this_start:
+        return this_start
+
+    if now_dt.month == 1:
+        prev_year, prev_month = now_dt.year - 1, 12
+    else:
+        prev_year, prev_month = now_dt.year, now_dt.month - 1
+    day_prev_month = month_day_safe(prev_year, prev_month, reset_day)
+    return now_dt.replace(year=prev_year, month=prev_month, day=day_prev_month, hour=1, minute=0, second=0, microsecond=0)
+
+
+def current_period_key(reset_day, now_dt):
+    start = get_traffic_period_start(reset_day, now_dt)
+    return start.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_bytes(num):
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    value = float(max(num or 0, 0))
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.2f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+
+
+def resolve_panel_base_url(global_cfg, request_obj=None):
+    configured = (global_cfg["panel_base_url"] or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    if request_obj:
+        return request_obj.url_root.rstrip("/")
+    return f"http://127.0.0.1:{PANEL_PORT}"
+
+
+def build_agent_install_command(base_url, token):
+    install_url = f"{base_url}/api/agent/install.sh?token={token}"
+    return f"curl -fsSL {shlex.quote(install_url)} | bash"
+
 def generate_root_password(length=16):
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
@@ -390,6 +490,12 @@ def normalize_shell_command(command):
     return command.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
 
+def render_agent_install_command(command, server_row):
+    if not command:
+        return command
+    return command.replace("{ip}", server_row["ip"]).replace("{name}", server_row["name"]).replace("{ssh_user}", server_row["ssh_user"])
+
+
 def sanitize_terminal_text(text):
     if not text:
         return ""
@@ -398,6 +504,86 @@ def sanitize_terminal_text(text):
     text = text.replace("\x1b[m", "")
     text = text.replace("\r", "")
     return text
+
+
+def refresh_server_traffic(server_row):
+    now_dt = datetime.now(TIMEZONE)
+    period_key = current_period_key(int(server_row["reset_day"]), now_dt)
+
+    command = "awk -F'[: ]+' 'NR>2 && $1!=\"lo\" {rx+=$3; tx+=$11} END{printf \"%d %d\", rx+0, tx+0}' /proc/net/dev"
+    client = connect_ssh(server_row, timeout=15)
+    try:
+        _, stdout, stderr = client.exec_command(command)
+        out = stdout.read().decode("utf-8", errors="ignore").strip()
+        err = stderr.read().decode("utf-8", errors="ignore").strip()
+        if err:
+            raise RuntimeError(err)
+        parts = out.split()
+        if len(parts) != 2:
+            raise RuntimeError(f"无法解析网卡统计输出: {out}")
+        rx_now = int(parts[0])
+        tx_now = int(parts[1])
+    finally:
+        client.close()
+
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            "SELECT period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes FROM servers WHERE id = ?",
+            (server_row["id"],),
+        ).fetchone()
+        if not row:
+            return
+
+        upload = int(row["period_upload_bytes"] or 0)
+        download = int(row["period_download_bytes"] or 0)
+        last_rx = int(row["last_agent_rx_bytes"] or 0)
+        last_tx = int(row["last_agent_tx_bytes"] or 0)
+
+        if row["period_key"] != period_key:
+            upload = 0
+            download = 0
+            last_rx = rx_now
+            last_tx = tx_now
+        else:
+            delta_rx = rx_now - last_rx
+            delta_tx = tx_now - last_tx
+            if delta_rx < 0:
+                delta_rx = rx_now
+            if delta_tx < 0:
+                delta_tx = tx_now
+            download += delta_rx
+            upload += delta_tx
+            last_rx = rx_now
+            last_tx = tx_now
+
+        conn.execute(
+            """
+            UPDATE servers
+            SET period_key=?, period_upload_bytes=?, period_download_bytes=?,
+                last_agent_rx_bytes=?, last_agent_tx_bytes=?, last_agent_report_at=?
+            WHERE id=?
+            """,
+            (
+                period_key,
+                upload,
+                download,
+                last_rx,
+                last_tx,
+                now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                server_row["id"],
+            ),
+        )
+        conn.commit()
+
+
+def refresh_all_traffic_data():
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+    for row in rows:
+        try:
+            refresh_server_traffic(row)
+        except Exception:
+            continue
 
 
 def should_reset(server_row):
@@ -529,10 +715,13 @@ def run_remote(server_row, running_log_id):
         reset_command = normalize_shell_command((global_cfg["reset_command"] or "").strip())
         ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
         ssh_command_3 = normalize_shell_command((global_cfg["ssh_command_3"] or "").strip())
+        agent_install_command = normalize_shell_command((global_cfg["agent_install_command"] or "").strip())
+        panel_base_url = resolve_panel_base_url(global_cfg)
 
         client = connect_ssh(mutable_server)
         output_lines.append("SSH 连接成功")
 
+        reinstall_triggered = False
         if reset_command:
             reset_command, generated_password = inject_random_password_if_needed(
                 reset_command,
@@ -544,6 +733,7 @@ def run_remote(server_row, running_log_id):
                 output_lines.append(f"检测到DD重装命令，已自动生成新root密码: {generated_password}")
 
             if is_reinstall_command(reset_command):
+                reinstall_triggered = True
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)
@@ -563,6 +753,18 @@ def run_remote(server_row, running_log_id):
                         output_lines.append("检测到实际可登录密码与预设不同，已自动回写面板")
             else:
                 execute_command_and_collect(client, "重置任务", reset_command, output_lines)
+
+        if reinstall_triggered:
+            token = ensure_server_agent_token(mutable_server["id"])
+            builtin_agent_command = build_agent_install_command(panel_base_url, token)
+            if client is None:
+                client = connect_ssh(mutable_server)
+                output_lines.append("执行 Agent安装任务 前重新建立SSH连接成功")
+            execute_command_and_collect(client, "Agent安装任务", builtin_agent_command, output_lines)
+
+            if agent_install_command:
+                prepared_agent_command = render_agent_install_command(agent_install_command, mutable_server)
+                execute_command_and_collect(client, "自定义Agent安装任务", prepared_agent_command, output_lines)
 
         if ssh_command_2:
             ssh_command_2, ssh2_password = inject_random_ssh2_password_if_needed(ssh_command_2)
@@ -670,7 +872,7 @@ def login_required(func):
 
 @app.before_request
 def require_login():
-    public_endpoints = {"login_page", "login_submit", "static"}
+    public_endpoints = {"login_page", "login_submit", "static", "agent_install_script", "agent_report"}
     if request.endpoint in public_endpoints:
         return None
     if not session.get("logged_in"):
@@ -713,13 +915,23 @@ def home():
 @login_required
 def details_page():
     rows = list_detail_rows()
-    total = len(rows)
-    success = len([r for r in rows if r["status"] == "success"])
-    failed = len([r for r in rows if r["status"] == "failed"])
-    never = len([r for r in rows if not r["latest_run_at"]])
+    normalized_rows = []
+    for r in rows:
+        item = dict(r)
+        upload = int(item.get("period_upload_bytes") or 0)
+        download = int(item.get("period_download_bytes") or 0)
+        item["traffic_upload_text"] = format_bytes(upload)
+        item["traffic_download_text"] = format_bytes(download)
+        item["traffic_total_text"] = format_bytes(upload + download)
+        normalized_rows.append(item)
+
+    total = len(normalized_rows)
+    success = len([r for r in normalized_rows if r["status"] == "success"])
+    failed = len([r for r in normalized_rows if r["status"] == "failed"])
+    never = len([r for r in normalized_rows if not r["latest_run_at"]])
     return render_template(
         "details.html",
-        rows=rows,
+        rows=normalized_rows,
         total=total,
         success=success,
         failed=failed,
@@ -805,6 +1017,130 @@ def restore_backup():
     return redirect(url_for("management_page"))
 
 
+@app.get("/api/agent/install.sh")
+def agent_install_script():
+    token = (request.args.get("token") or "").strip()
+    if not token:
+        return Response("missing token\n", status=400, mimetype="text/plain")
+
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT id FROM servers WHERE agent_token = ?", (token,)).fetchone()
+        if not row:
+            return Response("invalid token\n", status=403, mimetype="text/plain")
+
+    base_url = resolve_panel_base_url(get_global_config(), request)
+    report_url = f"{base_url}/api/agent/report"
+    script = f"""#!/usr/bin/env bash
+set -euo pipefail
+cat >/usr/local/bin/vps-panel-agent.sh <<'AGENT'
+#!/usr/bin/env bash
+set -euo pipefail
+TOKEN={token}
+REPORT_URL={report_url}
+collect() {{
+  awk -F'[: ]+' 'NR>2 && $1!="lo" {{rx+=$3; tx+=$11}} END{{printf "%d %d", rx+0, tx+0}}' /proc/net/dev
+}}
+read -r RX TX < <(collect)
+curl -fsS -m 20 -H 'Content-Type: application/json' -d "{{\\"token\\":\\"$TOKEN\\",\\"rx_bytes\\":$RX,\\"tx_bytes\\":$TX}}" "$REPORT_URL" >/dev/null || true
+AGENT
+chmod +x /usr/local/bin/vps-panel-agent.sh
+
+cat >/etc/systemd/system/vps-panel-agent.service <<'UNIT'
+[Unit]
+Description=VPS Panel Agent Reporter
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vps-panel-agent.sh
+UNIT
+
+cat >/etc/systemd/system/vps-panel-agent.timer <<'UNIT'
+[Unit]
+Description=Run VPS Panel Agent reporter
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec={AGENT_REPORT_INTERVAL_SECONDS}s
+AccuracySec=5s
+Unit=vps-panel-agent.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now vps-panel-agent.timer
+systemctl restart vps-panel-agent.timer
+echo "[OK] vps-panel-agent installed"
+"""
+    return Response(script, mimetype="text/x-shellscript")
+
+
+@app.post("/api/agent/report")
+def agent_report():
+    payload = request.get_json(silent=True) or {}
+    token = str(payload.get("token", "")).strip()
+    if not token:
+        return jsonify({"ok": False, "error": "missing token"}), 400
+
+    try:
+        rx_now = int(payload.get("rx_bytes", 0))
+        tx_now = int(payload.get("tx_bytes", 0))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "invalid rx/tx"}), 400
+
+    now_dt = datetime.now(TIMEZONE)
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT * FROM servers WHERE agent_token = ?", (token,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "invalid token"}), 403
+
+        period_key = current_period_key(int(row["reset_day"]), now_dt)
+        upload = int(row["period_upload_bytes"] or 0)
+        download = int(row["period_download_bytes"] or 0)
+        last_rx = int(row["last_agent_rx_bytes"] or 0)
+        last_tx = int(row["last_agent_tx_bytes"] or 0)
+
+        if row["period_key"] != period_key:
+            upload = 0
+            download = 0
+            last_rx = rx_now
+            last_tx = tx_now
+        else:
+            delta_rx = rx_now - last_rx
+            delta_tx = tx_now - last_tx
+            if delta_rx < 0:
+                delta_rx = rx_now
+            if delta_tx < 0:
+                delta_tx = tx_now
+            download += delta_rx
+            upload += delta_tx
+            last_rx = rx_now
+            last_tx = tx_now
+
+        conn.execute(
+            """
+            UPDATE servers
+            SET period_key=?, period_upload_bytes=?, period_download_bytes=?,
+                last_agent_rx_bytes=?, last_agent_tx_bytes=?, last_agent_report_at=?
+            WHERE id=?
+            """,
+            (
+                period_key,
+                upload,
+                download,
+                last_rx,
+                last_tx,
+                now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                row["id"],
+            ),
+        )
+        conn.commit()
+
+    return jsonify({"ok": True})
+
+
 @app.route("/global-tasks", methods=["POST"])
 @login_required
 def update_global_tasks():
@@ -813,6 +1149,8 @@ def update_global_tasks():
         form.get("reset_command", ""),
         form.get("ssh_command_2", ""),
         form.get("ssh_command_3", ""),
+        form.get("agent_install_command", ""),
+        form.get("panel_base_url", ""),
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
@@ -832,8 +1170,8 @@ def add_server():
         sort_order = int(sort_order_input) if sort_order_input else get_next_sort_order(conn)
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order)
-            VALUES(?,?,?,?,?,?,?,0,0,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -844,6 +1182,13 @@ def add_server():
                 int(form["reset_day"]),
                 1 if form.get("auto_reset") == "on" else 0,
                 sort_order,
+                generate_agent_token(),
+                "",
+                0,
+                0,
+                0,
+                0,
+                None,
             ),
         )
         conn.commit()
@@ -931,6 +1276,7 @@ def run_now(server_id):
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TIMEZONE)
     scheduler.add_job(check_scheduled_jobs, "cron", minute="*/5")
+    scheduler.add_job(refresh_all_traffic_data, "interval", minutes=5)
     scheduler.start()
     return scheduler
 
