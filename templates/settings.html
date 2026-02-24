@@ -1,0 +1,72 @@
+{% extends 'base.html' %}
+{% set active = 'settings' %}
+{% set title = '服务器设置' %}
+{% block content %}
+<section class="panel">
+  <h2>服务器设置：全局任务（所有服务器共用）</h2>
+  <form method="post" action="/global-tasks" class="grid-form">
+    <label class="full">重置任务代码（单独配置）
+      <textarea name="reset_command" rows="4" placeholder="例如 InstallNET.sh ...">{{ global_cfg.reset_command }}</textarea>
+    </label>
+    <label class="full">SSH任务2（安装PT环境）
+      <textarea name="ssh_command_2" rows="4">{{ global_cfg.ssh_command_2 }}</textarea>
+    </label>
+    <label class="full">SSH任务3（例如 reboot）
+      <textarea name="ssh_command_3" rows="3">{{ global_cfg.ssh_command_3 }}</textarea>
+    </label>
+    <button type="submit">保存全局任务</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>服务器设置：新增服务器</h2>
+  <form method="post" action="/servers" class="grid-form">
+    <label>名称<input name="name" required /></label>
+    <label>IP<input name="ip" required /></label>
+    <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
+    <label>SSH用户<input name="ssh_user" value="root" required /></label>
+    <label>root密码<input name="ssh_password" type="password" required /></label>
+    <label>每月重置日<input name="reset_day" type="number" min="1" max="31" required /></label>
+    <label class="inline"><input name="auto_reset" type="checkbox" checked /> 到期自动重置</label>
+    <button type="submit">添加服务器</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>服务器配置列表</h2>
+  {% for s in servers %}
+  <details>
+    <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 每月{{ s.reset_day }}日 01:00 | 自动重置: {{ '是' if s.auto_reset else '否' }}</summary>
+    <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
+      <label>名称<input name="name" value="{{ s.name }}" required /></label>
+      <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
+      <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
+      <label>SSH用户<input name="ssh_user" value="{{ s.ssh_user }}" required /></label>
+      <label>root密码<input name="ssh_password" type="password" value="{{ s.ssh_password }}" required /></label>
+      <label>每月重置日<input name="reset_day" type="number" min="1" max="31" value="{{ s.reset_day }}" required /></label>
+      <label class="inline"><input name="auto_reset" type="checkbox" {% if s.auto_reset %}checked{% endif %}/> 到期自动重置</label>
+      <div class="button-row"><button type="submit">保存</button></div>
+    </form>
+    <div class="button-row">
+      <form method="post" action="/servers/{{ s.id }}/delete" onsubmit="return confirm('确认删除?')">
+        <button class="danger" type="submit">删除</button>
+      </form>
+    </div>
+  </details>
+  {% else %}
+  <p>暂无服务器。</p>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <h2>完整任务日志</h2>
+  {% for log in logs %}
+  <article class="log-card {{ log.status }}">
+    <h3>{{ log.created_at }} | {{ log.server_name }} | {{ log.status }}</h3>
+    <pre>{{ log.output }}</pre>
+  </article>
+  {% else %}
+  <p>暂无日志。</p>
+  {% endfor %}
+</section>
+{% endblock %}
