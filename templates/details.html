@@ -66,15 +66,34 @@
     {% endfor %}
   </div>
 </section>
-{% endblock %}
 
 <script>
-function copySummary(rowId) {
-  const text = document.getElementById(`summary-${rowId}`).innerText;
-  navigator.clipboard.writeText(text).then(() => {
+async function copySummary(rowId) {
+  const summaryNode = document.getElementById(`summary-${rowId}`);
+  if (!summaryNode) {
+    alert('未找到可复制内容');
+    return;
+  }
+
+  const text = summaryNode.innerText;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
     alert('已复制到剪贴板');
-  }).catch(() => {
+  } catch (error) {
     alert('复制失败，请手动复制');
-  });
+  }
 }
 </script>
+{% endblock %}
