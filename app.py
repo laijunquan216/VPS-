@@ -6,6 +6,7 @@ import sqlite3
 import string
 import threading
 import time
+from queue import Queue
 from contextlib import closing
 from datetime import datetime
 from functools import wraps
@@ -38,6 +39,7 @@ POST_REINSTALL_WAIT_SECONDS = int(os.environ.get("POST_REINSTALL_WAIT_SECONDS", 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|\([A-Za-z0-9])")
+TASK_QUEUE = Queue()
 
 
 def get_conn():
@@ -67,6 +69,7 @@ def init_db():
                 reset_day INTEGER NOT NULL,
                 auto_reset INTEGER NOT NULL DEFAULT 1,
                 is_renewed INTEGER NOT NULL DEFAULT 0,
+                is_rented INTEGER NOT NULL DEFAULT 0,
                 last_reset_at TEXT
             )
             """
@@ -99,6 +102,7 @@ def init_db():
 
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "is_rented INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
@@ -202,7 +206,7 @@ def list_detail_rows():
         return conn.execute(
             """
             SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day,
-                   s.auto_reset, s.is_renewed, l.summary, l.status, l.created_at AS latest_run_at
+                   s.auto_reset, s.is_renewed, s.is_rented, l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
                 SELECT l2.id FROM job_logs l2
@@ -266,8 +270,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, last_reset_at)
-                VALUES(?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, last_reset_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -278,6 +282,8 @@ def restore_backup_payload(payload):
                     server.get("ssh_password", ""),
                     int(server.get("reset_day", 1)),
                     int(server.get("auto_reset", 0)),
+                    int(server.get("is_renewed", 0)),
+                    int(server.get("is_rented", 0)),
                     server.get("last_reset_at"),
                 ),
             )
@@ -586,16 +592,60 @@ def run_remote(server_row, running_log_id):
             client.close()
 
 
+def has_pending_or_running(server_id):
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            """
+            SELECT status FROM job_logs
+            WHERE server_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (server_id,),
+        ).fetchone()
+    return bool(row and row["status"] in ("queued", "running"))
+
+
+def task_worker_loop():
+    while True:
+        server_id, log_id = TASK_QUEUE.get()
+        try:
+            row = get_server(server_id)
+            if not row:
+                update_log(log_id, "failed", "任务失败：服务器不存在", "任务失败: 服务器不存在或已删除")
+                continue
+
+            update_log(
+                log_id,
+                "running",
+                "任务执行中，请稍后刷新查看结果...",
+                f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中",
+            )
+            run_remote(row, log_id)
+        finally:
+            TASK_QUEUE.task_done()
+
+
+def start_task_worker():
+    threading.Thread(target=task_worker_loop, daemon=True).start()
+
+
 def run_for_server(server_id):
     row = get_server(server_id)
-    if row:
-        log_id = save_log(
-            row["id"],
-            "running",
-            "任务执行中，请稍后刷新查看结果...",
-            f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中",
-        )
-        threading.Thread(target=run_remote, args=(row, log_id), daemon=True).start()
+    if not row:
+        return False, "服务器不存在"
+
+    if has_pending_or_running(server_id):
+        return False, "该服务器已有排队/执行中的任务，已跳过重复提交"
+
+    log_id = save_log(
+        row["id"],
+        "queued",
+        "任务已进入队列，等待前序服务器执行完成...",
+        f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 排队中（将按顺序依次执行）",
+    )
+    TASK_QUEUE.put((row["id"], log_id))
+    return True, "任务已加入队列，将按顺序依次执行"
 
 
 def check_scheduled_jobs():
@@ -773,8 +823,8 @@ def add_server():
     with closing(get_conn()) as conn:
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed)
-            VALUES(?,?,?,?,?,?,?,0)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented)
+            VALUES(?,?,?,?,?,?,?,0,0)
             """,
             (
                 form["name"].strip(),
@@ -844,11 +894,26 @@ def toggle_renew(server_id):
     return redirect(url_for("details_page"))
 
 
+@app.route("/servers/<int:server_id>/toggle-rent", methods=["POST"])
+@login_required
+def toggle_rent(server_id):
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT is_rented FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            flash("服务器不存在", "error")
+            return redirect(url_for("details_page"))
+        next_state = 0 if row["is_rented"] else 1
+        conn.execute("UPDATE servers SET is_rented = ? WHERE id = ?", (next_state, server_id))
+        conn.commit()
+    flash("已标记为已出租" if next_state else "已标记为未出租", "success")
+    return redirect(url_for("details_page"))
+
+
 @app.route("/servers/<int:server_id>/run", methods=["POST"])
 @login_required
 def run_now(server_id):
-    run_for_server(server_id)
-    flash("任务已开始执行，请稍后查看结果", "success")
+    ok, msg = run_for_server(server_id)
+    flash(msg, "success" if ok else "error")
     return redirect(url_for("details_page"))
 
 
@@ -861,6 +926,7 @@ def start_scheduler():
 
 if __name__ == "__main__":
     init_db()
+    start_task_worker()
     scheduler = start_scheduler()
     try:
         app.run(host=PANEL_HOST, port=PANEL_PORT, debug=False)

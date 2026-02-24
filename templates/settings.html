@@ -36,7 +36,7 @@
   <h2>服务器配置列表</h2>
   {% for s in servers %}
   <details>
-    <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 每月{{ s.reset_day }}日 01:00 | 自动重置: {{ '是' if s.auto_reset else '否' }}</summary>
+    <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 每月{{ s.reset_day }}日 01:00 | 自动重置开关: {{ '开' if s.auto_reset else '关' }} | 续租状态: {{ '续租中（跳过定时重置）' if s.is_renewed else '未续租' }}</summary>
     <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
       <label>名称<input name="name" value="{{ s.name }}" required /></label>
       <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
@@ -45,6 +45,7 @@
       <label>root密码<input name="ssh_password" type="password" value="{{ s.ssh_password }}" required /></label>
       <label>每月重置日<input name="reset_day" type="number" min="1" max="31" value="{{ s.reset_day }}" required /></label>
       <label class="inline"><input name="auto_reset" type="checkbox" {% if s.auto_reset %}checked{% endif %}/> 到期自动重置</label>
+      <p class="hint">说明：当“服务器详情”里切到“续租中”时，即使这里是开启，也会跳过该服务器的定时重置。</p>
       <div class="button-row"><button type="submit">保存</button></div>
     </form>
     <div class="button-row">
