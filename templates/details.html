@@ -43,18 +43,18 @@
       <div class="server-actions">
         <form method="post" action="/servers/{{ row.id }}/toggle-rent">
           <button type="submit" class="rent-btn {% if row.is_rented %}rent-btn-on{% else %}rent-btn-off{% endif %}">
-            {{ '已出租（点击改未出租）' if row.is_rented else '未出租（点击改已出租）' }}
+            {{ '已出租' if row.is_rented else '未出租' }}
           </button>
         </form>
         <form method="post" action="/servers/{{ row.id }}/toggle-renew">
           {% if row.is_renewed %}
-          <button type="submit" class="warn">续租中（点击关闭）</button>
+          <button type="submit" class="warn">续租中</button>
           {% else %}
-          <button type="submit">未续租（点击开启）</button>
+          <button type="submit">未续租</button>
           {% endif %}
         </form>
         <form method="post" action="/servers/{{ row.id }}/run">
-          <button type="submit">立即执行</button>
+          <button type="submit">执行一次重置</button>
         </form>
         <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
       </div>
@@ -66,15 +66,34 @@
     {% endfor %}
   </div>
 </section>
-{% endblock %}
 
 <script>
-function copySummary(rowId) {
-  const text = document.getElementById(`summary-${rowId}`).innerText;
-  navigator.clipboard.writeText(text).then(() => {
+async function copySummary(rowId) {
+  const summaryNode = document.getElementById(`summary-${rowId}`);
+  if (!summaryNode) {
+    alert('未找到可复制内容');
+    return;
+  }
+
+  const text = summaryNode.innerText;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
     alert('已复制到剪贴板');
-  }).catch(() => {
+  } catch (error) {
     alert('复制失败，请手动复制');
-  });
+  }
 }
 </script>
+{% endblock %}

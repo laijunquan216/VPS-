@@ -105,6 +105,7 @@ def init_db():
                 smtp_password TEXT NOT NULL DEFAULT '',
                 smtp_from TEXT NOT NULL DEFAULT '',
                 notify_email_to TEXT NOT NULL DEFAULT '',
+                traffic_data_source TEXT NOT NULL DEFAULT 'agent',
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -197,6 +198,7 @@ def init_db():
         ensure_column(conn, "global_config", "smtp_password TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "smtp_from TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "notify_email_to TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "traffic_data_source TEXT NOT NULL DEFAULT 'agent'")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -224,12 +226,12 @@ def get_global_config():
         return row
 
 
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_data_source=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -245,6 +247,7 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 smtp_password,
                 smtp_from.strip(),
                 notify_email_to.strip(),
+                normalize_traffic_data_source(traffic_data_source),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -369,8 +372,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -385,6 +388,7 @@ def restore_backup_payload(payload):
                 global_cfg.get("smtp_password", ""),
                 global_cfg.get("smtp_from", ""),
                 global_cfg.get("notify_email_to", ""),
+                normalize_traffic_data_source(global_cfg.get("traffic_data_source", "agent")),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -699,6 +703,10 @@ def refresh_server_traffic(server_row):
 
 
 def refresh_all_traffic_data():
+    cfg = get_global_config()
+    if normalize_traffic_data_source(cfg["traffic_data_source"] if cfg else "agent") != "ssh":
+        return
+
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
     for row in rows:
@@ -720,16 +728,7 @@ def should_reset(server_row):
         return False
     if now.minute != int(server_row["reset_minute"] or 0):
         return False
-
-    if not server_row["last_reset_at"]:
-        return True
-
-    try:
-        last = datetime.strptime(server_row["last_reset_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
-    except ValueError:
-        return True
-
-    return not (last.year == now.year and last.month == now.month)
+    return True
 
 
 def is_reinstall_command(command):
@@ -815,7 +814,7 @@ def extract_summary(server_row, raw_output):
     fb = re.search(r"📁\s*FileBrowser[\s\S]*?--------", raw_output)
 
     lines = [
-        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row.get('reset_hour', 1)):02d}:{int(server_row.get('reset_minute', 0)):02d}（北京时间）服务器重置",
+        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row.get('reset_hour', 1)):02d}:{int(server_row.get('reset_minute', 0)):02d}（北京时间）重置，需要续租请提前下单",
         f"IP address: {ip_match.group(1) if ip_match else server_row['ip']}",
         f"Your new root passwort is {pass_match.group(1).strip() if pass_match else server_row['ssh_password']}",
     ]
@@ -1099,6 +1098,10 @@ def normalize_backoff_plan_text(text):
     return ",".join(str(v) for v in parse_backoff_plan(text))
 
 
+def normalize_traffic_data_source(value):
+    return "ssh" if str(value or "").strip().lower() == "ssh" else "agent"
+
+
 def parse_int_form_field(form, field_name, default=None, min_value=None, max_value=None):
     raw = form.get(field_name, default)
     try:
@@ -1174,7 +1177,9 @@ def task_worker_loop():
             next_run_at = datetime.strptime(task["next_run_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
             now_dt = datetime.now(TIMEZONE)
             if next_run_at > now_dt:
-                time.sleep((next_run_at - now_dt).total_seconds())
+                TASK_QUEUE.put(task_id)
+                time.sleep(min((next_run_at - now_dt).total_seconds(), 1))
+                continue
 
             row = get_server(task["server_id"])
             if not row:
@@ -1240,8 +1245,8 @@ def task_worker_loop():
                 update_log(
                     task["log_id"],
                     "retrying",
-                    f"检测到可重试错误，将在 {wait_seconds}s 后重试（第{attempt_no + 1}/{max_attempts}次）",
-                    (output or "") + f"\n\n系统提示: 已进入重试等待（{wait_seconds}s）",
+                    f"检测到可重试错误，已加入队列尾部，最早在 {wait_seconds}s 后重试（第{attempt_no + 1}/{max_attempts}次）",
+                    (output or "") + f"\n\n系统提示: 重试任务已回到队列尾部，最早 {wait_seconds}s 后执行（全局串行，仅同时执行一台）",
                 )
                 TASK_QUEUE.put(task_id)
             else:
@@ -1311,7 +1316,7 @@ def check_scheduled_jobs():
             continue
 
         if not should_reset(row):
-            upsert_notification_batch_item(batch_key, row, "skipped", note="本月已执行或不满足重置条件")
+            upsert_notification_batch_item(batch_key, row, "skipped", note="未开启定时自动执行或不在预定时间")
             continue
 
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
@@ -1551,6 +1556,10 @@ def agent_report():
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "invalid rx/tx"}), 400
 
+    cfg = get_global_config()
+    if normalize_traffic_data_source(cfg["traffic_data_source"] if cfg else "agent") != "agent":
+        return jsonify({"ok": True, "ignored": True, "reason": "traffic source is ssh"})
+
     now_dt = datetime.now(TIMEZONE)
     with closing(get_conn()) as conn:
         row = conn.execute("SELECT * FROM servers WHERE agent_token = ?", (token,)).fetchone()
@@ -1625,6 +1634,7 @@ def update_global_tasks():
         form.get("smtp_password", ""),
         form.get("smtp_from", ""),
         form.get("notify_email_to", ""),
+        form.get("traffic_data_source", "agent"),
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
