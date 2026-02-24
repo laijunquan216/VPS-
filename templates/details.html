@@ -43,18 +43,18 @@
       <div class="server-actions">
         <form method="post" action="/servers/{{ row.id }}/toggle-rent">
           <button type="submit" class="rent-btn {% if row.is_rented %}rent-btn-on{% else %}rent-btn-off{% endif %}">
-            {{ '已出租（点击改未出租）' if row.is_rented else '未出租（点击改已出租）' }}
+            {{ '已出租' if row.is_rented else '未出租' }}
           </button>
         </form>
         <form method="post" action="/servers/{{ row.id }}/toggle-renew">
           {% if row.is_renewed %}
-          <button type="submit" class="warn">续租中（点击关闭）</button>
+          <button type="submit" class="warn">续租中</button>
           {% else %}
-          <button type="submit">未续租（点击开启）</button>
+          <button type="submit">未续租</button>
           {% endif %}
         </form>
         <form method="post" action="/servers/{{ row.id }}/run">
-          <button type="submit">立即执行</button>
+          <button type="submit">执行一次重置</button>
         </form>
         <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
       </div>
