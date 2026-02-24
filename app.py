@@ -204,6 +204,33 @@ def inject_random_password_if_needed(command, server_row, generated_password):
     return command, pwd
 
 
+
+def inject_random_ssh2_password_if_needed(command):
+    # 针对 PT 安装脚本自动生成 12 位随机面板密码
+    if "qb_fb_vertex_installer.sh" not in command:
+        return command, None
+
+    pwd = generate_root_password(12)
+    if "-p" in command:
+        command = re.sub(r"-p\s+'[^']*'", f"-p '{pwd}'", command)
+        command = re.sub(r'-p\s+"[^"]*"', f'-p "{pwd}"', command)
+        command = re.sub(r"-p\s+([^\s'\"]+)", f"-p '{pwd}'", command)
+    else:
+        command = f"{command} -p '{pwd}'"
+
+    return command, pwd
+
+
+def normalize_shell_command(command):
+    # 兼容从网页复制时出现的中文引号
+    return (
+        command.replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+    )
+
+
 def should_reset(server_row):
     now = datetime.now(TIMEZONE)
     if not server_row["auto_reset"]:
@@ -241,30 +268,48 @@ def connect_ssh(server_row, timeout=20):
     return client
 
 
-def wait_for_ssh_reconnect(server_row, output_lines):
+def wait_for_ssh_reconnect(server_row, output_lines, password_candidates):
     output_lines.append("等待服务器重装并重启后重新连线...")
     deadline = time.time() + SSH_RECONNECT_TIMEOUT_SECONDS
     while time.time() < deadline:
-        try:
-            client = connect_ssh(server_row, timeout=15)
-            output_lines.append("服务器已重新上线，SSH重连成功")
-            return client
-        except Exception as exc:
-            output_lines.append(f"等待重连中: {exc}")
-            time.sleep(SSH_RETRY_INTERVAL_SECONDS)
+        for pwd in password_candidates:
+            try:
+                trial = dict(server_row)
+                trial["ssh_password"] = pwd
+                client = connect_ssh(trial, timeout=15)
+                output_lines.append(f"服务器已重新上线，SSH重连成功（密码候选: {pwd[:3]}***）")
+                return client, pwd
+            except Exception as exc:
+                output_lines.append(f"等待重连中({pwd[:3]}***): {exc}")
+        time.sleep(SSH_RETRY_INTERVAL_SECONDS)
 
     raise TimeoutError("等待服务器重连超时，请检查重装是否成功")
 
 
 def execute_command_and_collect(client, title, command, output_lines):
     output_lines.append(f"执行 {title}: {command}")
-    _, stdout, stderr = client.exec_command(command)
+
+    wrapped_command = f"export TERM=xterm; {command}"
+    _, stdout, stderr = client.exec_command(wrapped_command)
     out = stdout.read().decode("utf-8", errors="ignore")
     err = stderr.read().decode("utf-8", errors="ignore")
+
     if out:
         output_lines.append(f"{title}输出:\n{out}")
+
     if err:
-        output_lines.append(f"{title}错误:\n{err}")
+        benign_lines = []
+        real_error_lines = []
+        for line in err.splitlines():
+            if "tput: No value for $TERM" in line:
+                benign_lines.append(line)
+            elif line.strip():
+                real_error_lines.append(line)
+
+        if real_error_lines:
+            output_lines.append(f"{title}错误:\n" + "\n".join(real_error_lines))
+        elif benign_lines:
+            output_lines.append(f"{title}提示: 终端变量告警已忽略({len(benign_lines)}条)")
 
 
 def extract_summary(server_row, raw_output):
@@ -276,7 +321,7 @@ def extract_summary(server_row, raw_output):
     fb = re.search(r"📁\s*FileBrowser[\s\S]*?--------", raw_output)
 
     lines = [
-        f"{server_row['name']}（名称），{server_row['reset_day']}日凌晨1点（北京时间）刷新流量",
+        f"{server_row['name']}（名称），{server_row['reset_day']}日凌晨1点（北京时间）服务器重置",
         f"IP address: {ip_match.group(1) if ip_match else server_row['ip']}",
         f"Your new root passwort is {pass_match.group(1).strip() if pass_match else server_row['ssh_password']}",
     ]
@@ -296,11 +341,12 @@ def run_remote(server_row):
     try:
         mutable_server = dict(server_row)
         generated_password = None
+        original_password = mutable_server["ssh_password"]
         global_cfg = get_global_config()
 
-        reset_command = (global_cfg["reset_command"] or "").strip()
-        ssh_command_2 = (global_cfg["ssh_command_2"] or "").strip()
-        ssh_command_3 = (global_cfg["ssh_command_3"] or "").strip()
+        reset_command = normalize_shell_command((global_cfg["reset_command"] or "").strip())
+        ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
+        ssh_command_3 = normalize_shell_command((global_cfg["ssh_command_3"] or "").strip())
 
         client = connect_ssh(mutable_server)
         output_lines.append("SSH 连接成功")
@@ -324,11 +370,22 @@ def run_remote(server_row):
                 client = None
                 time.sleep(POST_REINSTALL_WAIT_SECONDS)
                 if ssh_command_2 or ssh_command_3:
-                    client = wait_for_ssh_reconnect(mutable_server, output_lines)
+                    passwords = []
+                    if generated_password:
+                        passwords.append(generated_password)
+                    passwords.append(original_password)
+                    client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, passwords)
+                    if connected_pwd != mutable_server["ssh_password"]:
+                        mutable_server["ssh_password"] = connected_pwd
+                        update_server_password(mutable_server["id"], connected_pwd)
+                        output_lines.append("检测到实际可登录密码与预设不同，已自动回写面板")
             else:
                 execute_command_and_collect(client, "重置任务", reset_command, output_lines)
 
         if ssh_command_2:
+            ssh_command_2, ssh2_password = inject_random_ssh2_password_if_needed(ssh_command_2)
+            if ssh2_password:
+                output_lines.append(f"SSH任务2检测到固定密码参数，已替换为随机12位密码: {ssh2_password}")
             if client is None:
                 client = connect_ssh(mutable_server)
                 output_lines.append("执行 SSH任务2 前重新建立SSH连接成功")

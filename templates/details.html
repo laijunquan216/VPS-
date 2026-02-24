@@ -37,7 +37,12 @@
         </td>
       </tr>
       <tr>
-        <td colspan="7"><pre>{{ row.summary or '暂无摘要，先执行一次任务。' }}</pre></td>
+        <td colspan="7">
+          <div class="summary-toolbar">
+            <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
+          </div>
+          <pre id="summary-{{ row.id }}">{{ row.summary or '暂无摘要，先执行一次任务。' }}</pre>
+        </td>
       </tr>
       {% else %}
       <tr><td colspan="7">暂无服务器</td></tr>
@@ -46,3 +51,14 @@
   </table>
 </section>
 {% endblock %}
+
+<script>
+function copySummary(rowId) {
+  const text = document.getElementById(`summary-${rowId}`).innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    alert('已复制到剪贴板');
+  }).catch(() => {
+    alert('复制失败，请手动复制');
+  });
+}
+</script>
