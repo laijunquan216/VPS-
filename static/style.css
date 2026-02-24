@@ -15,6 +15,7 @@ nav{display:flex;gap:10px}.nav-link{padding:10px 16px;border-radius:10px;text-de
 input,textarea,button{border:1px solid #d1d5db;border-radius:10px;padding:10px;font-size:15px}
 textarea{min-height:60px}button{background:var(--primary);color:#fff;border:none;cursor:pointer}.danger{background:#b42318}
 .button-row{display:flex;gap:10px;margin-top:10px}
+.warn{background:#f59e0b;color:#111827}
 .table{width:100%;border-collapse:collapse}.table th,.table td{padding:12px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
 .badge{padding:4px 10px;border-radius:999px;background:#eef2f7;color:#475569;font-weight:700}.badge.ok{background:#dcfce7;color:#166534}.badge.bad{background:#fee2e2;color:#991b1b}.badge.running{background:#dbeafe;color:#1d4ed8}
 pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px}

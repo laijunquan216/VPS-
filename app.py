@@ -66,6 +66,7 @@ def init_db():
                 ssh_password TEXT NOT NULL,
                 reset_day INTEGER NOT NULL,
                 auto_reset INTEGER NOT NULL DEFAULT 1,
+                is_renewed INTEGER NOT NULL DEFAULT 0,
                 last_reset_at TEXT
             )
             """
@@ -97,6 +98,7 @@ def init_db():
         )
 
         ensure_column(conn, "servers", "last_reset_at TEXT")
+        ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
@@ -200,7 +202,7 @@ def list_detail_rows():
         return conn.execute(
             """
             SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day,
-                   s.auto_reset, l.summary, l.status, l.created_at AS latest_run_at
+                   s.auto_reset, s.is_renewed, l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
                 SELECT l2.id FROM job_logs l2
@@ -393,6 +395,8 @@ def sanitize_terminal_text(text):
 def should_reset(server_row):
     now = datetime.now(TIMEZONE)
     if not server_row["auto_reset"]:
+        return False
+    if server_row["is_renewed"]:
         return False
     if server_row["reset_day"] != now.day:
         return False
@@ -769,8 +773,8 @@ def add_server():
     with closing(get_conn()) as conn:
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset)
-            VALUES(?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed)
+            VALUES(?,?,?,?,?,?,?,0)
             """,
             (
                 form["name"].strip(),
@@ -823,6 +827,21 @@ def delete_server(server_id):
         conn.commit()
     flash("服务器已删除", "success")
     return redirect(url_for("settings_page"))
+
+
+@app.route("/servers/<int:server_id>/toggle-renew", methods=["POST"])
+@login_required
+def toggle_renew(server_id):
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT is_renewed FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            flash("服务器不存在", "error")
+            return redirect(url_for("details_page"))
+        next_state = 0 if row["is_renewed"] else 1
+        conn.execute("UPDATE servers SET is_renewed = ? WHERE id = ?", (next_state, server_id))
+        conn.commit()
+    flash("已切换为续租状态，后续将跳过定时重置" if next_state else "已关闭续租状态，恢复按计划重置", "success")
+    return redirect(url_for("details_page"))
 
 
 @app.route("/servers/<int:server_id>/run", methods=["POST"])

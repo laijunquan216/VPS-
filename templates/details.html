@@ -14,7 +14,7 @@
   <table class="table">
     <thead>
       <tr>
-        <th>名称</th><th>IP</th><th>root密码</th><th>重置日</th><th>状态</th><th>最后执行</th><th>操作</th>
+        <th>名称</th><th>IP</th><th>root密码</th><th>重置日</th><th>状态</th><th>是否续租</th><th>最后执行</th><th>操作</th>
       </tr>
     </thead>
     <tbody>
@@ -30,6 +30,15 @@
           {% elif row.status == 'running' %}<span class="badge running">执行中</span>
           {% else %}<span class="badge">未执行</span>{% endif %}
         </td>
+        <td>
+          <form method="post" action="/servers/{{ row.id }}/toggle-renew">
+            {% if row.is_renewed %}
+            <button type="submit" class="warn">续租中（点击关闭）</button>
+            {% else %}
+            <button type="submit">未续租（点击开启）</button>
+            {% endif %}
+          </form>
+        </td>
         <td>{{ row.latest_run_at or '-' }}</td>
         <td>
           <form method="post" action="/servers/{{ row.id }}/run">
@@ -38,7 +47,7 @@
         </td>
       </tr>
       <tr>
-        <td colspan="7">
+        <td colspan="8">
           <div class="summary-toolbar">
             <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
           </div>
@@ -46,7 +55,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7">暂无服务器</td></tr>
+      <tr><td colspan="8">暂无服务器</td></tr>
       {% endfor %}
     </tbody>
   </table>
