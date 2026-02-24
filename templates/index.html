@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VPS 控制面板</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <h1>VPS 控制面板（设置板块 + 显示板块）</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-wrap">
+          {% for category, msg in messages %}
+            <div class="flash {{ category }}">{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <section class="panel">
+      <h2>设置板块：新增服务器</h2>
+      <form method="post" action="/servers" class="grid-form">
+        <label>名称<input name="name" required /></label>
+        <label>IP<input name="ip" required /></label>
+        <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
+        <label>SSH用户<input name="ssh_user" value="root" required /></label>
+        <label>root密码<input name="ssh_password" type="password" required /></label>
+        <label>每月重置日期（北京时间凌晨1点执行）<input name="reset_day" type="number" min="1" max="31" required /></label>
+        <label class="inline"><input name="auto_reset" type="checkbox" checked /> 到期自动重置</label>
+        <label class="full">SSH任务栏 - 代码1<textarea name="ssh_command_1" rows="3" placeholder="代码1，先执行"></textarea></label>
+        <label class="full">SSH任务栏 - 代码2<textarea name="ssh_command_2" rows="3" placeholder="代码2，第二个执行"></textarea></label>
+        <label class="full">SSH任务栏 - 代码3<textarea name="ssh_command_3" rows="3" placeholder="代码3，第三个执行"></textarea></label>
+        <button type="submit">添加服务器</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>设置板块：服务器配置列表</h2>
+      {% for s in servers %}
+      <details>
+        <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 每月{{ s.reset_day }}日 01:00（北京时间） | 自动重置: {{ '是' if s.auto_reset else '否' }}</summary>
+        <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
+          <label>名称<input name="name" value="{{ s.name }}" required /></label>
+          <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
+          <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
+          <label>SSH用户<input name="ssh_user" value="{{ s.ssh_user }}" required /></label>
+          <label>root密码<input name="ssh_password" type="password" value="{{ s.ssh_password }}" required /></label>
+          <label>每月重置日期<input name="reset_day" type="number" min="1" max="31" value="{{ s.reset_day }}" required /></label>
+          <label class="inline"><input name="auto_reset" type="checkbox" {% if s.auto_reset %}checked{% endif %}/> 到期自动重置</label>
+          <label class="full">SSH任务栏 - 代码1<textarea name="ssh_command_1" rows="3">{{ s.ssh_command_1 }}</textarea></label>
+          <label class="full">SSH任务栏 - 代码2<textarea name="ssh_command_2" rows="3">{{ s.ssh_command_2 }}</textarea></label>
+          <label class="full">SSH任务栏 - 代码3<textarea name="ssh_command_3" rows="3">{{ s.ssh_command_3 }}</textarea></label>
+          <div class="button-row"><button type="submit">保存修改</button></div>
+        </form>
+        <div class="button-row">
+          <form method="post" action="/servers/{{ s.id }}/run"><button type="submit">立即执行</button></form>
+          <form method="post" action="/servers/{{ s.id }}/delete" onsubmit="return confirm('确认删除?')"><button class="danger" type="submit">删除</button></form>
+        </div>
+      </details>
+      {% else %}
+      <p>暂无服务器。</p>
+      {% endfor %}
+    </section>
+
+    <section class="panel">
+      <h2>显示板块：结果汇总</h2>
+      {% for row in display_rows %}
+      <article class="summary-card">
+        <h3>{{ row.name }} | {{ row.ip }} | 每月{{ row.reset_day }}日刷新流量</h3>
+        <p><strong>当前root密码：</strong>{{ row.ssh_password }}</p>
+        <p><strong>最后执行：</strong>{{ row.latest_run_at or '暂无执行记录' }}</p>
+        <pre>{{ row.summary or '暂无一键结果总结，先手动执行一次任务。' }}</pre>
+      </article>
+      {% else %}
+      <p>暂无展示数据。</p>
+      {% endfor %}
+    </section>
+
+    <section class="panel">
+      <h2>完整任务日志</h2>
+      {% for log in logs %}
+      <article class="log-card {{ log.status }}">
+        <h3>{{ log.created_at }} | {{ log.server_name }} | {{ log.status }}</h3>
+        <pre>{{ log.output }}</pre>
+      </article>
+      {% else %}
+      <p>暂无日志。</p>
+      {% endfor %}
+    </section>
+  </main>
+</body>
+</html>
