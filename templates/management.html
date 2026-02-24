@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% set active = 'management' %}
+{% set title = '面板管理' %}
+{% block content %}
+<section class="panel">
+  <h2>数据备份与恢复</h2>
+  <div class="button-row">
+    <a class="button-link" href="{{ url_for('download_backup') }}">下载数据备份</a>
+  </div>
+  <form method="post" action="{{ url_for('restore_backup') }}" enctype="multipart/form-data" class="grid-form">
+    <label class="full">选择备份文件（.json）
+      <input type="file" name="backup_file" accept=".json,application/json" required />
+    </label>
+    <button type="submit" onclick="return confirm('恢复会覆盖当前所有数据，确认继续？')">恢复备份</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>登录密码管理</h2>
+  <form method="post" action="{{ url_for('change_panel_password') }}" class="grid-form">
+    <label>当前密码
+      <input type="password" name="current_password" required />
+    </label>
+    <label>新密码
+      <input type="password" name="new_password" minlength="4" required />
+    </label>
+    <label>确认新密码
+      <input type="password" name="confirm_password" minlength="4" required />
+    </label>
+    <button type="submit">修改登录密码</button>
+  </form>
+</section>
+{% endblock %}
