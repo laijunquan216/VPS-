@@ -1,20 +1,8 @@
-# VPS 自动重置与 PT 盒子部署面板
+# VPS 自动重置与 PT 部署面板
 
-这是一个轻量化 Web 控制面板，用于管理多台 VPS 的到期重置与脚本化部署。
+轻量 Web 面板，用于统一管理多台 VPS 的定时重置、SSH 自动化任务、流量统计与通知。
 
-## 你关心的问题
-
-
-### 0) 重启后 /tmp 丢失导致无法更新（你这次遇到的问题）
-
-`/tmp` 是临时目录，重启后可能被清空，所以之前放在 `/tmp/vps-panel-src` 的源码目录会消失。
-现在建议固定使用 `/opt/vps-panel-src`，并使用内置更新命令：
-
-```bash
-sudo vps-panel-update
-```
-
-如果是首次恢复，请执行：
+## 快速安装
 
 ```bash
 git clone https://github.com/laijunquan216/VPS-.git /opt/vps-panel-src
@@ -22,59 +10,13 @@ cd /opt/vps-panel-src
 sudo bash install_panel.sh
 ```
 
-服务排查命令：
-
-```bash
-systemctl status vps-panel.service --no-pager
-journalctl -u vps-panel.service -n 200 --no-pager
-sudo systemctl restart vps-panel.service
-```
-
-### 1) 面板现在能不能安装？
-可以。仓库已经包含完整代码与一键安装脚本 `install_panel.sh`，可直接在一台 Linux VPS（建议 Ubuntu 22.04+/Debian 12+）部署。
-
-### 2) 如何在一台 VPS 上安装？
-
-#### 方式A：推荐（一键安装）
-
-```bash
-git clone https://github.com/laijunquan216/VPS-.git /opt/vps-panel-src
-cd /opt/vps-panel-src
-sudo bash install_panel.sh
-```
-
-安装完成后：
-
-- 服务名：`vps-panel.service`
-- 访问：`http://<你的VPS公网IP>:5000`
+安装后：
+- 访问：`http://<你的服务器IP>:5000`
+- 服务：`vps-panel.service`
 - 查看状态：`systemctl status vps-panel.service`
 - 查看日志：`journalctl -u vps-panel.service -f`
 
-> 如需修改端口/密钥，可安装前设置环境变量，例如：
-
-```bash
-sudo PANEL_PORT=8080 FLASK_SECRET='请改成随机长串' bash install_panel.sh
-```
-
-#### 方式B：手动安装
-
-```bash
-mkdir -p /opt/vps-panel
-cp app.py requirements.txt /opt/vps-panel/
-cp -r templates static /opt/vps-panel/
-cd /opt/vps-panel
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python app.py
-```
-
-默认监听 `0.0.0.0:5000`。
-
-### 3) 仓库地址（用于同步更新）
-
-- GitHub：`https://github.com/laijunquan216/VPS-`
-- 后续每次有新改动，直接在服务器执行：
+更新：
 
 ```bash
 cd /opt/vps-panel-src
@@ -82,36 +24,61 @@ git pull
 sudo bash install_panel.sh
 ```
 
----
+## 核心功能
 
+- 三个页面：`服务器详情`、`服务器设置`、`面板管理`。
+- 全局任务：重置任务 + SSH任务2 + SSH任务3（一次配置，多机复用）。
+- 定时重置：按每台服务器自定义 `重置日 + 时/分` 执行。
+- 强容错队列：串行执行、失败可重试（可配置次数与退避秒数）、重启后自动恢复未完成任务。
+- 状态控制：续租中自动跳过定时重置；支持已出租/未出租标记。
+- 自动密码处理：
+  - DD 重装命令 `InstallNET.sh -pwd` 自动替换随机 root 密码并回写。
+  - SSH任务2 固定 `-p` 自动替换为随机 12 位密码。
+- 内置 Agent 流量统计：显示上传/下载/总流量（按重置周期）。
+- 邮件通知：
+  - 支持 SMTP 配置 + 测试邮件按钮。
+  - 定时重置按同一时间批次合并发送一封汇总邮件（成功/失败/跳过）。
+- 备份与恢复：支持面板数据导出/导入迁移。
+- 面板登录保护：默认密码 `admin`，可在面板管理页修改。
 
-## DD 重装密码自动化（重要）
+## 使用要点
 
-如果你在 SSH任务栏里使用类似下面命令：
+### 1) DD 重装密码自动注入
+当重置任务中包含 `InstallNET.sh -pwd` 时，面板会自动注入随机密码并回写服务器密码字段。
 
-```bash
-wget --no-check-certificate -qO InstallNET.sh 'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' && chmod a+x InstallNET.sh && bash InstallNET.sh -debian 11 -pwd 'YwjnPc28j6l2p1'
+### 2) Agent 上报地址
+请在全局任务中正确填写“面板公网地址（Agent上报地址）”，例如：
+
+```text
+http://你的面板IP:5000
 ```
 
-系统会在执行时自动把 `-pwd` 替换为随机密码，并回写到面板中的 root 密码字段（显示板块也会同步展示）。
+否则远端 VPS 无法回传流量数据。
 
-## 功能
+### 3) 邮件通知说明
+- 手动“立即执行”：按单台任务结果记录。
+- 定时任务：同一时刻触发的服务器会合并成一封汇总邮件，避免刷屏。
 
-- 页面分为三个独立页面：`服务器详情`、`服务器设置` 与 `面板管理`。
-- `服务器设置` 页面可维护服务器基础信息（名称/IP/root密码/重置日/自动重置）。
-- 重置任务、SSH任务2、SSH任务3 改为“全局任务”，只需在一个位置配置一次，所有服务器共用。
-- 重置任务与SSH任务分离：先执行“重置任务”，重连后再执行 SSH任务2、SSH任务3。
-- 支持“重装后 Agent 安装命令”：检测到重装流程时会自动执行，可用于给每台机器安装探针/监控 Agent（支持变量 `{ip}`、`{name}`、`{ssh_user}`）。
-- 面板内置流量采集链路：重装后自动安装 `vps-panel-agent`，Agent 按固定间隔上报上传/下载字节到本面板，详情页展示“本周期上传/下载/总流量”。
-- Agent 安装过程中 systemd 可能输出 `Created symlink ...`，该信息为正常行为（代表定时器已启用），面板会按“提示”而非“错误”显示。
-- 流量统计周期按服务器重置日计算（北京时间 01:00 切周期），即使当月未实际重置也会按该周期累计。
-- 需在全局任务里填写“面板公网地址（Agent上报地址）”，例如 `http://你的面板IP:5000`，确保目标 VPS 可回连。
-<<<<<<< codex/create-vps-management-control-panel-tlwv78
+## 环境变量
+
+- `VPS_PANEL_DB`：数据库路径（默认 `panel.db`）
+- `FLASK_SECRET`：会话密钥（建议修改）
+- `PANEL_HOST`：监听地址（默认 `0.0.0.0`）
+- `PANEL_PORT`：监听端口（默认 `5000`）
+- `SSH_RECONNECT_TIMEOUT_SECONDS`：重连超时秒数（默认 `1800`）
+- `SSH_RETRY_INTERVAL_SECONDS`：重连重试间隔秒数（默认 `15`）
+- `DEFAULT_MAX_RETRIES`：默认重试次数（默认 `2`）
+- `DEFAULT_RETRY_BACKOFF_SECONDS`：默认退避秒数（默认 `60,180`）
+
+## 常见问题
+
+### 1) 更新后源码目录丢失
+请固定使用 `/opt/vps-panel-src`，不要放在 `/tmp`（重启可能被清空）。
+
+### 2) 缺少 venv/pip
+Debian/Ubuntu 可执行：
 - 支持重置结果邮件通知：可配置 SMTP（host/port/user/password）与收件人，并支持“邮箱测试”按钮。
 - 定时重置时邮件会按批次合并发送：同一时刻触发的服务器在全部完成后统一发一封汇总邮件（成功/失败/续租跳过）。
-=======
-- 支持重置结果邮件通知：可配置 SMTP（host/port/user/password）与收件人，服务器重置成功或失败后自动发邮件。
->>>>>>> main
 - 当重置任务是 `InstallNET.sh -pwd` 时，会自动生成随机 root 密码并回写到面板。
 - 重装后重连会优先尝试新生成密码，同时回退尝试旧密码；若最终可登录密码与预设不同，会自动回写面板。
 - 系统会自动纠正常见中文引号（“”‘’），避免命令粘贴后执行异常。
@@ -167,21 +134,10 @@ sudo apt-get update
 sudo apt-get install -y python3-venv python3-pip
 ```
 
-然后重新执行：
+### 3) 服务异常
 
 ```bash
-cd /opt/vps-panel-src
-sudo bash install_panel.sh
+systemctl status vps-panel.service --no-pager
+journalctl -u vps-panel.service -n 200 --no-pager
+sudo systemctl restart vps-panel.service
 ```
-
-
-如果你之前执行失败过，可能会留下损坏的 `.venv` 目录。新版脚本会自动重建；你也可以手动清理后重试：
-
-```bash
-cd /opt/vps-panel
-sudo rm -rf .venv
-cd /opt/vps-panel-src
-sudo bash install_panel.sh
-```
-
-

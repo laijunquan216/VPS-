@@ -33,10 +33,6 @@
         <div><span>IP</span><strong>{{ row.ip }}</strong></div>
         <div><span>root密码</span><strong>{{ row.ssh_password }}</strong></div>
         <div><span>重置日</span><strong>{{ row.reset_day }}日 {{ "%02d"|format(row.reset_hour or 1) }}:{{ "%02d"|format(row.reset_minute or 0) }}</strong></div>
-<<<<<<< codex/create-vps-management-control-panel-tlwv78
-=======
-        <div><span>重置日</span><strong>{{ row.reset_day }}日 01:00</strong></div>
->>>>>>> main
         <div><span>最后执行</span><strong>{{ row.latest_run_at or '-' }}</strong></div>
         <div><span>上传流量（本周期）</span><strong>{{ row.traffic_upload_text }}</strong></div>
         <div><span>下载流量（本周期）</span><strong>{{ row.traffic_download_text }}</strong></div>

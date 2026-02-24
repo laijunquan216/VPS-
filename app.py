@@ -1095,6 +1095,24 @@ def parse_backoff_plan(text):
     return values or [60, 180]
 
 
+def normalize_backoff_plan_text(text):
+    return ",".join(str(v) for v in parse_backoff_plan(text))
+
+
+def parse_int_form_field(form, field_name, default=None, min_value=None, max_value=None):
+    raw = form.get(field_name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} 必须是整数")
+
+    if min_value is not None and value < min_value:
+        raise ValueError(f"{field_name} 不能小于 {min_value}")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{field_name} 不能大于 {max_value}")
+    return value
+
+
 def is_retryable_failure(output_text):
     text = (output_text or "").lower()
     patterns = (
@@ -1588,6 +1606,12 @@ def agent_report():
 @login_required
 def update_global_tasks():
     form = request.form
+    try:
+        smtp_port = parse_int_form_field(form, "smtp_port", default=587, min_value=1, max_value=65535)
+    except ValueError as exc:
+        flash(f"全局配置保存失败: {exc}", "error")
+        return redirect(url_for("settings_page"))
+
     update_global_config(
         form.get("reset_command", ""),
         form.get("ssh_command_2", ""),
@@ -1596,7 +1620,7 @@ def update_global_tasks():
         form.get("panel_base_url", ""),
         1 if form.get("notify_email_enabled") == "on" else 0,
         form.get("smtp_host", ""),
-        int(form.get("smtp_port", 587) or 587),
+        smtp_port,
         form.get("smtp_user", ""),
         form.get("smtp_password", ""),
         form.get("smtp_from", ""),
@@ -1636,9 +1660,24 @@ def get_next_sort_order(conn):
 @login_required
 def add_server():
     form = request.form
+    try:
+        ssh_port = parse_int_form_field(form, "ssh_port", default=22, min_value=1, max_value=65535)
+        reset_day = parse_int_form_field(form, "reset_day", min_value=1, max_value=31)
+        reset_hour = parse_int_form_field(form, "reset_hour", default=1, min_value=0, max_value=23)
+        reset_minute = parse_int_form_field(form, "reset_minute", default=0, min_value=0, max_value=59)
+        max_retries = parse_int_form_field(form, "max_retries", default=DEFAULT_MAX_RETRIES, min_value=1, max_value=10)
+    except ValueError as exc:
+        flash(f"添加服务器失败: {exc}", "error")
+        return redirect(url_for("settings_page"))
+
     with closing(get_conn()) as conn:
         sort_order_input = (form.get("sort_order") or "").strip()
-        sort_order = int(sort_order_input) if sort_order_input else get_next_sort_order(conn)
+        try:
+            sort_order = int(sort_order_input) if sort_order_input else get_next_sort_order(conn)
+        except ValueError:
+            flash("添加服务器失败: sort_order 必须是整数", "error")
+            return redirect(url_for("settings_page"))
+
         conn.execute(
             """
             INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
@@ -1647,16 +1686,16 @@ def add_server():
             (
                 form["name"].strip(),
                 form["ip"].strip(),
-                int(form.get("ssh_port", 22)),
+                ssh_port,
                 form.get("ssh_user", "root").strip() or "root",
                 form["ssh_password"],
-                int(form["reset_day"]),
-                int(form.get("reset_hour", 1)),
-                int(form.get("reset_minute", 0)),
+                reset_day,
+                reset_hour,
+                reset_minute,
                 1 if form.get("auto_reset") == "on" else 0,
                 sort_order,
-                int(form.get("max_retries", DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES),
-                (form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS).strip(),
+                max_retries,
+                normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
                 generate_agent_token(),
                 "",
                 0,
@@ -1675,6 +1714,17 @@ def add_server():
 @login_required
 def update_server(server_id):
     form = request.form
+    try:
+        ssh_port = parse_int_form_field(form, "ssh_port", default=22, min_value=1, max_value=65535)
+        reset_day = parse_int_form_field(form, "reset_day", min_value=1, max_value=31)
+        reset_hour = parse_int_form_field(form, "reset_hour", default=1, min_value=0, max_value=23)
+        reset_minute = parse_int_form_field(form, "reset_minute", default=0, min_value=0, max_value=59)
+        sort_order = parse_int_form_field(form, "sort_order", default=0)
+        max_retries = parse_int_form_field(form, "max_retries", default=DEFAULT_MAX_RETRIES, min_value=1, max_value=10)
+    except ValueError as exc:
+        flash(f"更新服务器失败: {exc}", "error")
+        return redirect(url_for("settings_page"))
+
     with closing(get_conn()) as conn:
         conn.execute(
             """
@@ -1685,16 +1735,16 @@ def update_server(server_id):
             (
                 form["name"].strip(),
                 form["ip"].strip(),
-                int(form.get("ssh_port", 22)),
+                ssh_port,
                 form.get("ssh_user", "root").strip() or "root",
                 form["ssh_password"],
-                int(form["reset_day"]),
-                int(form.get("reset_hour", 1)),
-                int(form.get("reset_minute", 0)),
+                reset_day,
+                reset_hour,
+                reset_minute,
                 1 if form.get("auto_reset") == "on" else 0,
-                int(form.get("sort_order", 0)),
-                int(form.get("max_retries", DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES),
-                (form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS).strip(),
+                sort_order,
+                max_retries,
+                normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
                 server_id,
             ),
         )
@@ -1755,7 +1805,7 @@ def run_now(server_id):
 
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TIMEZONE)
-    scheduler.add_job(check_scheduled_jobs, "cron", minute="*/5")
+    scheduler.add_job(check_scheduled_jobs, "cron", minute="*")
     scheduler.add_job(refresh_all_traffic_data, "interval", minutes=5)
     scheduler.start()
     return scheduler
