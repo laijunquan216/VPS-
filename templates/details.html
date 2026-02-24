@@ -21,6 +21,7 @@
           {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
           {% elif row.status == 'running' %}<span class="badge running">执行中</span>
           {% elif row.status == 'queued' %}<span class="badge queued">排队中</span>
+          {% elif row.status == 'retrying' %}<span class="badge retrying">重试中</span>
           {% else %}<span class="badge">未执行</span>{% endif %}
           <span class="badge rent {% if row.is_rented %}rent-on{% else %}rent-off{% endif %}">
             {{ '已出租' if row.is_rented else '未出租' }}
@@ -31,6 +32,7 @@
       <div class="server-meta">
         <div><span>IP</span><strong>{{ row.ip }}</strong></div>
         <div><span>root密码</span><strong>{{ row.ssh_password }}</strong></div>
+        <div><span>重置日</span><strong>{{ row.reset_day }}日 {{ "%02d"|format(row.reset_hour or 1) }}:{{ "%02d"|format(row.reset_minute or 0) }}</strong></div>
         <div><span>重置日</span><strong>{{ row.reset_day }}日 01:00</strong></div>
         <div><span>最后执行</span><strong>{{ row.latest_run_at or '-' }}</strong></div>
         <div><span>上传流量（本周期）</span><strong>{{ row.traffic_upload_text }}</strong></div>

@@ -2,6 +2,7 @@ import os
 import re
 import secrets
 import shlex
+import smtplib
 import sqlite3
 import string
 import threading
@@ -11,6 +12,7 @@ from contextlib import closing
 from datetime import datetime, timedelta
 from functools import wraps
 from io import BytesIO
+from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
 import paramiko
@@ -38,6 +40,8 @@ SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECOND
 SSH_RETRY_INTERVAL_SECONDS = int(os.environ.get("SSH_RETRY_INTERVAL_SECONDS", "15"))
 POST_REINSTALL_WAIT_SECONDS = int(os.environ.get("POST_REINSTALL_WAIT_SECONDS", "30"))
 AGENT_REPORT_INTERVAL_SECONDS = int(os.environ.get("AGENT_REPORT_INTERVAL_SECONDS", "60"))
+DEFAULT_MAX_RETRIES = int(os.environ.get("DEFAULT_MAX_RETRIES", "2"))
+DEFAULT_RETRY_BACKOFF_SECONDS = os.environ.get("DEFAULT_RETRY_BACKOFF_SECONDS", "60,180")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
@@ -94,6 +98,13 @@ def init_db():
                 ssh_command_3 TEXT NOT NULL DEFAULT '',
                 agent_install_command TEXT NOT NULL DEFAULT '',
                 panel_base_url TEXT NOT NULL DEFAULT '',
+                notify_email_enabled INTEGER NOT NULL DEFAULT 0,
+                smtp_host TEXT NOT NULL DEFAULT '',
+                smtp_port INTEGER NOT NULL DEFAULT 587,
+                smtp_user TEXT NOT NULL DEFAULT '',
+                smtp_password TEXT NOT NULL DEFAULT '',
+                smtp_from TEXT NOT NULL DEFAULT '',
+                notify_email_to TEXT NOT NULL DEFAULT '',
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -112,6 +123,23 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id INTEGER NOT NULL,
+                log_id INTEGER NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 2,
+                backoff_plan TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                next_run_at TEXT NOT NULL,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
@@ -124,10 +152,21 @@ def init_db():
         ensure_column(conn, "servers", "last_agent_rx_bytes INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "last_agent_report_at TEXT")
+        ensure_column(conn, "servers", "reset_hour INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "servers", "reset_minute INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "max_retries INTEGER NOT NULL DEFAULT 2")
+        ensure_column(conn, "servers", "retry_backoff_seconds TEXT NOT NULL DEFAULT '60,180'")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
         ensure_column(conn, "global_config", "agent_install_command TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_base_url TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "notify_email_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "global_config", "smtp_host TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "smtp_port INTEGER NOT NULL DEFAULT 587")
+        ensure_column(conn, "global_config", "smtp_user TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "smtp_password TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "smtp_from TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "notify_email_to TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -155,12 +194,12 @@ def get_global_config():
         return row
 
 
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -169,6 +208,13 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 ssh_command_3.strip(),
                 agent_install_command.strip(),
                 panel_base_url.strip(),
+                int(notify_email_enabled),
+                smtp_host.strip(),
+                int(smtp_port),
+                smtp_user.strip(),
+                smtp_password,
+                smtp_from.strip(),
+                notify_email_to.strip(),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -229,7 +275,7 @@ def list_detail_rows():
     with closing(get_conn()) as conn:
         return conn.execute(
             """
-            SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day,
+            SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_agent_report_at,
                    l.summary, l.status, l.created_at AS latest_run_at
@@ -249,16 +295,18 @@ def export_backup_payload():
     with closing(get_conn()) as conn:
         servers = [dict(row) for row in conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()]
         logs = [dict(row) for row in conn.execute("SELECT * FROM job_logs ORDER BY id").fetchall()]
+        queued_tasks = [dict(row) for row in conn.execute("SELECT * FROM task_queue ORDER BY id").fetchall()]
         global_cfg = conn.execute("SELECT * FROM global_config WHERE id = 1").fetchone()
 
     payload = {
         "meta": {
             "exported_at": datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
-            "version": 1,
+            "version": 2,
         },
         "global_config": dict(global_cfg) if global_cfg else {},
         "servers": servers,
         "job_logs": logs,
+        "task_queue": queued_tasks,
     }
     return payload
 
@@ -269,20 +317,22 @@ def restore_backup_payload(payload):
 
     servers = payload.get("servers")
     logs = payload.get("job_logs")
+    queued_tasks = payload.get("task_queue", [])
     global_cfg = payload.get("global_config")
 
-    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict):
+    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict) or not isinstance(queued_tasks, list):
         raise ValueError("备份文件缺少必要字段")
 
     with closing(get_conn()) as conn:
         conn.execute("DELETE FROM job_logs")
         conn.execute("DELETE FROM servers")
         conn.execute("DELETE FROM global_config")
+        conn.execute("DELETE FROM task_queue")
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -290,6 +340,13 @@ def restore_backup_payload(payload):
                 global_cfg.get("ssh_command_3", ""),
                 global_cfg.get("agent_install_command", ""),
                 global_cfg.get("panel_base_url", ""),
+                int(global_cfg.get("notify_email_enabled", 0)),
+                global_cfg.get("smtp_host", ""),
+                int(global_cfg.get("smtp_port", 587) or 587),
+                global_cfg.get("smtp_user", ""),
+                global_cfg.get("smtp_password", ""),
+                global_cfg.get("smtp_from", ""),
+                global_cfg.get("notify_email_to", ""),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -298,8 +355,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -309,10 +366,14 @@ def restore_backup_payload(payload):
                     server.get("ssh_user", "root") or "root",
                     server.get("ssh_password", ""),
                     int(server.get("reset_day", 1)),
+                    int(server.get("reset_hour", 1)),
+                    int(server.get("reset_minute", 0)),
                     int(server.get("auto_reset", 0)),
                     int(server.get("is_renewed", 0)),
                     int(server.get("is_rented", 0)),
                     int(server.get("sort_order", 0)),
+                    int(server.get("max_retries", 2)),
+                    str(server.get("retry_backoff_seconds", "60,180")),
                     server.get("agent_token", ""),
                     server.get("period_key", ""),
                     int(server.get("period_upload_bytes", 0)),
@@ -337,6 +398,27 @@ def restore_backup_payload(payload):
                     log.get("summary", ""),
                     log.get("output", ""),
                     log.get("created_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+
+        for task in queued_tasks:
+            conn.execute(
+                """
+                INSERT INTO task_queue(id, server_id, log_id, attempt, max_attempts, backoff_plan, status, next_run_at, last_error, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    task.get("id"),
+                    int(task.get("server_id")),
+                    int(task.get("log_id")),
+                    int(task.get("attempt", 0)),
+                    int(task.get("max_attempts", 2)),
+                    task.get("backoff_plan", "60,180"),
+                    task.get("status", "queued"),
+                    task.get("next_run_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                    task.get("last_error", ""),
+                    task.get("created_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                    task.get("updated_at") or datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
                 ),
             )
         conn.commit()
@@ -594,7 +676,9 @@ def should_reset(server_row):
         return False
     if server_row["reset_day"] != now.day:
         return False
-    if now.hour != 1:
+    if now.hour != int(server_row["reset_hour"] or 1):
+        return False
+    if now.minute != int(server_row["reset_minute"] or 0):
         return False
 
     if not server_row["last_reset_at"]:
@@ -660,6 +744,8 @@ def execute_command_and_collect(client, title, command, output_lines):
             "检测到虚拟化环境,跳过部分硬件优化",
             "建议重启系统以确保所有优化生效",
             "如果无法打开网页，可能是防火墙没有放通端口",
+            "Created symlink",
+            "vps-panel-agent.timer",
         )
 
         benign_lines = []
@@ -689,7 +775,7 @@ def extract_summary(server_row, raw_output):
     fb = re.search(r"📁\s*FileBrowser[\s\S]*?--------", raw_output)
 
     lines = [
-        f"{server_row['name']}（名称），{server_row['reset_day']}日凌晨1点（北京时间）服务器重置",
+        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row.get('reset_hour', 1)):02d}:{int(server_row.get('reset_minute', 0)):02d}（北京时间）服务器重置",
         f"IP address: {ip_match.group(1) if ip_match else server_row['ip']}",
         f"Your new root passwort is {pass_match.group(1).strip() if pass_match else server_row['ssh_password']}",
     ]
@@ -701,7 +787,41 @@ def extract_summary(server_row, raw_output):
     return "\n".join(lines)
 
 
-def run_remote(server_row, running_log_id):
+def send_result_email(server_row, status, summary, output):
+    cfg = get_global_config()
+    if not int(cfg["notify_email_enabled"] or 0):
+        return
+
+    smtp_host = (cfg["smtp_host"] or "").strip()
+    smtp_user = (cfg["smtp_user"] or "").strip()
+    smtp_password = cfg["smtp_password"] or ""
+    smtp_from = (cfg["smtp_from"] or "").strip()
+    smtp_to = (cfg["notify_email_to"] or "").strip()
+    smtp_port = int(cfg["smtp_port"] or 587)
+    if not (smtp_host and smtp_from and smtp_to):
+        return
+
+    title_state = "成功" if status == "success" else "失败"
+    msg = EmailMessage()
+    msg["Subject"] = f"[VPS面板] {server_row['name']} 重置任务{title_state}"
+    msg["From"] = smtp_from
+    msg["To"] = smtp_to
+    msg.set_content(
+        f"服务器: {server_row['name']} ({server_row['ip']})\n"
+        f"状态: {title_state}\n"
+        f"时间: {datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"摘要:\n{summary}\n\n"
+        f"完整输出:\n{output[:30000]}"
+    )
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+        server.starttls()
+        if smtp_user:
+            server.login(smtp_user, smtp_password)
+        server.send_message(msg)
+
+
+def run_remote(server_row, running_log_id, notify_on_failure=True):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = [f"开始执行重置任务 {title}"]
     client = None
@@ -786,11 +906,20 @@ def run_remote(server_row, running_log_id):
         summary = extract_summary(mutable_server, all_output)
         update_log(running_log_id, "success", summary, all_output)
         update_last_reset(server_row["id"])
+        try:
+            send_result_email(mutable_server, "success", summary, all_output)
+        except Exception as mail_exc:
+            output_lines.append(f"邮件通知发送失败: {mail_exc}")
     except Exception as exc:
         output_lines.append(f"任务失败: {exc}")
         all_output = "\n\n".join(output_lines)
         summary = extract_summary(locals().get("mutable_server", dict(server_row)), all_output)
         update_log(running_log_id, "failed", summary, all_output)
+        try:
+            if notify_on_failure:
+                send_result_email(locals().get("mutable_server", dict(server_row)), "failed", summary, all_output)
+        except Exception:
+            pass
     finally:
         if client:
             client.close()
@@ -807,30 +936,164 @@ def has_pending_or_running(server_id):
             """,
             (server_id,),
         ).fetchone()
-    return bool(row and row["status"] in ("queued", "running"))
+    return bool(row and row["status"] in ("queued", "running", "retrying"))
+
+
+def parse_backoff_plan(text):
+    values = []
+    for piece in str(text or "").split(","):
+        piece = piece.strip()
+        if piece.isdigit() and int(piece) >= 0:
+            values.append(int(piece))
+    if not values:
+        values = [int(x.strip()) for x in DEFAULT_RETRY_BACKOFF_SECONDS.split(",") if x.strip().isdigit()]
+    return values or [60, 180]
+
+
+def is_retryable_failure(output_text):
+    text = (output_text or "").lower()
+    patterns = (
+        "timed out",
+        "timeout",
+        "unable to connect to port",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "temporarily unavailable",
+        "sshexception",
+        "error reading ssh protocol banner",
+    )
+    return any(pattern in text for pattern in patterns)
+
+
+def enqueue_task(server_row, log_id):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    max_attempts = max(1, int(server_row["max_retries"] or DEFAULT_MAX_RETRIES))
+    backoff_plan = (server_row["retry_backoff_seconds"] or DEFAULT_RETRY_BACKOFF_SECONDS).strip()
+    with closing(get_conn()) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO task_queue(server_id, log_id, attempt, max_attempts, backoff_plan, status, next_run_at, last_error, created_at, updated_at)
+            VALUES(?,?,?,?,?,'queued',?,?,?,?)
+            """,
+            (server_row["id"], log_id, 0, max_attempts, backoff_plan, now_text, "", now_text, now_text),
+        )
+        conn.commit()
+        task_id = cur.lastrowid
+    TASK_QUEUE.put(task_id)
+
+
+def requeue_pending_tasks_on_startup():
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE task_queue SET status='queued', updated_at=? WHERE status IN ('queued','running','retrying')",
+            (now_text,),
+        )
+        rows = conn.execute("SELECT id FROM task_queue WHERE status='queued' ORDER BY id ASC").fetchall()
+        conn.commit()
+    for row in rows:
+        TASK_QUEUE.put(row["id"])
 
 
 def task_worker_loop():
     while True:
-        server_id, log_id = TASK_QUEUE.get()
+        task_id = TASK_QUEUE.get()
         try:
-            row = get_server(server_id)
-            if not row:
-                update_log(log_id, "failed", "任务失败：服务器不存在", "任务失败: 服务器不存在或已删除")
+            with closing(get_conn()) as conn:
+                task = conn.execute("SELECT * FROM task_queue WHERE id = ?", (task_id,)).fetchone()
+            if not task or task["status"] not in ("queued", "retrying"):
                 continue
 
+            next_run_at = datetime.strptime(task["next_run_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+            now_dt = datetime.now(TIMEZONE)
+            if next_run_at > now_dt:
+                time.sleep((next_run_at - now_dt).total_seconds())
+
+            row = get_server(task["server_id"])
+            if not row:
+                update_log(task["log_id"], "failed", "任务失败：服务器不存在", "任务失败: 服务器不存在或已删除")
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        "UPDATE task_queue SET status='failed', last_error=?, updated_at=? WHERE id=?",
+                        ("server missing", datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
+                    )
+                    conn.commit()
+                continue
+
+            with closing(get_conn()) as conn:
+                conn.execute(
+                    "UPDATE task_queue SET status='running', updated_at=? WHERE id=?",
+                    (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
+                )
+                conn.commit()
+
+            attempt_no = int(task["attempt"] or 0) + 1
+            max_attempts = int(task["max_attempts"] or 1)
             update_log(
-                log_id,
+                task["log_id"],
                 "running",
-                "任务执行中，请稍后刷新查看结果...",
-                f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中",
+                f"任务执行中（第{attempt_no}/{max_attempts}次尝试）...",
+                f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中（第{attempt_no}/{max_attempts}次尝试）",
             )
-            run_remote(row, log_id)
+            run_remote(row, task["log_id"], notify_on_failure=(attempt_no >= max_attempts))
+
+            with closing(get_conn()) as conn:
+                latest = conn.execute("SELECT status, output FROM job_logs WHERE id = ?", (task["log_id"],)).fetchone()
+
+            if latest and latest["status"] == "success":
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        "UPDATE task_queue SET status='success', attempt=?, updated_at=? WHERE id=?",
+                        (attempt_no, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
+                    )
+                    conn.commit()
+                continue
+
+            output = latest["output"] if latest else ""
+            retryable = is_retryable_failure(output)
+            if retryable and attempt_no < max_attempts:
+                backoff_values = parse_backoff_plan(task["backoff_plan"])
+                wait_seconds = backoff_values[min(attempt_no - 1, len(backoff_values) - 1)]
+                next_time = datetime.now(TIMEZONE) + timedelta(seconds=wait_seconds)
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        "UPDATE task_queue SET status='retrying', attempt=?, next_run_at=?, last_error=?, updated_at=? WHERE id=?",
+                        (
+                            attempt_no,
+                            next_time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "retryable failure",
+                            datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                            task_id,
+                        ),
+                    )
+                    conn.commit()
+                update_log(
+                    task["log_id"],
+                    "retrying",
+                    f"检测到可重试错误，将在 {wait_seconds}s 后重试（第{attempt_no + 1}/{max_attempts}次）",
+                    (output or "") + f"\n\n系统提示: 已进入重试等待（{wait_seconds}s）",
+                )
+                TASK_QUEUE.put(task_id)
+            else:
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        "UPDATE task_queue SET status='failed', attempt=?, last_error=?, updated_at=? WHERE id=?",
+                        (
+                            attempt_no,
+                            "retry exhausted" if retryable else "non-retryable",
+                            datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                            task_id,
+                        ),
+                    )
+                    conn.commit()
         finally:
             TASK_QUEUE.task_done()
 
 
 def start_task_worker():
+    requeue_pending_tasks_on_startup()
     threading.Thread(target=task_worker_loop, daemon=True).start()
 
 
@@ -848,7 +1111,7 @@ def run_for_server(server_id):
         "任务已进入队列，等待前序服务器执行完成...",
         f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 排队中（将按顺序依次执行）",
     )
-    TASK_QUEUE.put((row["id"], log_id))
+    enqueue_task(row, log_id)
     return True, "任务已加入队列，将按顺序依次执行"
 
 
@@ -1151,6 +1414,13 @@ def update_global_tasks():
         form.get("ssh_command_3", ""),
         form.get("agent_install_command", ""),
         form.get("panel_base_url", ""),
+        1 if form.get("notify_email_enabled") == "on" else 0,
+        form.get("smtp_host", ""),
+        int(form.get("smtp_port", 587) or 587),
+        form.get("smtp_user", ""),
+        form.get("smtp_password", ""),
+        form.get("smtp_from", ""),
+        form.get("notify_email_to", ""),
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
@@ -1170,8 +1440,8 @@ def add_server():
         sort_order = int(sort_order_input) if sort_order_input else get_next_sort_order(conn)
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -1180,8 +1450,12 @@ def add_server():
                 form.get("ssh_user", "root").strip() or "root",
                 form["ssh_password"],
                 int(form["reset_day"]),
+                int(form.get("reset_hour", 1)),
+                int(form.get("reset_minute", 0)),
                 1 if form.get("auto_reset") == "on" else 0,
                 sort_order,
+                int(form.get("max_retries", DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES),
+                (form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS).strip(),
                 generate_agent_token(),
                 "",
                 0,
@@ -1204,7 +1478,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, auto_reset=?, sort_order=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, sort_order=?, max_retries=?, retry_backoff_seconds=?
             WHERE id=?
             """,
             (
@@ -1214,8 +1488,12 @@ def update_server(server_id):
                 form.get("ssh_user", "root").strip() or "root",
                 form["ssh_password"],
                 int(form["reset_day"]),
+                int(form.get("reset_hour", 1)),
+                int(form.get("reset_minute", 0)),
                 1 if form.get("auto_reset") == "on" else 0,
                 int(form.get("sort_order", 0)),
+                int(form.get("max_retries", DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES),
+                (form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS).strip(),
                 server_id,
             ),
         )
@@ -1230,6 +1508,7 @@ def delete_server(server_id):
     with closing(get_conn()) as conn:
         conn.execute("DELETE FROM servers WHERE id = ?", (server_id,))
         conn.execute("DELETE FROM job_logs WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM task_queue WHERE server_id = ?", (server_id,))
         conn.commit()
     flash("服务器已删除", "success")
     return redirect(url_for("settings_page"))
