@@ -720,16 +720,7 @@ def should_reset(server_row):
         return False
     if now.minute != int(server_row["reset_minute"] or 0):
         return False
-
-    if not server_row["last_reset_at"]:
-        return True
-
-    try:
-        last = datetime.strptime(server_row["last_reset_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
-    except ValueError:
-        return True
-
-    return not (last.year == now.year and last.month == now.month)
+    return True
 
 
 def is_reinstall_command(command):
@@ -815,7 +806,7 @@ def extract_summary(server_row, raw_output):
     fb = re.search(r"📁\s*FileBrowser[\s\S]*?--------", raw_output)
 
     lines = [
-        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row.get('reset_hour', 1)):02d}:{int(server_row.get('reset_minute', 0)):02d}（北京时间）服务器重置",
+        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row.get('reset_hour', 1)):02d}:{int(server_row.get('reset_minute', 0)):02d}（北京时间）重置，需要续租请提前下单",
         f"IP address: {ip_match.group(1) if ip_match else server_row['ip']}",
         f"Your new root passwort is {pass_match.group(1).strip() if pass_match else server_row['ssh_password']}",
     ]
@@ -1174,7 +1165,9 @@ def task_worker_loop():
             next_run_at = datetime.strptime(task["next_run_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
             now_dt = datetime.now(TIMEZONE)
             if next_run_at > now_dt:
-                time.sleep((next_run_at - now_dt).total_seconds())
+                TASK_QUEUE.put(task_id)
+                time.sleep(min((next_run_at - now_dt).total_seconds(), 1))
+                continue
 
             row = get_server(task["server_id"])
             if not row:
@@ -1240,8 +1233,8 @@ def task_worker_loop():
                 update_log(
                     task["log_id"],
                     "retrying",
-                    f"检测到可重试错误，将在 {wait_seconds}s 后重试（第{attempt_no + 1}/{max_attempts}次）",
-                    (output or "") + f"\n\n系统提示: 已进入重试等待（{wait_seconds}s）",
+                    f"检测到可重试错误，已加入队列尾部，最早在 {wait_seconds}s 后重试（第{attempt_no + 1}/{max_attempts}次）",
+                    (output or "") + f"\n\n系统提示: 重试任务已回到队列尾部，最早 {wait_seconds}s 后执行（全局串行，仅同时执行一台）",
                 )
                 TASK_QUEUE.put(task_id)
             else:
@@ -1311,7 +1304,7 @@ def check_scheduled_jobs():
             continue
 
         if not should_reset(row):
-            upsert_notification_batch_item(batch_key, row, "skipped", note="本月已执行或不满足重置条件")
+            upsert_notification_batch_item(batch_key, row, "skipped", note="未开启定时自动执行或不在预定时间")
             continue
 
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
