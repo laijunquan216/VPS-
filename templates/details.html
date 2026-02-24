@@ -1,9 +1,62 @@
 {% extends 'base.html' %}
 {% set active = 'details' %}
 {% set title = '服务器详情' %}
+
+{% macro render_server_card(row) %}
+<article class="server-card {% if row.is_rented %}rented{% else %}not-rented{% endif %}">
+  <div class="server-head">
+    <h3>{{ row.name }}</h3>
+    <div class="server-badges">
+      {% if row.status == 'success' %}<span class="badge ok">正常</span>
+      {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
+      {% elif row.status == 'running' %}<span class="badge running">执行中</span>
+      {% elif row.status == 'queued' %}<span class="badge queued">排队中</span>
+      {% elif row.status == 'retrying' %}<span class="badge retrying">重试中</span>
+      {% else %}<span class="badge">未执行</span>{% endif %}
+      <span class="badge rent {% if row.is_rented %}rent-on{% else %}rent-off{% endif %}">
+        {{ '已出租' if row.is_rented else '未出租' }}
+      </span>
+    </div>
+  </div>
+
+  <div class="server-meta">
+    <div><span>IP</span><strong>{{ row.ip }}</strong></div>
+    <div><span>root密码</span><strong>{{ row.ssh_password }}</strong></div>
+    <div><span>重置日</span><strong>{{ row.reset_day }}日 {{ "%02d"|format(row.reset_hour or 1) }}:{{ "%02d"|format(row.reset_minute or 0) }}</strong></div>
+    <div><span>最后执行</span><strong>{{ row.latest_run_at or '-' }}</strong></div>
+    <div><span>上传流量（本周期）</span><strong>{{ row.traffic_upload_text }}</strong></div>
+    <div><span>下载流量（本周期）</span><strong>{{ row.traffic_download_text }}</strong></div>
+    <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
+    <div><span>最近上报</span><strong>{{ row.last_agent_report_at or '暂无' }}</strong></div>
+  </div>
+
+  <div class="server-actions">
+    <form method="post" action="/servers/{{ row.id }}/toggle-rent">
+      <button type="submit" class="rent-btn {% if row.is_rented %}rent-btn-on{% else %}rent-btn-off{% endif %}">
+        {{ '已出租' if row.is_rented else '未出租' }}
+      </button>
+    </form>
+    <form method="post" action="/servers/{{ row.id }}/toggle-renew">
+      {% if row.is_renewed %}
+      <button type="submit" class="warn">续租中</button>
+      {% else %}
+      <button type="submit">未续租</button>
+      {% endif %}
+    </form>
+    <form method="post" action="/servers/{{ row.id }}/run">
+      <button type="submit">执行一次重置</button>
+    </form>
+    <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
+  </div>
+
+  <pre id="summary-{{ row.id }}">{{ row.summary or '暂无摘要，先执行一次任务。' }}</pre>
+</article>
+{% endmacro %}
+
 {% block content %}
-<section class="stats-grid">
+<section class="stats-grid stats-grid-5">
   <article class="stat-card focus"><h3>{{ total }}</h3><p>总服务器</p></article>
+  <article class="stat-card"><h3>{{ unrented_count }}</h3><p>未出租数量</p></article>
   <article class="stat-card ok"><h3>{{ success }}</h3><p>最近任务成功</p></article>
   <article class="stat-card bad"><h3>{{ failed }}</h3><p>最近任务失败</p></article>
   <article class="stat-card"><h3>{{ never }}</h3><p>从未执行</p></article>
@@ -11,70 +64,58 @@
 
 <section class="panel">
   <h2>服务器详情</h2>
-  <div class="server-list">
-    {% for row in rows %}
-    <article class="server-card {% if row.is_rented %}rented{% else %}not-rented{% endif %}">
-      <div class="server-head">
-        <h3>{{ row.name }}</h3>
-        <div class="server-badges">
-          {% if row.status == 'success' %}<span class="badge ok">正常</span>
-          {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
-          {% elif row.status == 'running' %}<span class="badge running">执行中</span>
-          {% elif row.status == 'queued' %}<span class="badge queued">排队中</span>
-          {% elif row.status == 'retrying' %}<span class="badge retrying">重试中</span>
-          {% else %}<span class="badge">未执行</span>{% endif %}
-          <span class="badge rent {% if row.is_rented %}rent-on{% else %}rent-off{% endif %}">
-            {{ '已出租' if row.is_rented else '未出租' }}
-          </span>
-        </div>
+  <div class="server-columns">
+    <div class="server-column">
+      <h3>未出租（{{ unrented_count }}）</h3>
+      <div class="server-list">
+        {% for row in unrented_rows %}
+          {{ render_server_card(row) }}
+        {% else %}
+          <p>暂无未出租服务器</p>
+        {% endfor %}
       </div>
+    </div>
 
-      <div class="server-meta">
-        <div><span>IP</span><strong>{{ row.ip }}</strong></div>
-        <div><span>root密码</span><strong>{{ row.ssh_password }}</strong></div>
-        <div><span>重置日</span><strong>{{ row.reset_day }}日 {{ "%02d"|format(row.reset_hour or 1) }}:{{ "%02d"|format(row.reset_minute or 0) }}</strong></div>
-        <div><span>最后执行</span><strong>{{ row.latest_run_at or '-' }}</strong></div>
-        <div><span>上传流量（本周期）</span><strong>{{ row.traffic_upload_text }}</strong></div>
-        <div><span>下载流量（本周期）</span><strong>{{ row.traffic_download_text }}</strong></div>
-        <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
-        <div><span>最近上报</span><strong>{{ row.last_agent_report_at or '暂无' }}</strong></div>
+    <div class="server-column">
+      <h3>已出租（{{ rented_count }}）</h3>
+      <div class="server-list">
+        {% for row in rented_rows %}
+          {{ render_server_card(row) }}
+        {% else %}
+          <p>暂无已出租服务器</p>
+        {% endfor %}
       </div>
-
-      <div class="server-actions">
-        <form method="post" action="/servers/{{ row.id }}/toggle-rent">
-          <button type="submit" class="rent-btn {% if row.is_rented %}rent-btn-on{% else %}rent-btn-off{% endif %}">
-            {{ '已出租（点击改未出租）' if row.is_rented else '未出租（点击改已出租）' }}
-          </button>
-        </form>
-        <form method="post" action="/servers/{{ row.id }}/toggle-renew">
-          {% if row.is_renewed %}
-          <button type="submit" class="warn">续租中（点击关闭）</button>
-          {% else %}
-          <button type="submit">未续租（点击开启）</button>
-          {% endif %}
-        </form>
-        <form method="post" action="/servers/{{ row.id }}/run">
-          <button type="submit">立即执行</button>
-        </form>
-        <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
-      </div>
-
-      <pre id="summary-{{ row.id }}">{{ row.summary or '暂无摘要，先执行一次任务。' }}</pre>
-    </article>
-    {% else %}
-      <p>暂无服务器</p>
-    {% endfor %}
+    </div>
   </div>
 </section>
-{% endblock %}
 
 <script>
-function copySummary(rowId) {
-  const text = document.getElementById(`summary-${rowId}`).innerText;
-  navigator.clipboard.writeText(text).then(() => {
+async function copySummary(rowId) {
+  const summaryNode = document.getElementById(`summary-${rowId}`);
+  if (!summaryNode) {
+    alert('未找到可复制内容');
+    return;
+  }
+
+  const text = summaryNode.innerText;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
     alert('已复制到剪贴板');
-  }).catch(() => {
+  } catch (error) {
     alert('复制失败，请手动复制');
-  });
+  }
 }
 </script>
+{% endblock %}
