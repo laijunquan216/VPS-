@@ -70,6 +70,7 @@ def init_db():
                 auto_reset INTEGER NOT NULL DEFAULT 1,
                 is_renewed INTEGER NOT NULL DEFAULT 0,
                 is_rented INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 last_reset_at TEXT
             )
             """
@@ -103,6 +104,7 @@ def init_db():
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "is_rented INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
@@ -114,10 +116,9 @@ def init_db():
             )
         conn.commit()
 
-
 def list_servers():
     with closing(get_conn()) as conn:
-        return conn.execute("SELECT * FROM servers ORDER BY id").fetchall()
+        return conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
 
 
 def get_server(server_id):
@@ -184,7 +185,7 @@ def list_logs(limit=200):
 
 def list_logs_grouped_by_server(limit_per_server=50):
     with closing(get_conn()) as conn:
-        servers = conn.execute("SELECT id, name, ip FROM servers ORDER BY id").fetchall()
+        servers = conn.execute("SELECT id, name, ip FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
         grouped = []
         for server in servers:
             logs = conn.execute(
@@ -206,7 +207,7 @@ def list_detail_rows():
         return conn.execute(
             """
             SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day,
-                   s.auto_reset, s.is_renewed, s.is_rented, l.summary, l.status, l.created_at AS latest_run_at
+                   s.auto_reset, s.is_renewed, s.is_rented, s.sort_order, l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
                 SELECT l2.id FROM job_logs l2
@@ -214,14 +215,14 @@ def list_detail_rows():
                 ORDER BY l2.id DESC
                 LIMIT 1
             )
-            ORDER BY s.id
+            ORDER BY s.sort_order ASC, s.id ASC
             """
         ).fetchall()
 
 
 def export_backup_payload():
     with closing(get_conn()) as conn:
-        servers = [dict(row) for row in conn.execute("SELECT * FROM servers ORDER BY id").fetchall()]
+        servers = [dict(row) for row in conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()]
         logs = [dict(row) for row in conn.execute("SELECT * FROM job_logs ORDER BY id").fetchall()]
         global_cfg = conn.execute("SELECT * FROM global_config WHERE id = 1").fetchone()
 
@@ -270,8 +271,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, last_reset_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order, last_reset_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -284,6 +285,7 @@ def restore_backup_payload(payload):
                     int(server.get("auto_reset", 0)),
                     int(server.get("is_renewed", 0)),
                     int(server.get("is_rented", 0)),
+                    int(server.get("sort_order", 0)),
                     server.get("last_reset_at"),
                 ),
             )
@@ -816,15 +818,22 @@ def update_global_tasks():
     return redirect(url_for("settings_page"))
 
 
+def get_next_sort_order(conn):
+    row = conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM servers").fetchone()
+    return int(row["max_order"]) + 1
+
+
 @app.route("/servers", methods=["POST"])
 @login_required
 def add_server():
     form = request.form
     with closing(get_conn()) as conn:
+        sort_order_input = (form.get("sort_order") or "").strip()
+        sort_order = int(sort_order_input) if sort_order_input else get_next_sort_order(conn)
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented)
-            VALUES(?,?,?,?,?,?,?,0,0)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, auto_reset, is_renewed, is_rented, sort_order)
+            VALUES(?,?,?,?,?,?,?,0,0,?)
             """,
             (
                 form["name"].strip(),
@@ -834,6 +843,7 @@ def add_server():
                 form["ssh_password"],
                 int(form["reset_day"]),
                 1 if form.get("auto_reset") == "on" else 0,
+                sort_order,
             ),
         )
         conn.commit()
@@ -849,7 +859,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, auto_reset=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, auto_reset=?, sort_order=?
             WHERE id=?
             """,
             (
@@ -860,6 +870,7 @@ def update_server(server_id):
                 form["ssh_password"],
                 int(form["reset_day"]),
                 1 if form.get("auto_reset") == "on" else 0,
+                int(form.get("sort_order", 0)),
                 server_id,
             ),
         )
