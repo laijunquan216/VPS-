@@ -77,6 +77,7 @@ def init_db():
                 auto_reset INTEGER NOT NULL DEFAULT 1,
                 is_renewed INTEGER NOT NULL DEFAULT 0,
                 is_rented INTEGER NOT NULL DEFAULT 0,
+                renter_name TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 agent_token TEXT NOT NULL DEFAULT '',
                 period_key TEXT NOT NULL DEFAULT '',
@@ -173,6 +174,7 @@ def init_db():
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "is_rented INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "renter_name TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "period_key TEXT NOT NULL DEFAULT ''")
@@ -308,7 +310,7 @@ def list_detail_rows():
     with closing(get_conn()) as conn:
         return conn.execute(
             """
-            SELECT s.id, s.name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
+            SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_agent_report_at,
                    l.summary, l.status, l.created_at AS latest_run_at
@@ -397,8 +399,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -413,6 +415,7 @@ def restore_backup_payload(payload):
                     int(server.get("auto_reset", 0)),
                     int(server.get("is_renewed", 0)),
                     int(server.get("is_rented", 0)),
+                    (server.get("renter_name", "") or "").strip(),
                     int(server.get("sort_order", 0)),
                     int(server.get("max_retries", 2)),
                     str(server.get("retry_backoff_seconds", "60,180")),
@@ -1698,8 +1701,8 @@ def add_server():
 
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -1711,6 +1714,7 @@ def add_server():
                 reset_hour,
                 reset_minute,
                 1 if form.get("auto_reset") == "on" else 0,
+                (form.get("renter_name") or "").strip(),
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
@@ -1747,7 +1751,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, sort_order=?, max_retries=?, retry_backoff_seconds=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, sort_order=?, max_retries=?, retry_backoff_seconds=?
             WHERE id=?
             """,
             (
@@ -1760,6 +1764,7 @@ def update_server(server_id):
                 reset_hour,
                 reset_minute,
                 1 if form.get("auto_reset") == "on" else 0,
+                (form.get("renter_name") or "").strip(),
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
@@ -1795,6 +1800,21 @@ def toggle_renew(server_id):
         conn.execute("UPDATE servers SET is_renewed = ? WHERE id = ?", (next_state, server_id))
         conn.commit()
     flash("已切换为续租状态，后续将跳过定时重置" if next_state else "已关闭续租状态，恢复按计划重置", "success")
+    return redirect(url_for("details_page"))
+
+
+@app.route("/servers/<int:server_id>/renter", methods=["POST"])
+@login_required
+def update_renter(server_id):
+    renter_name = (request.form.get("renter_name") or "").strip()
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT id FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            flash("服务器不存在", "error")
+            return redirect(url_for("details_page"))
+        conn.execute("UPDATE servers SET renter_name = ? WHERE id = ?", (renter_name, server_id))
+        conn.commit()
+    flash("租赁人已更新" if renter_name else "已清空租赁人", "success")
     return redirect(url_for("details_page"))
 
 

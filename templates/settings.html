@@ -46,6 +46,7 @@
   <h2>服务器设置：新增服务器</h2>
   <form method="post" action="/servers" class="grid-form">
     <label>名称<input name="name" required /></label>
+    <label>租赁人<input name="renter_name" placeholder="例如 咸鱼：DABA" /></label>
     <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
     <label>IP<input name="ip" required /></label>
     <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
@@ -68,6 +69,7 @@
     <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 排序序号: {{ s.sort_order }} | 每月{{ s.reset_day }}日 {{ "%02d"|format(s.reset_hour or 1) }}:{{ "%02d"|format(s.reset_minute or 0) }} | 重试: {{ s.max_retries }}次 / 退避 {{ s.retry_backoff_seconds }} | 自动重置开关: {{ '开' if s.auto_reset else '关' }} | 续租状态: {{ '续租中（跳过定时重置）' if s.is_renewed else '未续租' }}</summary>
     <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
       <label>名称<input name="name" value="{{ s.name }}" required /></label>
+      <label>租赁人<input name="renter_name" value="{{ s.renter_name }}" placeholder="例如 咸鱼：DABA" /></label>
       <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
       <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
       <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>

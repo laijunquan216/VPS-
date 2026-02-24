@@ -5,7 +5,10 @@
 {% macro render_server_card(row) %}
 <article class="server-card {% if row.is_rented %}rented{% else %}not-rented{% endif %}">
   <div class="server-head">
-    <h3>{{ row.name }}</h3>
+    <div class="server-title-wrap">
+      <h3>{{ row.name }}</h3>
+      <span class="renter-badge">{{ row.renter_name or '未填写租赁人' }}</span>
+    </div>
     <div class="server-badges">
       {% if row.status == 'success' %}<span class="badge ok">正常</span>
       {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
@@ -31,6 +34,10 @@
   </div>
 
   <div class="server-actions">
+    <form method="post" action="/servers/{{ row.id }}/renter" class="renter-form">
+      <input type="text" name="renter_name" value="{{ row.renter_name }}" placeholder="租赁人（例如 咸鱼：DABA）" />
+      <button type="submit" class="secondary">保存租赁人</button>
+    </form>
     <form method="post" action="/servers/{{ row.id }}/toggle-rent">
       <button type="submit" class="rent-btn {% if row.is_rented %}rent-btn-on{% else %}rent-btn-off{% endif %}">
         {{ '已出租' if row.is_rented else '未出租' }}

@@ -18,6 +18,7 @@ textarea{min-height:60px}button{background:var(--primary);color:#fff;border:none
 .button-row{display:flex;gap:10px;margin-top:10px}
 .inline-form{margin-top:10px}
 .warn{background:#f59e0b;color:#111827}
+.secondary{background:#64748b;color:#fff}
 .table{width:100%;border-collapse:collapse}.table th,.table td{padding:12px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
 .badge{padding:4px 10px;border-radius:999px;background:#eef2f7;color:#475569;font-weight:700}.badge.ok{background:#dcfce7;color:#166534}.badge.bad{background:#fee2e2;color:#991b1b}.badge.running{background:#dbeafe;color:#1d4ed8}.badge.queued{background:#fef3c7;color:#92400e}.badge.retrying{background:#ede9fe;color:#5b21b6}
 .badge.rent{border:1px solid transparent}.badge.rent-on{background:#fee2e2;color:#991b1b;border-color:#fecaca}.badge.rent-off{background:#dcfce7;color:#166534;border-color:#bbf7d0}
@@ -33,11 +34,15 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
 .server-card.rented{background:#fff1f2;border-color:#fecdd3}
 .server-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:10px}
 .server-head h3{margin:0}
+.server-title-wrap{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.renter-badge{display:inline-block;padding:4px 10px;border-radius:8px;background:#e2e8f0;color:#334155;font-size:14px;font-weight:600}
 .server-badges{display:flex;gap:8px;flex-wrap:wrap}
 .server-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin-bottom:12px}
 .server-meta span{display:block;color:var(--muted);font-size:12px}
 .server-meta strong{font-size:15px;word-break:break-all}
 .server-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.renter-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.renter-form input{min-width:220px}
 .rent-btn{font-weight:700}
 .rent-btn-on{background:#ef4444;color:#fff}
 .rent-btn-off{background:#16a34a;color:#fff}
@@ -76,5 +81,6 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
   .server-columns{grid-template-columns:1fr}
   .server-actions{display:grid;grid-template-columns:1fr 1fr}
   .server-actions form,.server-actions .copy-btn{width:100%}
+  .renter-form input{min-width:0;width:100%}
   .server-actions button{width:100%}
 }
