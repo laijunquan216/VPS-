@@ -67,6 +67,8 @@ http://你的面板IP:5000
 - `PANEL_PORT`：监听端口（默认 `5000`）
 - `SSH_RECONNECT_TIMEOUT_SECONDS`：重连超时秒数（默认 `1800`）
 - `SSH_RETRY_INTERVAL_SECONDS`：重连重试间隔秒数（默认 `15`）
+- `POST_REINSTALL_WAIT_SECONDS`：DD命令后台启动后首次等待秒数（默认 `30`）
+- `DD_NEW_PASSWORD_GRACE_SECONDS`：DD后仅用新密码重连的宽限秒数（默认 `900`），超时后会尝试旧密码判定是否重置失败
 - `DEFAULT_MAX_RETRIES`：默认重试次数（默认 `2`）
 - `DEFAULT_RETRY_BACKOFF_SECONDS`：默认退避秒数（默认 `60,180`）
 
