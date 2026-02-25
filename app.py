@@ -615,6 +615,47 @@ def inject_random_ssh2_password_if_needed(command):
     return command, pwd
 
 
+
+BIN_REINSTALL_CHOICES = {
+    "debian-9": ("debian", "9"),
+    "debian-10": ("debian", "10"),
+    "debian-11": ("debian", "11"),
+    "debian-12": ("debian", "12"),
+    "debian-13": ("debian", "13"),
+    "ubuntu-16.04": ("ubuntu", "16.04"),
+    "ubuntu-18.04": ("ubuntu", "18.04"),
+    "ubuntu-20.04": ("ubuntu", "20.04"),
+    "ubuntu-22.04": ("ubuntu", "22.04"),
+    "ubuntu-24.04": ("ubuntu", "24.04"),
+    "ubuntu-25.1": ("ubuntu", "25.1"),
+}
+
+
+def parse_bin_reinstall_choice(trigger_type):
+    text = str(trigger_type or "").strip()
+    if not text.startswith("binreinstall:"):
+        return None
+    choice = text.split(":", 1)[1].strip().lower()
+    if choice in BIN_REINSTALL_CHOICES:
+        return choice
+    return None
+
+
+def build_bin_reinstall_command(choice, root_password):
+    distro, version = BIN_REINSTALL_CHOICES[choice]
+    script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+    return (
+        "bash -lc "
+        + shlex.quote(
+            f"set -e; "
+            f"if command -v curl >/dev/null 2>&1; then "
+            f"bash <(curl -fsSL {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+            f"else "
+            f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+            f"fi"
+        )
+    )
+
 def normalize_shell_command(command):
     return command.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
@@ -967,7 +1008,7 @@ def maybe_send_batch_email(batch_key):
             conn.commit()
 
 
-def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True):
+def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True, reset_command_override=None, force_reinstall=False, preset_password=None):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = [f"开始执行重置任务 {title}"]
     client = None
@@ -982,14 +1023,27 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
         ssh_command_3 = normalize_shell_command((global_cfg["ssh_command_3"] or "").strip())
         agent_install_command = normalize_shell_command((global_cfg["agent_install_command"] or "").strip())
+        if reset_command_override:
+            reset_command = normalize_shell_command(reset_command_override)
+            ssh_command_2 = ""
+            ssh_command_3 = ""
+            agent_install_command = ""
+            output_lines.append("已使用 bin456789 一键重装命令执行本次重置")
         panel_base_url = resolve_panel_base_url(global_cfg)
 
         client = connect_ssh(mutable_server)
         output_lines.append("SSH 连接成功")
 
         reinstall_triggered = False
+        if preset_password:
+            generated_password = preset_password
+            mutable_server["ssh_password"] = generated_password
+            update_server_password(mutable_server["id"], generated_password)
+            output_lines.append(f"已为本次重装生成随机root密码: {generated_password}")
+
         if reset_command:
-            reset_command, generated_password = inject_random_password_if_needed(
+            if not preset_password:
+                reset_command, generated_password = inject_random_password_if_needed(
                 reset_command,
                 mutable_server,
                 generated_password,
@@ -998,7 +1052,7 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 mutable_server["ssh_password"] = generated_password
                 output_lines.append(f"检测到DD重装命令，已自动生成新root密码: {generated_password}")
 
-            if is_reinstall_command(reset_command):
+            if force_reinstall or is_reinstall_command(reset_command):
                 reinstall_triggered = True
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
@@ -1210,7 +1264,21 @@ def task_worker_loop():
                 f"任务执行中（第{attempt_no}/{max_attempts}次尝试）...",
                 f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中（第{attempt_no}/{max_attempts}次尝试）",
             )
-            run_remote(row, task["log_id"], notify_on_failure=(attempt_no >= max_attempts and not task["batch_key"]), notify_on_success=(not task["batch_key"]))
+            dd_choice = parse_bin_reinstall_choice(task["trigger_type"])
+            dd_password = None
+            dd_command = None
+            if dd_choice:
+                dd_password = generate_root_password()
+                dd_command = build_bin_reinstall_command(dd_choice, dd_password)
+            run_remote(
+                row,
+                task["log_id"],
+                notify_on_failure=(attempt_no >= max_attempts and not task["batch_key"]),
+                notify_on_success=(not task["batch_key"]),
+                reset_command_override=dd_command,
+                force_reinstall=bool(dd_choice),
+                preset_password=dd_password,
+            )
 
             with closing(get_conn()) as conn:
                 latest = conn.execute("SELECT status, output FROM job_logs WHERE id = ?", (task["log_id"],)).fetchone()
@@ -1830,6 +1898,19 @@ def toggle_rent(server_id):
         conn.execute("UPDATE servers SET is_rented = ? WHERE id = ?", (next_state, server_id))
         conn.commit()
     flash("已标记为已出租" if next_state else "已标记为未出租", "success")
+    return redirect(url_for("details_page"))
+
+
+@app.route("/servers/<int:server_id>/run-bin-reinstall", methods=["POST"])
+@login_required
+def run_bin_reinstall(server_id):
+    choice = (request.form.get("reinstall_choice") or "").strip().lower()
+    if choice not in BIN_REINSTALL_CHOICES:
+        flash("请选择有效的重装系统版本", "error")
+        return redirect(url_for("details_page"))
+
+    ok, msg, _ = run_for_server(server_id, trigger_type=f"binreinstall:{choice}")
+    flash(msg if ok else f"提交失败: {msg}", "success" if ok else "error")
     return redirect(url_for("details_page"))
 
 

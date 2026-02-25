@@ -53,6 +53,22 @@
     <form method="post" action="/servers/{{ row.id }}/run">
       <button type="submit">执行一次重置</button>
     </form>
+    <form method="post" action="/servers/{{ row.id }}/run-bin-reinstall" class="dd-form">
+      <select name="reinstall_choice">
+        <option value="debian-9">Debian 9</option>
+        <option value="debian-10">Debian 10</option>
+        <option value="debian-11">Debian 11</option>
+        <option value="debian-12" selected>Debian 12</option>
+        <option value="debian-13">Debian 13</option>
+        <option value="ubuntu-16.04">Ubuntu 16.04</option>
+        <option value="ubuntu-18.04">Ubuntu 18.04</option>
+        <option value="ubuntu-20.04">Ubuntu 20.04</option>
+        <option value="ubuntu-22.04">Ubuntu 22.04</option>
+        <option value="ubuntu-24.04">Ubuntu 24.04</option>
+        <option value="ubuntu-25.1">Ubuntu 25.1</option>
+      </select>
+      <button type="submit" class="warn">一键DD重置</button>
+    </form>
     <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
   </div>
 

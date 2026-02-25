@@ -41,6 +41,8 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
 .server-meta span{display:block;color:var(--muted);font-size:12px}
 .server-meta strong{font-size:15px;word-break:break-all}
 .server-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.dd-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dd-form select{min-width:140px}
 .renter-inline-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .renter-inline-form input{min-width:220px}
 .hidden{display:none !important}
