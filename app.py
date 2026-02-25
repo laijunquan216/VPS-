@@ -87,7 +87,9 @@ def init_db():
                 last_agent_rx_bytes INTEGER NOT NULL DEFAULT 0,
                 last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0,
                 last_agent_report_at TEXT,
-                last_reset_at TEXT
+                last_reset_at TEXT,
+                ssh_status TEXT NOT NULL DEFAULT 'unknown',
+                ssh_checked_at TEXT
             )
             """
         )
@@ -108,6 +110,7 @@ def init_db():
                 smtp_from TEXT NOT NULL DEFAULT '',
                 notify_email_to TEXT NOT NULL DEFAULT '',
                 traffic_data_source TEXT NOT NULL DEFAULT 'agent',
+                ssh_check_interval_minutes INTEGER NOT NULL DEFAULT 120,
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -184,6 +187,8 @@ def init_db():
         ensure_column(conn, "servers", "last_agent_rx_bytes INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "last_agent_report_at TEXT")
+        ensure_column(conn, "servers", "ssh_status TEXT NOT NULL DEFAULT 'unknown'")
+        ensure_column(conn, "servers", "ssh_checked_at TEXT")
         ensure_column(conn, "servers", "reset_hour INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "servers", "reset_minute INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "max_retries INTEGER NOT NULL DEFAULT 2")
@@ -202,6 +207,7 @@ def init_db():
         ensure_column(conn, "global_config", "smtp_from TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "notify_email_to TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "traffic_data_source TEXT NOT NULL DEFAULT 'agent'")
+        ensure_column(conn, "global_config", "ssh_check_interval_minutes INTEGER NOT NULL DEFAULT 120")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -229,12 +235,12 @@ def get_global_config():
         return row
 
 
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source, ssh_check_interval_minutes):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_data_source=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_data_source=?, ssh_check_interval_minutes=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -251,6 +257,7 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 smtp_from.strip(),
                 notify_email_to.strip(),
                 normalize_traffic_data_source(traffic_data_source),
+                max(0, int(ssh_check_interval_minutes)),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -314,6 +321,7 @@ def list_detail_rows():
             SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_agent_report_at,
+                   s.ssh_status, s.ssh_checked_at,
                    l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
@@ -375,8 +383,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source, ssh_check_interval_minutes, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -392,6 +400,7 @@ def restore_backup_payload(payload):
                 global_cfg.get("smtp_from", ""),
                 global_cfg.get("notify_email_to", ""),
                 normalize_traffic_data_source(global_cfg.get("traffic_data_source", "agent")),
+                int(global_cfg.get("ssh_check_interval_minutes", 120) or 120),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -400,8 +409,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -428,6 +437,8 @@ def restore_backup_payload(payload):
                     int(server.get("last_agent_tx_bytes", 0)),
                     server.get("last_agent_report_at"),
                     server.get("last_reset_at"),
+                    (server.get("ssh_status", "unknown") or "unknown"),
+                    server.get("ssh_checked_at"),
                 ),
             )
 
@@ -760,6 +771,44 @@ def refresh_all_traffic_data():
         except Exception:
             continue
 
+
+
+
+def update_server_ssh_status(server_id, is_online):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    status = "online" if is_online else "offline"
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET ssh_status = ?, ssh_checked_at = ? WHERE id = ?", (status, now_text, server_id))
+        conn.commit()
+
+
+def check_server_ssh_connectivity(server_row, timeout=8):
+    try:
+        client = connect_ssh(server_row, timeout=timeout)
+        client.close()
+        update_server_ssh_status(server_row["id"], True)
+        return True
+    except Exception:
+        update_server_ssh_status(server_row["id"], False)
+        return False
+
+
+def run_scheduled_ssh_checks(now_dt=None):
+    cfg = get_global_config()
+    interval = int(cfg["ssh_check_interval_minutes"] or 0) if cfg else 0
+    if interval <= 0:
+        return
+
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
+    if minutes_since_midnight % interval != 0:
+        return
+
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
+    for row in rows:
+        check_server_ssh_connectivity(row)
 
 def should_reset(server_row):
     now = datetime.now(TIMEZONE)
@@ -1378,6 +1427,7 @@ def run_for_server(server_id, trigger_type="manual", batch_key=""):
 
 def check_scheduled_jobs():
     now = datetime.now(TIMEZONE)
+    run_scheduled_ssh_checks(now)
     batch_key = now.strftime("%Y-%m-%d %H:%M")
     scheduled_for = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1705,6 +1755,7 @@ def update_global_tasks():
     form = request.form
     try:
         smtp_port = parse_int_form_field(form, "smtp_port", default=587, min_value=1, max_value=65535)
+        ssh_check_interval_minutes = parse_int_form_field(form, "ssh_check_interval_minutes", default=120, min_value=0, max_value=1440)
     except ValueError as exc:
         flash(f"全局配置保存失败: {exc}", "error")
         return redirect(url_for("settings_page"))
@@ -1723,6 +1774,7 @@ def update_global_tasks():
         form.get("smtp_from", ""),
         form.get("notify_email_to", ""),
         form.get("traffic_data_source", "agent"),
+        ssh_check_interval_minutes,
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
@@ -1877,6 +1929,19 @@ def toggle_renew(server_id):
         conn.execute("UPDATE servers SET is_renewed = ? WHERE id = ?", (next_state, server_id))
         conn.commit()
     flash("已切换为续租状态，后续将跳过定时重置" if next_state else "已关闭续租状态，恢复按计划重置", "success")
+    return redirect(url_for("details_page"))
+
+
+@app.route("/servers/<int:server_id>/check-ssh", methods=["POST"])
+@login_required
+def check_ssh_now(server_id):
+    row = get_server(server_id)
+    if not row:
+        flash("服务器不存在", "error")
+        return redirect(url_for("details_page"))
+
+    online = check_server_ssh_connectivity(row)
+    flash("SSH在线" if online else "SSH失联", "success" if online else "error")
     return redirect(url_for("details_page"))
 
 

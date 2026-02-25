@@ -14,6 +14,11 @@
       </form>
     </div>
     <div class="server-badges">
+      <form method="post" action="/servers/{{ row.id }}/check-ssh" class="ssh-check-form">
+        <button type="submit" class="badge ssh-status {% if row.ssh_status == 'online' %}ssh-online{% elif row.ssh_status == 'offline' %}ssh-offline{% else %}ssh-unknown{% endif %}">
+          {{ '在线' if row.ssh_status == 'online' else ('失联' if row.ssh_status == 'offline' else '待检测') }}
+        </button>
+      </form>
       {% if row.status == 'success' %}<span class="badge ok">正常</span>
       {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
       {% elif row.status == 'running' %}<span class="badge running">执行中</span>
@@ -35,6 +40,7 @@
     <div><span>下载流量（本周期）</span><strong>{{ row.traffic_download_text }}</strong></div>
     <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
     <div><span>最近上报</span><strong>{{ row.last_agent_report_at or '暂无' }}</strong></div>
+    <div><span>SSH检测时间</span><strong>{{ row.ssh_checked_at or '暂无' }}</strong></div>
   </div>
 
   <div class="server-actions">

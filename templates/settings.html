@@ -24,6 +24,7 @@
     <label class="full">流量统计来源（二选一）</label>
     <label class="inline"><input type="radio" name="traffic_data_source" value="agent" {% if (global_cfg.traffic_data_source or 'agent') == 'agent' %}checked{% endif %}/> Agent 上报</label>
     <label class="inline"><input type="radio" name="traffic_data_source" value="ssh" {% if (global_cfg.traffic_data_source or 'agent') == 'ssh' %}checked{% endif %}/> SSH 定时采集（每 5 分钟）</label>
+    <label>SSH连通性检测间隔（分钟，0为关闭）<input name="ssh_check_interval_minutes" type="number" min="0" max="1440" value="{{ global_cfg.ssh_check_interval_minutes or 120 }}" /></label>
     <label class="full">邮件通知（服务器重置成功/失败）</label>
     <label class="inline"><input name="notify_email_enabled" type="checkbox" {% if global_cfg.notify_email_enabled %}checked{% endif %}/> 启用邮件通知</label>
     <label>SMTP Host<input name="smtp_host" placeholder="smtp.example.com" value="{{ global_cfg.smtp_host }}" /></label>
