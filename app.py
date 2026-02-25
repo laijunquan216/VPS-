@@ -1140,6 +1140,11 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)
+                if force_reinstall:
+                    reboot_delay = max(30, BIN_REINSTALL_REBOOT_DELAY_SECONDS)
+                    reboot_cmd = f"nohup bash -lc 'sleep {reboot_delay}; sync; reboot' >/root/panel_reboot.log 2>&1 &"
+                    client.exec_command(reboot_cmd)
+                    output_lines.append(f"已为一键DD重置安排延迟重启（{reboot_delay}s后），避免打断DD前半段流程")
                 output_lines.append("重置任务已后台启动，等待后续重连")
                 client.close()
                 client = None
