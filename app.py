@@ -39,7 +39,7 @@ TIMEZONE = ZoneInfo("Asia/Shanghai")
 SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECONDS", "1800"))
 SSH_RETRY_INTERVAL_SECONDS = int(os.environ.get("SSH_RETRY_INTERVAL_SECONDS", "15"))
 POST_REINSTALL_WAIT_SECONDS = int(os.environ.get("POST_REINSTALL_WAIT_SECONDS", "30"))
-BIN_REINSTALL_REBOOT_DELAY_SECONDS = int(os.environ.get("BIN_REINSTALL_REBOOT_DELAY_SECONDS", "600"))
+DD_NEW_PASSWORD_GRACE_SECONDS = int(os.environ.get("DD_NEW_PASSWORD_GRACE_SECONDS", "900"))
 AGENT_REPORT_INTERVAL_SECONDS = int(os.environ.get("AGENT_REPORT_INTERVAL_SECONDS", "60"))
 DEFAULT_MAX_RETRIES = int(os.environ.get("DEFAULT_MAX_RETRIES", "2"))
 DEFAULT_RETRY_BACKOFF_SECONDS = os.environ.get("DEFAULT_RETRY_BACKOFF_SECONDS", "60,180")
@@ -842,9 +842,10 @@ def connect_ssh(server_row, timeout=20):
     return client
 
 
-def wait_for_ssh_reconnect(server_row, output_lines, password_candidates):
+def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None):
     output_lines.append("等待服务器重装并重启后重新连线...")
-    deadline = time.time() + SSH_RECONNECT_TIMEOUT_SECONDS
+    timeout_value = timeout_seconds if timeout_seconds is not None else SSH_RECONNECT_TIMEOUT_SECONDS
+    deadline = time.time() + max(1, int(timeout_value))
     while time.time() < deadline:
         for pwd in password_candidates:
             try:
@@ -1117,15 +1118,36 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 client = None
                 time.sleep(POST_REINSTALL_WAIT_SECONDS)
                 if force_reinstall or ssh_command_2 or ssh_command_3:
-                    if force_reinstall:
-                        passwords = [generated_password] if generated_password else []
+                    connected_pwd = None
+                    if generated_password:
+                        output_lines.append("重连阶段先使用新密码校验DD结果，若长时间失败再回退旧密码判定是否重置失败")
+                        try:
+                            new_pwd_wait = min(SSH_RECONNECT_TIMEOUT_SECONDS, max(60, DD_NEW_PASSWORD_GRACE_SECONDS))
+                            client, connected_pwd = wait_for_ssh_reconnect(
+                                mutable_server,
+                                output_lines,
+                                [generated_password],
+                                timeout_seconds=new_pwd_wait,
+                            )
+                        except Exception as reconnect_exc:
+                            if original_password and original_password != generated_password:
+                                output_lines.append("新密码在宽限期内未连通，开始尝试旧密码用于判定DD是否失败")
+                                client, old_pwd_connected = wait_for_ssh_reconnect(
+                                    mutable_server,
+                                    output_lines,
+                                    [original_password],
+                                    timeout_seconds=180,
+                                )
+                                mutable_server["ssh_password"] = old_pwd_connected
+                                update_server_password(mutable_server["id"], old_pwd_connected)
+                                raise RuntimeError("DD重置疑似失败：旧密码仍可登录（old password still valid）") from reconnect_exc
+                            raise
+                    elif force_reinstall:
+                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [], timeout_seconds=300)
                     else:
-                        passwords = []
-                        if generated_password:
-                            passwords.append(generated_password)
-                        passwords.append(original_password)
-                    client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, passwords)
-                    if connected_pwd != mutable_server["ssh_password"]:
+                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [original_password])
+
+                    if connected_pwd and connected_pwd != mutable_server["ssh_password"]:
                         mutable_server["ssh_password"] = connected_pwd
                         update_server_password(mutable_server["id"], connected_pwd)
                         output_lines.append("检测到实际可登录密码与预设不同，已自动回写面板")
@@ -1244,6 +1266,8 @@ def is_retryable_failure(output_text):
         "temporarily unavailable",
         "sshexception",
         "error reading ssh protocol banner",
+        "old password still valid",
+        "旧密码仍可登录",
     )
     return any(pattern in text for pattern in patterns)
 
