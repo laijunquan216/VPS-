@@ -631,6 +631,22 @@ def inject_random_ssh2_password_if_needed(command):
     return command, pwd
 
 
+def wrap_installnet_with_downloader_bootstrap(command):
+    bootstrap = (
+        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y wget curl; "
+        "elif command -v dnf >/dev/null 2>&1; then dnf install -y wget curl; "
+        "elif command -v yum >/dev/null 2>&1; then yum install -y wget curl; "
+        "elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget curl; "
+        "fi; "
+        "fi; "
+        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
+        "echo '缺少 wget/curl 且自动安装失败，无法执行 InstallNET 重置'; exit 127; "
+        "fi"
+    )
+    return "bash -lc " + shlex.quote(f"set -e; {bootstrap}; {command}")
+
 
 BIN_REINSTALL_CHOICES = {
     "debian-9": ("debian", "9"),
@@ -1118,6 +1134,9 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
 
             if force_reinstall or is_reinstall_command(reset_command):
                 reinstall_triggered = True
+                if is_reinstall_command(reset_command):
+                    reset_command = wrap_installnet_with_downloader_bootstrap(reset_command)
+                    output_lines.append("检测到 InstallNET 重置命令，已加入 wget/curl 缺失自动安装兜底")
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)

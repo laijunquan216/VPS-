@@ -132,6 +132,35 @@ function startEditRenter(rowId) {
   input.select();
 }
 
+
+(function preserveDetailsScrollPosition() {
+  const key = `details-scroll:${window.location.pathname}`;
+
+  const restoreScroll = () => {
+    const saved = sessionStorage.getItem(key);
+    if (!saved) return;
+    const value = Number(saved);
+    if (Number.isFinite(value) && value >= 0) {
+      window.scrollTo(0, value);
+    }
+  };
+
+  const saveScroll = () => {
+    sessionStorage.setItem(key, String(window.scrollY || window.pageYOffset || 0));
+  };
+
+  window.addEventListener('beforeunload', saveScroll);
+  document.querySelectorAll('form').forEach((form) => {
+    form.addEventListener('submit', saveScroll);
+  });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', restoreScroll, { once: true });
+  } else {
+    restoreScroll();
+  }
+})();
+
 async function copySummary(rowId) {
   const summaryNode = document.getElementById(`summary-${rowId}`);
   if (!summaryNode) {
