@@ -7,7 +7,11 @@
   <div class="server-head">
     <div class="server-title-wrap">
       <h3>{{ row.name }}</h3>
-      <span class="renter-badge">{{ row.renter_name or '未填写租赁人' }}</span>
+      <form method="post" action="/servers/{{ row.id }}/renter" class="renter-inline-form" data-row-id="{{ row.id }}">
+        <button type="button" class="renter-badge" data-role="display" onclick="startEditRenter({{ row.id }})">{{ row.renter_name or '未填写租赁人' }}</button>
+        <input type="text" name="renter_name" value="{{ row.renter_name }}" placeholder="租赁人（例如 咸鱼：DABA）" data-role="input" class="hidden" />
+        <button type="submit" class="secondary hidden" data-role="save">保存</button>
+      </form>
     </div>
     <div class="server-badges">
       {% if row.status == 'success' %}<span class="badge ok">正常</span>
@@ -34,10 +38,6 @@
   </div>
 
   <div class="server-actions">
-    <form method="post" action="/servers/{{ row.id }}/renter" class="renter-form">
-      <input type="text" name="renter_name" value="{{ row.renter_name }}" placeholder="租赁人（例如 咸鱼：DABA）" />
-      <button type="submit" class="secondary">保存租赁人</button>
-    </form>
     <form method="post" action="/servers/{{ row.id }}/toggle-rent">
       <button type="submit" class="rent-btn {% if row.is_rented %}rent-btn-on{% else %}rent-btn-off{% endif %}">
         {{ '已出租' if row.is_rented else '未出租' }}
@@ -97,6 +97,19 @@
 </section>
 
 <script>
+function startEditRenter(rowId) {
+  const form = document.querySelector(`.renter-inline-form[data-row-id="${rowId}"]`);
+  if (!form) return;
+  const display = form.querySelector('[data-role="display"]');
+  const input = form.querySelector('[data-role="input"]');
+  const save = form.querySelector('[data-role="save"]');
+  display.classList.add('hidden');
+  input.classList.remove('hidden');
+  save.classList.remove('hidden');
+  input.focus();
+  input.select();
+}
+
 async function copySummary(rowId) {
   const summaryNode = document.getElementById(`summary-${rowId}`);
   if (!summaryNode) {
