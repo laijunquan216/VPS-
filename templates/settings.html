@@ -21,7 +21,10 @@
       <textarea name="agent_install_command" rows="3" placeholder="例如 curl -fsSL https://example.com/install-agent.sh | bash -s -- --id xxx --key yyy">{{ global_cfg.agent_install_command }}</textarea>
       <p class="hint">重装后会先自动安装内置上报 Agent（上传到本面板），这里可选填额外命令。支持变量：{ip}、{name}、{ssh_user}</p>
     </label>
-        <label class="full">邮件通知（服务器重置成功/失败）</label>
+    <label class="full">流量统计来源（二选一）</label>
+    <label class="inline"><input type="radio" name="traffic_data_source" value="agent" {% if (global_cfg.traffic_data_source or 'agent') == 'agent' %}checked{% endif %}/> Agent 上报</label>
+    <label class="inline"><input type="radio" name="traffic_data_source" value="ssh" {% if (global_cfg.traffic_data_source or 'agent') == 'ssh' %}checked{% endif %}/> SSH 定时采集（每 5 分钟）</label>
+    <label class="full">邮件通知（服务器重置成功/失败）</label>
     <label class="inline"><input name="notify_email_enabled" type="checkbox" {% if global_cfg.notify_email_enabled %}checked{% endif %}/> 启用邮件通知</label>
     <label>SMTP Host<input name="smtp_host" placeholder="smtp.example.com" value="{{ global_cfg.smtp_host }}" /></label>
     <label>SMTP Port<input name="smtp_port" type="number" value="{{ global_cfg.smtp_port or 587 }}" /></label>
@@ -43,6 +46,7 @@
   <h2>服务器设置：新增服务器</h2>
   <form method="post" action="/servers" class="grid-form">
     <label>名称<input name="name" required /></label>
+    <label>租赁人<input name="renter_name" placeholder="例如 咸鱼：DABA" /></label>
     <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
     <label>IP<input name="ip" required /></label>
     <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
@@ -65,6 +69,7 @@
     <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 排序序号: {{ s.sort_order }} | 每月{{ s.reset_day }}日 {{ "%02d"|format(s.reset_hour or 1) }}:{{ "%02d"|format(s.reset_minute or 0) }} | 重试: {{ s.max_retries }}次 / 退避 {{ s.retry_backoff_seconds }} | 自动重置开关: {{ '开' if s.auto_reset else '关' }} | 续租状态: {{ '续租中（跳过定时重置）' if s.is_renewed else '未续租' }}</summary>
     <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
       <label>名称<input name="name" value="{{ s.name }}" required /></label>
+      <label>租赁人<input name="renter_name" value="{{ s.renter_name }}" placeholder="例如 咸鱼：DABA" /></label>
       <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
       <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
       <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
