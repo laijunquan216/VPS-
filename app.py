@@ -1065,10 +1065,13 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 client = None
                 time.sleep(POST_REINSTALL_WAIT_SECONDS)
                 if force_reinstall or ssh_command_2 or ssh_command_3:
-                    passwords = []
-                    if generated_password:
-                        passwords.append(generated_password)
-                    passwords.append(original_password)
+                    if force_reinstall:
+                        passwords = [generated_password] if generated_password else []
+                    else:
+                        passwords = []
+                        if generated_password:
+                            passwords.append(generated_password)
+                        passwords.append(original_password)
                     client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, passwords)
                     if connected_pwd != mutable_server["ssh_password"]:
                         mutable_server["ssh_password"] = connected_pwd
