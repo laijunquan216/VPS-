@@ -68,7 +68,6 @@ http://你的面板IP:5000
 - `SSH_RECONNECT_TIMEOUT_SECONDS`：重连超时秒数（默认 `1800`）
 - `SSH_RETRY_INTERVAL_SECONDS`：重连重试间隔秒数（默认 `15`）
 - `POST_REINSTALL_WAIT_SECONDS`：DD命令后台启动后首次等待秒数（默认 `30`）
-- `BIN_REINSTALL_REBOOT_DELAY_SECONDS`：bin456789 一键重置触发重启的延迟秒数（默认 `600`）
 - `DEFAULT_MAX_RETRIES`：默认重试次数（默认 `2`）
 - `DEFAULT_RETRY_BACKOFF_SECONDS`：默认退避秒数（默认 `60,180`）
 

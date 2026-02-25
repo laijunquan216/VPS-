@@ -653,7 +653,7 @@ def build_bin_reinstall_command(choice, root_password):
             f"bash <(curl -fsSL {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
             f"else "
             f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
-            f"fi"
+            f"fi; sync; reboot"
         )
     )
 
