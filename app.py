@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from io import BytesIO
 from urllib import error as urlerror
+from urllib import parse as urlparse
 from urllib import request as urlrequest
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -270,14 +271,46 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None):
     for account in list_scp_accounts():
         try:
             session_id = scp_api_login(account)
-            data = scp_api_call(account, "listVServers", {"session_id": session_id})
-            servers = data.get("vservers") or data.get("servers") or []
+            session_payload = {"session_id": session_id, "sessionid": session_id, "apisessionid": session_id}
+
+            try:
+                data = scp_api_call(account, "listVServers", session_payload)
+            except Exception:
+                data = scp_api_call(account, "getVServers", session_payload)
+
+            if isinstance(data, dict):
+                servers = data.get("vservers") or data.get("servers") or []
+            elif isinstance(data, list):
+                servers = data
+            else:
+                servers = []
+
             for item in servers:
-                item_ip = str(item.get("ip") or item.get("ipv4") or item.get("primary_ip") or "").strip()
-                if item_ip == ip_text:
-                    server_id = str(item.get("vserverid") or item.get("id") or item.get("serverid") or "").strip()
-                    if server_id:
-                        return account, server_id
+                if isinstance(item, dict):
+                    item_ip = str(item.get("ip") or item.get("ipv4") or item.get("primary_ip") or "").strip()
+                    if item_ip == ip_text:
+                        server_id = str(item.get("vserverid") or item.get("id") or item.get("serverid") or "").strip()
+                        if server_id:
+                            return account, server_id
+                else:
+                    vserver_name = str(item or "").strip()
+                    if not vserver_name:
+                        continue
+                    info = scp_api_call(
+                        account,
+                        "getVServerInformation",
+                        {
+                            "session_id": session_id,
+                            "sessionid": session_id,
+                            "apisessionid": session_id,
+                            "vservername": vserver_name,
+                        },
+                    )
+                    info_ips = []
+                    if isinstance(info, dict):
+                        info_ips = info.get("ips") or []
+                    if any(str(ip).strip() == ip_text for ip in info_ips):
+                        return account, vserver_name
         except Exception as exc:
             if output_lines is not None:
                 output_lines.append(f"SCP账号[{account['name']}] IP识别失败: {exc}")
@@ -298,16 +331,29 @@ def scp_api_call(account_row, action, payload):
     if "?" not in endpoint:
         endpoint = endpoint.rstrip("/") + "?JSON"
 
-    body = json.dumps({"action": action, "param": payload or {}}).encode("utf-8")
-    header_candidates = [
-        {"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
-        {"Content-Type": "application/json", "Accept": "application/json"},
-        {"Accept": "application/json"},
+    param_payload = payload or {}
+    request_variants = [
+        (
+            json.dumps({"action": action, "param": param_payload}).encode("utf-8"),
+            {"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+        ),
+        (
+            json.dumps({"action": action, "param": param_payload}).encode("utf-8"),
+            {"Content-Type": "application/json", "Accept": "application/json"},
+        ),
+        (
+            urlparse.urlencode({"action": action, "param": json.dumps(param_payload)}).encode("utf-8"),
+            {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        ),
+        (
+            urlparse.urlencode({"action": action, "param": json.dumps(param_payload)}).encode("utf-8"),
+            {"Accept": "application/json"},
+        ),
     ]
 
     raw = ""
     last_exc = None
-    for headers in header_candidates:
+    for body, headers in request_variants:
         req = urlrequest.Request(endpoint, data=body, headers=headers)
         try:
             with urlrequest.urlopen(req, timeout=30) as resp:
@@ -316,7 +362,7 @@ def scp_api_call(account_row, action, payload):
         except urlerror.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
             last_exc = RuntimeError(f"SCP API HTTP错误[{exc.code}]: {detail or exc.reason}")
-            if exc.code == 415:
+            if exc.code in (400, 415):
                 continue
             raise last_exc from exc
         except urlerror.URLError as exc:
@@ -332,6 +378,9 @@ def scp_api_call(account_row, action, payload):
     except Exception as exc:
         raise RuntimeError(f"SCP API返回非JSON: {raw[:300]}") from exc
 
+    if isinstance(data, list):
+        return data
+
     status = str(data.get("status") or "").lower()
     if status and status != "success":
         long_msg = data.get("longmessage") or data.get("message") or raw[:300]
@@ -340,18 +389,27 @@ def scp_api_call(account_row, action, payload):
 
 
 def scp_api_login(account_row):
-    resp = scp_api_call(
-        account_row,
-        "login",
-        {
-            "username": account_row["username"],
-            "password": account_row["password"],
-        },
-    )
-    session_id = resp.get("apisessionid") or resp.get("sessionid") or resp.get("session_id")
-    if not session_id:
-        raise RuntimeError("SCP API登录成功但未返回session id")
-    return session_id
+    login_variants = [
+        {"username": account_row["username"], "password": account_row["password"]},
+        {"loginName": account_row["username"], "password": account_row["password"]},
+        {"customernumber": account_row["username"], "password": account_row["password"]},
+    ]
+
+    last_exc = None
+    for login_payload in login_variants:
+        try:
+            resp = scp_api_call(account_row, "login", login_payload)
+            if isinstance(resp, dict):
+                session_id = resp.get("apisessionid") or resp.get("sessionid") or resp.get("session_id")
+                if session_id:
+                    return session_id
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    if last_exc:
+        raise RuntimeError(f"SCP API登录失败: {last_exc}")
+    raise RuntimeError("SCP API登录成功但未返回session id")
 
 
 def scp_reinstall_debian11(server_row, output_lines):
@@ -368,20 +426,55 @@ def scp_reinstall_debian11(server_row, output_lines):
     session_id = scp_api_login(account)
     output_lines.append(f"SCP API登录成功: 账号[{account['name']}] 会话已建立")
 
-    payload = {
-        "session_id": session_id,
-        "vserverid": scp_server_id,
-        "distribution": "debian",
-        "version": "11",
-        "language": "en",
-        "hostname": server_row["name"],
-        "password": server_row["ssh_password"],
-    }
-    try:
-        result = scp_api_call(account, "setVServerOs", payload)
-    except Exception:
-        result = scp_api_call(account, "reinstallVServer", payload)
-    request_id = result.get("requestid") or result.get("jobid") or "-"
+    payload_variants = [
+        {
+            "session_id": session_id,
+            "vserverid": scp_server_id,
+            "distribution": "debian",
+            "version": "11",
+            "language": "en",
+            "hostname": server_row["name"],
+            "password": server_row["ssh_password"],
+        },
+        {
+            "sessionid": session_id,
+            "vserverid": scp_server_id,
+            "distribution": "debian",
+            "version": "11",
+            "language": "en",
+            "hostname": server_row["name"],
+            "password": server_row["ssh_password"],
+        },
+        {
+            "session_id": session_id,
+            "vservername": scp_server_id,
+            "distribution": "debian",
+            "version": "11",
+            "language": "en",
+            "hostname": server_row["name"],
+            "password": server_row["ssh_password"],
+        },
+    ]
+
+    actions = ["setVServerOs", "reinstallVServer", "setVServerOS"]
+    result = None
+    last_exc = None
+    for action in actions:
+        for payload in payload_variants:
+            try:
+                result = scp_api_call(account, action, payload)
+                break
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if result is not None:
+            break
+
+    if result is None:
+        raise RuntimeError(f"SCP重装提交失败: {last_exc}")
+
+    request_id = result.get("requestid") if isinstance(result, dict) else None
+    request_id = request_id or (result.get("jobid") if isinstance(result, dict) else None) or "-"
     output_lines.append(f"SCP重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11")
 
 def get_global_config():
