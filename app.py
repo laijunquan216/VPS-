@@ -626,11 +626,23 @@ def _scp_wait_task_finished(account, task_uuid, output_lines, timeout_seconds=18
             output_lines.append(f"SCP任务状态更新: uuid={task_uuid}, state={state or '-'}, progress={progress or '-'}")
             last_state = state
         if state == "FINISHED":
-            return
+            return data
         if state in ("ERROR", "FAILED", "CANCELED"):
             raise RuntimeError(f"SCP任务失败: uuid={task_uuid}, state={state}, detail={str(data)[:500]}")
         time.sleep(10)
     raise RuntimeError(f"SCP任务超时: uuid={task_uuid} 在限定时间内未完成")
+
+
+def _scp_extract_root_password(task_data):
+    if not isinstance(task_data, dict):
+        return ""
+    result = task_data.get("result")
+    if isinstance(result, dict):
+        pwd = result.get("rootPassword") or result.get("root_password")
+        if pwd:
+            return str(pwd).strip()
+    pwd = task_data.get("rootPassword") or task_data.get("root_password")
+    return str(pwd).strip() if pwd else ""
 
 
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
@@ -1035,7 +1047,6 @@ def scp_reinstall_debian11(server_row, output_lines):
             )
         else:
             output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
-<<<<<<< codex/analyze-reset-task-error-21swky
         payload_variants = []
         if flavour_id:
             payload_variants.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
@@ -1046,66 +1057,12 @@ def scp_reinstall_debian11(server_row, output_lines):
 
         output_lines.append("SCP REST将按文档接口执行: POST /servers/{serverId}/image + imageFlavourId/imageId")
         for path in (f"servers/{scp_server_id}/image",):
-=======
-        payload_variants = [
-            {
-                "hostname": server_row["name"],
-                "rootPassword": server_row["ssh_password"],
-                "password": server_row["ssh_password"],
-                "distribution": "debian",
-                "version": "11",
-                "os": "debian11",
-                "image": "debian-11",
-            }
-        ]
-        if flavour_id or image_id:
-            preferred_payloads = []
-            if flavour_id:
-                preferred_payloads.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
-            if image_id:
-                preferred_payloads.append({"imageId": int(image_id) if str(image_id).isdigit() else image_id})
-            payload_variants = [
-                {
-                    "hostname": server_row["name"],
-                    "rootPassword": server_row["ssh_password"],
-                    "password": server_row["ssh_password"],
-                    **extra,
-                }
-                for extra in preferred_payloads
-            ] + payload_variants
-            payload_variants.extend(
-                [
-                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageFlavourId": flavour_id},
-                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageId": image_id},
-                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "image": {"id": image_id}},
-                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "image": {"id": image_id, "name": image_pick.get("image_name")}},
-                ]
-            )
-            payload_variants = [x for x in payload_variants if not ("imageFlavourId" in x and not x.get("imageFlavourId"))]
-            payload_variants = [x for x in payload_variants if not ("imageId" in x and not x.get("imageId"))]
-            filtered_variants = []
-            for payload in payload_variants:
-                if "image" not in payload:
-                    filtered_variants.append(payload)
-                    continue
-                image_field = payload.get("image")
-                if isinstance(image_field, dict):
-                    if image_field.get("id"):
-                        filtered_variants.append(payload)
-                    continue
-                if isinstance(image_field, str):
-                    if image_field.strip():
-                        filtered_variants.append(payload)
-                    continue
-            payload_variants = filtered_variants
-
-        for path in (f"servers/{scp_server_id}/image", f"servers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os", f"vservers/{scp_server_id}/reinstall"):
->>>>>>> main
             try:
                 for payload in payload_variants:
                     result = scp_rest_request(account, "POST", path, token=token, payload=payload, endpoint_base=endpoint_base)
                     request_id = "-"
                     task_uuid = _scp_extract_task_uuid(result)
+                    root_password = _scp_extract_root_password(result)
                     if isinstance(result, dict):
                         request_id = str(
                             result.get("request_id")
@@ -1117,7 +1074,13 @@ def scp_reinstall_debian11(server_row, output_lines):
                         )
                     if task_uuid:
                         output_lines.append(f"SCP REST重装任务已创建: uuid={task_uuid}，开始轮询任务状态")
-                        _scp_wait_task_finished(account, task_uuid, output_lines)
+                        task_result = _scp_wait_task_finished(account, task_uuid, output_lines)
+                        if not root_password:
+                            root_password = _scp_extract_root_password(task_result)
+                    if root_password:
+                        server_row["ssh_password"] = root_password
+                        update_server_password(server_row["id"], root_password)
+                        output_lines.append("SCP返回了root密码，已自动回写到面板并用于后续SSH重连")
                     output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11, path={path}")
                     return
             except Exception as exc:
