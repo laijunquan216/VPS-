@@ -1902,6 +1902,23 @@ def execute_command_and_collect(client, title, command, output_lines):
             output_lines.append(f"{title}提示:\n" + "\n".join(dict.fromkeys(benign_lines)))
 
 
+def ensure_curl_available_for_agent(client, output_lines):
+    check_cmd = "command -v curl >/dev/null 2>&1 && echo __CURL_OK__ || echo __CURL_MISSING__"
+    stdin, stdout, _ = client.exec_command(check_cmd)
+    marker = (stdout.read() or b"").decode("utf-8", errors="ignore")
+    if "__CURL_OK__" in marker:
+        return
+
+    output_lines.append("检测到 curl 缺失，准备在安装Agent前执行 apt update && apt install -y curl")
+    install_cmd = "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y curl"
+    execute_command_and_collect(client, "Agent前置依赖安装", install_cmd, output_lines)
+
+    stdin, stdout, _ = client.exec_command(check_cmd)
+    marker = (stdout.read() or b"").decode("utf-8", errors="ignore")
+    if "__CURL_OK__" not in marker:
+        raise RuntimeError("Agent安装前依赖检查失败：curl 仍不可用")
+
+
 def extract_summary(server_row, raw_output):
     raw_output = sanitize_terminal_text(raw_output)
     ip_match = re.search(r"IP\s*address\s*:\s*([\d\.]+)", raw_output, flags=re.IGNORECASE)
@@ -2201,6 +2218,7 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             if client is None:
                 client = connect_ssh(mutable_server)
                 output_lines.append("执行 Agent安装任务 前重新建立SSH连接成功")
+            ensure_curl_available_for_agent(client, output_lines)
             execute_command_and_collect(client, "Agent安装任务", builtin_agent_command, output_lines)
 
             if agent_install_command:
