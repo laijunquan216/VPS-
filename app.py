@@ -162,6 +162,7 @@ def init_db():
                 name TEXT NOT NULL,
                 username TEXT NOT NULL,
                 password TEXT NOT NULL,
+                refresh_token TEXT NOT NULL DEFAULT '',
                 api_endpoint TEXT NOT NULL DEFAULT 'https://www.servercontrolpanel.de/api/v1',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -218,6 +219,7 @@ def init_db():
         ensure_column(conn, "servers", "scp_account_id INTEGER")
         ensure_column(conn, "servers", "scp_server_id TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "reinstall_mode TEXT NOT NULL DEFAULT 'ssh'")
+        ensure_column(conn, "scp_accounts", "refresh_token TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "task_queue", "trigger_type TEXT NOT NULL DEFAULT 'manual'")
         ensure_column(conn, "task_queue", "batch_key TEXT NOT NULL DEFAULT ''")
@@ -264,13 +266,43 @@ def get_scp_account(account_id):
         return conn.execute("SELECT * FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
 
 
+def _scp_endpoint_candidates(api_endpoint):
+    raw = (api_endpoint or "").strip()
+    if not raw:
+        raw = "https://www.servercontrolpanel.de/api/v1"
+
+    cleaned = raw.split("?", 1)[0].rstrip("/")
+    if not cleaned:
+        cleaned = "https://www.servercontrolpanel.de"
+
+    if "WSEndUser" in cleaned:
+        host = cleaned.split("/WSEndUser", 1)[0].rstrip("/")
+    elif "/api/" in cleaned:
+        host = cleaned.split("/api/", 1)[0].rstrip("/")
+    else:
+        host = cleaned
+
+    out = []
+    for candidate in (
+        cleaned,
+        f"{host}/api/v1",
+        f"{host}/api",
+        host,
+    ):
+        c = (candidate or "").rstrip("/")
+        if c and c not in out:
+            out.append(c)
+
+    if "https://www.servercontrolpanel.de/api/v1" not in out:
+        out.append("https://www.servercontrolpanel.de/api/v1")
+    return out
+
+
 def _scp_rest_base_endpoint(api_endpoint):
-    base = (api_endpoint or "").strip() or "https://www.servercontrolpanel.de/api/v1"
-    if "WSEndUser" in base:
-        return "https://www.servercontrolpanel.de/api/v1"
-    if "?" in base:
-        base = base.split("?", 1)[0]
-    return base.rstrip("/")
+    for candidate in _scp_endpoint_candidates(api_endpoint):
+        if "/api" in candidate:
+            return candidate
+    return "https://www.servercontrolpanel.de/api/v1"
 
 
 def _scp_rest_extract_token(data):
@@ -286,9 +318,48 @@ def _scp_rest_extract_token(data):
     return None
 
 
+def _scp_rest_refresh_access_token(account_row):
+    refresh_token = (account_row["refresh_token"] or "").strip()
+    if not refresh_token:
+        return None
+
+    token_url = "https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect/token"
+    body = urlparse.urlencode(
+        {
+            "client_id": "scp",
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
+    req = urlrequest.Request(
+        token_url,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
+    token = _scp_rest_extract_token(data)
+    if not token:
+        raise RuntimeError("SCP OIDC 刷新成功但未返回access_token")
+    return token
+
+
 def scp_rest_login(account_row):
-    endpoint = _scp_rest_base_endpoint(account_row["api_endpoint"])
-    login_urls = [f"{endpoint}/auth/login", f"{endpoint}/login", f"{endpoint}/session"]
+    try:
+        token = _scp_rest_refresh_access_token(account_row)
+        if token:
+            return _scp_rest_base_endpoint(account_row["api_endpoint"]), token
+    except Exception:
+        pass
+
+    endpoint_candidates = _scp_endpoint_candidates(account_row["api_endpoint"])
+    login_urls = []
+    for endpoint in endpoint_candidates:
+        for suffix in ("auth/login", "login", "session", "auth/session"):
+            url = f"{endpoint}/{suffix}".rstrip("/")
+            if url not in login_urls:
+                login_urls.append(url)
     payloads = [
         {"username": account_row["username"], "password": account_row["password"]},
         {"login": account_row["username"], "password": account_row["password"]},
@@ -311,12 +382,13 @@ def scp_rest_login(account_row):
                 continue
             token = _scp_rest_extract_token(data)
             if token:
+                endpoint = url.rsplit("/", 1)[0]
                 return endpoint, token
     raise RuntimeError(f"SCP REST登录失败: {last_exc}")
 
 
-def scp_rest_request(account_row, method, path, token=None, payload=None):
-    endpoint = _scp_rest_base_endpoint(account_row["api_endpoint"])
+def scp_rest_request(account_row, method, path, token=None, payload=None, endpoint_base=None):
+    endpoint = (endpoint_base or "").rstrip("/") or _scp_rest_base_endpoint(account_row["api_endpoint"])
     url = f"{endpoint}/{path.lstrip('/')}"
     headers = {"Accept": "application/json"}
     if token:
@@ -375,10 +447,10 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
 
     for account in candidates:
         try:
-            _, token = scp_rest_login(account)
+            endpoint_base, token = scp_rest_login(account)
             for path in ("servers", "vservers", "virtual-machines"):
                 try:
-                    data = scp_rest_request(account, "GET", path, token=token)
+                    data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
                 except Exception:
                     continue
                 for server_item in _scp_collect_server_entries(data):
@@ -465,13 +537,11 @@ def _xml_local_name(tag):
 
 
 def _scp_soap_endpoint(api_endpoint):
-    base = (api_endpoint or "").strip() or "https://www.servercontrolpanel.de/WSEndUser?JSON"
-    if "?" in base:
-        root, query = base.split("?", 1)
-        if query.lower() == "wsdl":
-            return root
-        return root
-    return base
+    for candidate in _scp_endpoint_candidates(api_endpoint):
+        if "WSEndUser" in candidate:
+            return candidate
+    first = _scp_endpoint_candidates(api_endpoint)[0]
+    return f"{first}/WSEndUser"
 
 
 def scp_soap_call(account_row, method_name, params):
@@ -599,9 +669,17 @@ def scp_soap_get_vserver_ips(account_row, vserver_name):
 
 
 def scp_api_call(account_row, action, payload):
-    endpoint = (account_row["api_endpoint"] or "").strip() or "https://www.servercontrolpanel.de/WSEndUser?JSON"
-    if "?" not in endpoint:
-        endpoint = endpoint.rstrip("/") + "?JSON"
+    endpoint_candidates = []
+    for base in _scp_endpoint_candidates(account_row["api_endpoint"]):
+        if "WSEndUser" in base:
+            endpoint = base
+        else:
+            endpoint = base.rstrip("/") + "/WSEndUser"
+        endpoint = endpoint.rstrip("?")
+        if "?" not in endpoint:
+            endpoint = endpoint + "?JSON"
+        if endpoint not in endpoint_candidates:
+            endpoint_candidates.append(endpoint)
 
     param_payload = payload or {}
     request_variants = [
@@ -625,22 +703,25 @@ def scp_api_call(account_row, action, payload):
 
     raw = ""
     last_exc = None
-    for body, headers in request_variants:
-        req = urlrequest.Request(endpoint, data=body, headers=headers)
-        for _ in range(2):
-            try:
-                with urlrequest.urlopen(req, timeout=60) as resp:
-                    raw = resp.read().decode("utf-8", errors="ignore")
+    for endpoint in endpoint_candidates:
+        for body, headers in request_variants:
+            req = urlrequest.Request(endpoint, data=body, headers=headers)
+            for _ in range(2):
+                try:
+                    with urlrequest.urlopen(req, timeout=60) as resp:
+                        raw = resp.read().decode("utf-8", errors="ignore")
+                        break
+                except urlerror.HTTPError as exc:
+                    detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+                    last_exc = RuntimeError(f"SCP API HTTP错误[{exc.code}]: {detail or exc.reason}")
+                    # 400/404/415 usually indicate endpoint/payload/media-type mismatch.
                     break
-            except urlerror.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
-                last_exc = RuntimeError(f"SCP API HTTP错误[{exc.code}]: {detail or exc.reason}")
-                # 400/415 usually indicate payload/media-type mismatch, continue with next variant.
-                break
-            except urlerror.URLError as exc:
-                last_exc = RuntimeError(f"SCP API网络异常: {exc}")
-                if "timed out" in str(exc).lower():
-                    continue
+                except urlerror.URLError as exc:
+                    last_exc = RuntimeError(f"SCP API网络异常: {exc}")
+                    if "timed out" in str(exc).lower():
+                        continue
+                    break
+            if raw:
                 break
         if raw:
             break
@@ -703,7 +784,7 @@ def scp_reinstall_debian11(server_row, output_lines):
         output_lines.append(f"已按IP自动匹配SCP服务器并绑定: 账号[{account['name']}] server_id={scp_server_id}")
 
     try:
-        _, token = scp_rest_login(account)
+        endpoint_base, token = scp_rest_login(account)
         payload = {
             "distribution": "debian",
             "version": "11",
@@ -714,7 +795,7 @@ def scp_reinstall_debian11(server_row, output_lines):
         }
         for path in (f"servers/{scp_server_id}/reinstall", f"vservers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os"):
             try:
-                result = scp_rest_request(account, "POST", path, token=token, payload=payload)
+                result = scp_rest_request(account, "POST", path, token=token, payload=payload, endpoint_base=endpoint_base)
                 request_id = "-"
                 if isinstance(result, dict):
                     request_id = str(result.get("request_id") or result.get("job_id") or result.get("id") or "-")
@@ -1021,12 +1102,13 @@ def restore_backup_payload(payload):
         for account in scp_accounts:
             now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
             conn.execute(
-                "INSERT INTO scp_accounts(id, name, username, password, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO scp_accounts(id, name, username, password, refresh_token, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     account.get("id"),
                     account.get("name", ""),
                     account.get("username", ""),
                     account.get("password", ""),
+                    account.get("refresh_token", ""),
                     account.get("api_endpoint") or "https://www.servercontrolpanel.de/api/v1",
                     account.get("created_at") or now_text,
                     account.get("updated_at") or now_text,
@@ -2438,16 +2520,20 @@ def add_scp_account():
     name = (form.get("name") or "").strip()
     username = (form.get("username") or "").strip()
     password = form.get("password") or ""
+    refresh_token = (form.get("refresh_token") or "").strip()
     api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/api/v1"
-    if not name or not username or not password:
-        flash("新增SCP账号失败: 名称/账号/密码均为必填", "error")
+    if not name or not username:
+        flash("新增SCP账号失败: 名称/账号均为必填", "error")
+        return redirect(url_for("settings_page"))
+    if not password and not refresh_token:
+        flash("新增SCP账号失败: SCP密码 与 OIDC Refresh Token 至少填写一个", "error")
         return redirect(url_for("settings_page"))
 
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     with closing(get_conn()) as conn:
         conn.execute(
-            "INSERT INTO scp_accounts(name, username, password, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-            (name, username, password, api_endpoint, now_text, now_text),
+            "INSERT INTO scp_accounts(name, username, password, refresh_token, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+            (name, username, password, refresh_token, api_endpoint, now_text, now_text),
         )
         conn.commit()
 

@@ -48,7 +48,8 @@
   <form method="post" action="/scp-accounts" class="grid-form">
     <label>账号别名<input name="name" placeholder="例如 netcup-A" required /></label>
     <label>SCP账号<input name="username" required /></label>
-    <label>SCP密码<input name="password" type="password" required /></label>
+    <label>SCP密码（旧接口可用）<input name="password" type="password" /></label>
+    <label class="full">OIDC Refresh Token（推荐）<input name="refresh_token" placeholder="离线refresh_token，用于换取Bearer access_token" /></label>
     <label class="full">API Endpoint<input name="api_endpoint" value="https://www.servercontrolpanel.de/api/v1" /></label>
     <button type="submit">添加SCP账号</button>
   </form>
@@ -56,7 +57,7 @@
   <ul>
     {% for a in scp_accounts %}
       <li>
-        #{{ a.id }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }}
+        #{{ a.id }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }}{% if a.refresh_token %} [OIDC]{% endif %}
         <form method="post" action="/scp-accounts/{{ a.id }}/delete" style="display:inline" onsubmit="return confirm('确认删除该SCP账号?')">
           <button class="danger" type="submit">删除</button>
         </form>
