@@ -882,7 +882,17 @@ def connect_ssh(server_row, timeout=20):
     return client
 
 
-def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None):
+def is_post_reset_environment_ready(client):
+    probe = (
+        "command -v bash >/dev/null 2>&1 "
+        "&& (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) "
+        "&& test -s /etc/os-release"
+    )
+    _, stdout, _ = client.exec_command(probe)
+    return stdout.channel.recv_exit_status() == 0
+
+
+def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None, require_ready=False):
     output_lines.append("等待服务器重装并重启后重新连线...")
     timeout_value = timeout_seconds if timeout_seconds is not None else SSH_RECONNECT_TIMEOUT_SECONDS
     deadline = time.time() + max(1, int(timeout_value))
@@ -892,6 +902,10 @@ def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeou
                 trial = dict(server_row)
                 trial["ssh_password"] = pwd
                 client = connect_ssh(trial, timeout=15)
+                if require_ready and not is_post_reset_environment_ready(client):
+                    output_lines.append("已连上SSH，但系统仍在DD切换阶段（bash/curl/wget未就绪），继续等待...")
+                    client.close()
+                    continue
                 output_lines.append(f"服务器已重新上线，SSH重连成功（密码候选: {pwd[:3]}***）")
                 return client, pwd
             except Exception as exc:
@@ -1171,6 +1185,7 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                                 output_lines,
                                 [generated_password],
                                 timeout_seconds=new_pwd_wait,
+                                require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
                             )
                         except Exception as reconnect_exc:
                             if original_password and original_password != generated_password:
@@ -1180,15 +1195,27 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                                     output_lines,
                                     [original_password],
                                     timeout_seconds=180,
+                                    require_ready=False,
                                 )
                                 mutable_server["ssh_password"] = old_pwd_connected
                                 update_server_password(mutable_server["id"], old_pwd_connected)
                                 raise RuntimeError("DD重置疑似失败：旧密码仍可登录（old password still valid）") from reconnect_exc
                             raise
                     elif force_reinstall:
-                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [], timeout_seconds=300)
+                        client, connected_pwd = wait_for_ssh_reconnect(
+                            mutable_server,
+                            output_lines,
+                            [],
+                            timeout_seconds=300,
+                            require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
+                        )
                     else:
-                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [original_password])
+                        client, connected_pwd = wait_for_ssh_reconnect(
+                            mutable_server,
+                            output_lines,
+                            [original_password],
+                            require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
+                        )
 
                     if connected_pwd and connected_pwd != mutable_server["ssh_password"]:
                         mutable_server["ssh_password"] = connected_pwd
