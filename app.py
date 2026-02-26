@@ -163,7 +163,7 @@ def init_db():
                 username TEXT NOT NULL,
                 password TEXT NOT NULL,
                 refresh_token TEXT NOT NULL DEFAULT '',
-                api_endpoint TEXT NOT NULL DEFAULT 'https://www.servercontrolpanel.de/api/v1',
+                api_endpoint TEXT NOT NULL DEFAULT 'https://www.servercontrolpanel.de/scp-core/api/v1',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -277,6 +277,8 @@ def _scp_endpoint_candidates(api_endpoint):
 
     if "WSEndUser" in cleaned:
         host = cleaned.split("/WSEndUser", 1)[0].rstrip("/")
+    elif "/scp-core/api/" in cleaned:
+        host = cleaned.split("/scp-core/api/", 1)[0].rstrip("/")
     elif "/api/" in cleaned:
         host = cleaned.split("/api/", 1)[0].rstrip("/")
     else:
@@ -285,6 +287,8 @@ def _scp_endpoint_candidates(api_endpoint):
     out = []
     for candidate in (
         cleaned,
+        f"{host}/scp-core/api/v1",
+        f"{host}/scp-core/api",
         f"{host}/api/v1",
         f"{host}/api",
         host,
@@ -293,16 +297,22 @@ def _scp_endpoint_candidates(api_endpoint):
         if c and c not in out:
             out.append(c)
 
-    if "https://www.servercontrolpanel.de/api/v1" not in out:
-        out.append("https://www.servercontrolpanel.de/api/v1")
+    for default_base in (
+        "https://www.servercontrolpanel.de/scp-core/api/v1",
+        "https://www.servercontrolpanel.de/api/v1",
+    ):
+        if default_base not in out:
+            out.append(default_base)
     return out
 
 
 def _scp_rest_base_endpoint(api_endpoint):
     for candidate in _scp_endpoint_candidates(api_endpoint):
+        if "/scp-core/api" in candidate:
+            return candidate
         if "/api" in candidate:
             return candidate
-    return "https://www.servercontrolpanel.de/api/v1"
+    return "https://www.servercontrolpanel.de/scp-core/api/v1"
 
 
 def _scp_rest_extract_token(data):
@@ -1109,7 +1119,7 @@ def restore_backup_payload(payload):
                     account.get("username", ""),
                     account.get("password", ""),
                     account.get("refresh_token", ""),
-                    account.get("api_endpoint") or "https://www.servercontrolpanel.de/api/v1",
+                    account.get("api_endpoint") or "https://www.servercontrolpanel.de/scp-core/api/v1",
                     account.get("created_at") or now_text,
                     account.get("updated_at") or now_text,
                 ),
@@ -2521,7 +2531,7 @@ def add_scp_account():
     username = (form.get("username") or "").strip()
     password = form.get("password") or ""
     refresh_token = (form.get("refresh_token") or "").strip()
-    api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/api/v1"
+    api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/scp-core/api/v1"
     if not name or not username:
         flash("新增SCP账号失败: 名称/账号均为必填", "error")
         return redirect(url_for("settings_page"))
