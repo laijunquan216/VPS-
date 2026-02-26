@@ -263,12 +263,14 @@ def get_scp_account(account_id):
         return conn.execute("SELECT * FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
 
 
-def find_scp_server_id_by_ip(server_ip, output_lines=None):
+def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
     ip_text = str(server_ip or "").strip()
     if not ip_text:
         return None, None
 
-    for account in list_scp_accounts():
+    candidates = account_candidates if account_candidates is not None else list_scp_accounts()
+
+    for account in candidates:
         try:
             session_id = scp_api_login(account)
             session_payload = {"session_id": session_id, "sessionid": session_id, "apisessionid": session_id}
@@ -355,19 +357,23 @@ def scp_api_call(account_row, action, payload):
     last_exc = None
     for body, headers in request_variants:
         req = urlrequest.Request(endpoint, data=body, headers=headers)
-        try:
-            with urlrequest.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8", errors="ignore")
+        for _ in range(2):
+            try:
+                with urlrequest.urlopen(req, timeout=60) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                    break
+            except urlerror.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+                last_exc = RuntimeError(f"SCP API HTTP错误[{exc.code}]: {detail or exc.reason}")
+                # 400/415 usually indicate payload/media-type mismatch, continue with next variant.
                 break
-        except urlerror.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
-            last_exc = RuntimeError(f"SCP API HTTP错误[{exc.code}]: {detail or exc.reason}")
-            if exc.code in (400, 415):
-                continue
-            raise last_exc from exc
-        except urlerror.URLError as exc:
-            last_exc = RuntimeError(f"SCP API网络异常: {exc}")
-            raise last_exc from exc
+            except urlerror.URLError as exc:
+                last_exc = RuntimeError(f"SCP API网络异常: {exc}")
+                if "timed out" in str(exc).lower():
+                    continue
+                break
+        if raw:
+            break
     else:
         if last_exc:
             raise last_exc
@@ -417,8 +423,11 @@ def scp_reinstall_debian11(server_row, output_lines):
     scp_server_id = (server_row.get("scp_server_id") or "").strip()
 
     if not account or not scp_server_id:
-        account, scp_server_id = find_scp_server_id_by_ip(server_row["ip"], output_lines)
+        account_scope = [account] if account else None
+        account, scp_server_id = find_scp_server_id_by_ip(server_row["ip"], output_lines, account_candidates=account_scope)
         if not account or not scp_server_id:
+            if account_scope:
+                raise RuntimeError(f"未能在指定SCP账号[{account_scope[0]['name']}]中按IP匹配到目标服务器")
             raise RuntimeError("未能在已配置SCP账号中按IP匹配到目标服务器")
         bind_scp_server(server_row["id"], account["id"], scp_server_id)
         output_lines.append(f"已按IP自动匹配SCP服务器并绑定: 账号[{account['name']}] server_id={scp_server_id}")
