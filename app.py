@@ -683,27 +683,32 @@ def parse_bin_reinstall_choice(trigger_type):
 
 def build_bin_reinstall_command(choice, root_password):
     distro, version = BIN_REINSTALL_CHOICES[choice]
-    script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+    installnet_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
+    installnet_target = f"-{distro} {version}"
     return (
         "bash -lc "
         + shlex.quote(
-            f"set -e; "
-            f"if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then "
-            f"export DEBIAN_FRONTEND=noninteractive; "
-            f"if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y curl wget; "
-            f"elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget; "
-            f"elif command -v yum >/dev/null 2>&1; then yum install -y curl wget; "
-            f"elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget; "
-            f"fi; "
-            f"fi; "
-            f"if command -v curl >/dev/null 2>&1; then "
-            f"bash <(curl -fsSL {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
-            f"elif command -v wget >/dev/null 2>&1; then "
-            f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
-            f"else echo '缺少 curl/wget 且自动安装失败，无法执行 bin456789 重装'; exit 127; "
-            f"fi; sync; reboot"
+            "set -e; "
+            "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
+            "export DEBIAN_FRONTEND=noninteractive; "
+            "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y wget curl; "
+            "elif command -v dnf >/dev/null 2>&1; then dnf install -y wget curl; "
+            "elif command -v yum >/dev/null 2>&1; then yum install -y wget curl; "
+            "elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget curl; "
+            "fi; "
+            "fi; "
+            "if command -v wget >/dev/null 2>&1; then "
+            f"wget --no-check-certificate -qO InstallNET.sh {shlex.quote(installnet_url)}; "
+            "elif command -v curl >/dev/null 2>&1; then "
+            f"curl -fsSL {shlex.quote(installnet_url)} -o InstallNET.sh; "
+            "else echo '缺少 wget/curl 且自动安装失败，无法执行InstallNET重置'; exit 127; "
+            "fi; "
+            "chmod a+x InstallNET.sh; "
+            f"bash InstallNET.sh {installnet_target} -pwd {shlex.quote(root_password)}; "
+            "reboot"
         )
     )
+
 
 def normalize_shell_command(command):
     return command.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
