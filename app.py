@@ -2105,8 +2105,11 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             output_lines.append("已使用 bin456789 一键重装命令执行本次重置")
         panel_base_url = resolve_panel_base_url(global_cfg)
 
-        client = connect_ssh(mutable_server)
-        output_lines.append("SSH 连接成功")
+        if reinstall_mode == "scp_api":
+            output_lines.append("SCP API 模式：跳过重置前SSH连通性要求，先执行API重置")
+        else:
+            client = connect_ssh(mutable_server)
+            output_lines.append("SSH 连接成功")
 
         reinstall_triggered = False
         if preset_password:
@@ -2120,9 +2123,6 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             output_lines.append("本服务器已启用 SCP API 重置模式，准备调用SCP重装 Debian11")
             scp_reinstall_debian11(mutable_server, output_lines)
             output_lines.append("SCP重装命令已提交，等待后续重连")
-            if client:
-                client.close()
-                client = None
             time.sleep(POST_REINSTALL_WAIT_SECONDS)
             client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [mutable_server["ssh_password"]], timeout_seconds=SSH_RECONNECT_TIMEOUT_SECONDS)
             if connected_pwd and connected_pwd != mutable_server["ssh_password"]:
