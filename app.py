@@ -853,6 +853,28 @@ def is_reinstall_command(command):
     return is_installnet or is_bin_reinstall
 
 
+def wrap_installnet_with_downloader_bootstrap(command):
+    text = str(command or "").strip()
+    if not text:
+        return text
+
+    if "InstallNET.sh" not in text:
+        return text
+
+    bootstrap = (
+        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y curl wget; "
+        "elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget; "
+        "elif command -v yum >/dev/null 2>&1; then yum install -y curl wget; "
+        "elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget; "
+        "else echo '缺少 wget/curl，且无法自动安装，请手动安装后重试'; exit 127; "
+        "fi; "
+        "fi"
+    )
+    return f"set -e; {bootstrap}; {text}"
+
+
 def connect_ssh(server_row, timeout=20):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -866,7 +888,7 @@ def connect_ssh(server_row, timeout=20):
     return client
 
 
-def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None):
+def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None, require_ready=False):
     output_lines.append("等待服务器重装并重启后重新连线...")
     timeout_value = timeout_seconds if timeout_seconds is not None else SSH_RECONNECT_TIMEOUT_SECONDS
     deadline = time.time() + max(1, int(timeout_value))
