@@ -1013,6 +1013,7 @@ def scp_reinstall_debian11(server_row, output_lines):
             )
             payload_variants = [x for x in payload_variants if not ("imageFlavourId" in x and not x.get("imageFlavourId"))]
             payload_variants = [x for x in payload_variants if not ("imageId" in x and not x.get("imageId"))]
+<<<<<<< codex/analyze-reset-task-error-zxfjj6
             filtered_variants = []
             for payload in payload_variants:
                 if "image" not in payload:
@@ -1028,6 +1029,9 @@ def scp_reinstall_debian11(server_row, output_lines):
                         filtered_variants.append(payload)
                     continue
             payload_variants = filtered_variants
+=======
+            payload_variants = [x for x in payload_variants if not ("image" in x and not (x["image"] or {}).get("id"))]
+>>>>>>> main
 
         for path in (f"servers/{scp_server_id}/image", f"servers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os", f"vservers/{scp_server_id}/reinstall"):
             try:
