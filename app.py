@@ -1035,6 +1035,18 @@ def scp_reinstall_debian11(server_row, output_lines):
             )
         else:
             output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
+<<<<<<< codex/analyze-reset-task-error-21swky
+        payload_variants = []
+        if flavour_id:
+            payload_variants.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
+        if image_id:
+            payload_variants.append({"imageId": int(image_id) if str(image_id).isdigit() else image_id})
+        if not payload_variants:
+            raise RuntimeError("未找到 Debian11 可用 imageFlavourId，无法按SCP文档接口执行重装")
+
+        output_lines.append("SCP REST将按文档接口执行: POST /servers/{serverId}/image + imageFlavourId/imageId")
+        for path in (f"servers/{scp_server_id}/image",):
+=======
         payload_variants = [
             {
                 "hostname": server_row["name"],
@@ -1088,6 +1100,7 @@ def scp_reinstall_debian11(server_row, output_lines):
             payload_variants = filtered_variants
 
         for path in (f"servers/{scp_server_id}/image", f"servers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os", f"vservers/{scp_server_id}/reinstall"):
+>>>>>>> main
             try:
                 for payload in payload_variants:
                     result = scp_rest_request(account, "POST", path, token=token, payload=payload, endpoint_base=endpoint_base)
