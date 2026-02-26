@@ -44,6 +44,32 @@
 </section>
 
 <section class="panel">
+  <h2>SCP 账号管理（可配置多个）</h2>
+  <form method="post" action="/scp-accounts" class="grid-form">
+    <label>账号别名<input name="name" placeholder="例如 netcup-A" required /></label>
+    <label>SCP账号<input name="username" required /></label>
+    <label>SCP密码<input name="password" type="password" required /></label>
+    <label class="full">API Endpoint<input name="api_endpoint" value="https://www.servercontrolpanel.de/api/v1" /></label>
+    <button type="submit">添加SCP账号</button>
+  </form>
+  {% if scp_accounts %}
+  <ul>
+    {% for a in scp_accounts %}
+      <li>
+        #{{ a.id }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }}
+        <form method="post" action="/scp-accounts/{{ a.id }}/delete" style="display:inline" onsubmit="return confirm('确认删除该SCP账号?')">
+          <button class="danger" type="submit">删除</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>暂无SCP账号。</p>
+  {% endif %}
+</section>
+
+
+<section class="panel">
   <h2>服务器设置：新增服务器</h2>
   <form method="post" action="/servers" class="grid-form">
     <label>名称<input name="name" required /></label>
@@ -58,6 +84,9 @@
     <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="0" required /></label>
     <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="2" required /></label>
     <label>重试退避秒数<input name="retry_backoff_seconds" value="60,180" placeholder="例如 60,180" /></label>
+    <label>重置方式<select name="reinstall_mode"><option value="ssh" selected>SSH脚本</option><option value="scp_api">SCP REST API (Debian11)</option></select></label>
+    <label>SCP账号<select name="scp_account_id"><option value="">自动识别</option>{% for a in scp_accounts %}<option value="{{ a.id }}">#{{ a.id }} {{ a.name }}</option>{% endfor %}</select></label>
+    <label>SCP服务器ID（可选）<input name="scp_server_id" placeholder="留空按IP识别" /></label>
     <label class="inline"><input name="auto_reset" type="checkbox" checked /> 到期自动重置</label>
     <button type="submit">添加服务器</button>
   </form>
@@ -81,6 +110,9 @@
       <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="{{ s.reset_minute or 0 }}" required /></label>
       <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="{{ s.max_retries or 2 }}" required /></label>
       <label>重试退避秒数<input name="retry_backoff_seconds" value="{{ s.retry_backoff_seconds or "60,180" }}" /></label>
+      <label>重置方式<select name="reinstall_mode"><option value="ssh" {% if (s.reinstall_mode or "ssh") == "ssh" %}selected{% endif %}>SSH脚本</option><option value="scp_api" {% if s.reinstall_mode == "scp_api" %}selected{% endif %}>SCP REST API (Debian11)</option></select></label>
+      <label>SCP账号<select name="scp_account_id"><option value="">自动识别</option>{% for a in scp_accounts %}<option value="{{ a.id }}" {% if s.scp_account_id == a.id %}selected{% endif %}>#{{ a.id }} {{ a.name }}</option>{% endfor %}</select></label>
+      <label>SCP服务器ID（可选）<input name="scp_server_id" value="{{ s.scp_server_id }}" placeholder="留空按IP识别" /></label>
       <label class="inline"><input name="auto_reset" type="checkbox" {% if s.auto_reset %}checked{% endif %}/> 到期自动重置</label>
       <p class="hint">说明：当“服务器详情”里切到“续租中”时，即使这里是开启，也会跳过该服务器的定时重置。</p>
       <div class="button-row"><button type="submit">保存</button></div>
