@@ -853,27 +853,6 @@ def is_reinstall_command(command):
     return is_installnet or is_bin_reinstall
 
 
-def wrap_installnet_with_downloader_bootstrap(command):
-    text = str(command or "").strip()
-    if not text:
-        return text
-
-    if "InstallNET.sh" not in text:
-        return text
-
-    bootstrap = (
-        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-        "export DEBIAN_FRONTEND=noninteractive; "
-        "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y curl wget; "
-        "elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget; "
-        "elif command -v yum >/dev/null 2>&1; then yum install -y curl wget; "
-        "elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget; "
-        "else echo '缺少 wget/curl，且无法自动安装，请手动安装后重试'; exit 127; "
-        "fi; "
-        "fi"
-    )
-    return f"set -e; {bootstrap}; {text}"
-
 
 def connect_ssh(server_row, timeout=20):
     client = paramiko.SSHClient()
@@ -1155,9 +1134,6 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
 
             if force_reinstall or is_reinstall_command(reset_command):
                 reinstall_triggered = True
-                if is_reinstall_command(reset_command):
-                    reset_command = wrap_installnet_with_downloader_bootstrap(reset_command)
-                    output_lines.append("检测到DD重置命令，已加入 wget/curl 缺失自动安装兜底")
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)
