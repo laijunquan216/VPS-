@@ -884,9 +884,9 @@ def connect_ssh(server_row, timeout=20):
 
 def is_post_reset_environment_ready(client):
     probe = (
-        "command -v bash >/dev/null 2>&1 "
-        "&& (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) "
-        "&& test -s /etc/os-release"
+        "command -v sh >/dev/null 2>&1 "
+        "&& (test -s /etc/os-release || command -v uname >/dev/null 2>&1) "
+        "&& sh -lc 'echo panel-ready >/dev/null 2>&1'"
     )
     _, stdout, _ = client.exec_command(probe)
     return stdout.channel.recv_exit_status() == 0
@@ -903,7 +903,7 @@ def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeou
                 trial["ssh_password"] = pwd
                 client = connect_ssh(trial, timeout=15)
                 if require_ready and not is_post_reset_environment_ready(client):
-                    output_lines.append("已连上SSH，但系统仍在DD切换阶段（bash/curl/wget未就绪），继续等待...")
+                    output_lines.append("已连上SSH，但系统仍在DD切换阶段（基础Shell未就绪），继续等待...")
                     client.close()
                     continue
                 output_lines.append(f"服务器已重新上线，SSH重连成功（密码候选: {pwd[:3]}***）")
