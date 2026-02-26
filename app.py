@@ -639,22 +639,6 @@ def inject_random_ssh2_password_if_needed(command):
     return command, pwd
 
 
-def wrap_installnet_with_downloader_bootstrap(command):
-    bootstrap = (
-        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-        "export DEBIAN_FRONTEND=noninteractive; "
-        "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y wget curl; "
-        "elif command -v dnf >/dev/null 2>&1; then dnf install -y wget curl; "
-        "elif command -v yum >/dev/null 2>&1; then yum install -y wget curl; "
-        "elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget curl; "
-        "fi; "
-        "fi; "
-        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-        "echo '缺少 wget/curl 且自动安装失败，无法执行重置命令'; exit 127; "
-        "fi"
-    )
-    return "bash -lc " + shlex.quote(f"set -e; {bootstrap}; {command}")
-
 
 BIN_REINSTALL_CHOICES = {
     "debian-9": ("debian", "9"),
@@ -683,32 +667,27 @@ def parse_bin_reinstall_choice(trigger_type):
 
 def build_bin_reinstall_command(choice, root_password):
     distro, version = BIN_REINSTALL_CHOICES[choice]
-    installnet_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-    installnet_target = f"-{distro} {version}"
+    script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
     return (
         "bash -lc "
         + shlex.quote(
-            "set -e; "
-            "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-            "export DEBIAN_FRONTEND=noninteractive; "
-            "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y wget curl; "
-            "elif command -v dnf >/dev/null 2>&1; then dnf install -y wget curl; "
-            "elif command -v yum >/dev/null 2>&1; then yum install -y wget curl; "
-            "elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget curl; "
-            "fi; "
-            "fi; "
-            "if command -v wget >/dev/null 2>&1; then "
-            f"wget --no-check-certificate -qO InstallNET.sh {shlex.quote(installnet_url)}; "
-            "elif command -v curl >/dev/null 2>&1; then "
-            f"curl -fsSL {shlex.quote(installnet_url)} -o InstallNET.sh; "
-            "else echo '缺少 wget/curl 且自动安装失败，无法执行InstallNET重置'; exit 127; "
-            "fi; "
-            "chmod a+x InstallNET.sh; "
-            f"bash InstallNET.sh {installnet_target} -pwd {shlex.quote(root_password)}; "
-            "reboot"
+            f"set -e; "
+            f"if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then "
+            f"export DEBIAN_FRONTEND=noninteractive; "
+            f"if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y curl wget; "
+            f"elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget; "
+            f"elif command -v yum >/dev/null 2>&1; then yum install -y curl wget; "
+            f"elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget; "
+            f"fi; "
+            f"fi; "
+            f"if command -v curl >/dev/null 2>&1; then "
+            f"bash <(curl -fsSL {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+            f"elif command -v wget >/dev/null 2>&1; then "
+            f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+            f"else echo '缺少 curl/wget 且自动安装失败，无法执行 bin456789 重装'; exit 127; "
+            f"fi; sync; reboot"
         )
     )
-
 
 def normalize_shell_command(command):
     return command.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
@@ -887,17 +866,7 @@ def connect_ssh(server_row, timeout=20):
     return client
 
 
-def is_post_reset_environment_ready(client):
-    probe = (
-        "command -v sh >/dev/null 2>&1 "
-        "&& (test -s /etc/os-release || command -v uname >/dev/null 2>&1) "
-        "&& sh -lc 'echo panel-ready >/dev/null 2>&1'"
-    )
-    _, stdout, _ = client.exec_command(probe)
-    return stdout.channel.recv_exit_status() == 0
-
-
-def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None, require_ready=False):
+def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None):
     output_lines.append("等待服务器重装并重启后重新连线...")
     timeout_value = timeout_seconds if timeout_seconds is not None else SSH_RECONNECT_TIMEOUT_SECONDS
     deadline = time.time() + max(1, int(timeout_value))
@@ -1190,7 +1159,6 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                                 output_lines,
                                 [generated_password],
                                 timeout_seconds=new_pwd_wait,
-                                require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
                             )
                         except Exception as reconnect_exc:
                             if original_password and original_password != generated_password:
@@ -1200,27 +1168,15 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                                     output_lines,
                                     [original_password],
                                     timeout_seconds=180,
-                                    require_ready=False,
                                 )
                                 mutable_server["ssh_password"] = old_pwd_connected
                                 update_server_password(mutable_server["id"], old_pwd_connected)
                                 raise RuntimeError("DD重置疑似失败：旧密码仍可登录（old password still valid）") from reconnect_exc
                             raise
                     elif force_reinstall:
-                        client, connected_pwd = wait_for_ssh_reconnect(
-                            mutable_server,
-                            output_lines,
-                            [],
-                            timeout_seconds=300,
-                            require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
-                        )
+                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [], timeout_seconds=300)
                     else:
-                        client, connected_pwd = wait_for_ssh_reconnect(
-                            mutable_server,
-                            output_lines,
-                            [original_password],
-                            require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
-                        )
+                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [original_password])
 
                     if connected_pwd and connected_pwd != mutable_server["ssh_password"]:
                         mutable_server["ssh_password"] = connected_pwd
