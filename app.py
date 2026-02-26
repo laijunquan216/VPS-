@@ -559,6 +559,7 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
 
     for account in candidates:
         rest_errors = []
+        scanned_server_ids = set()
         try:
             endpoint_base, token = scp_rest_login(account)
             if output_lines is not None:
@@ -575,6 +576,10 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
                 for server_item in _scp_collect_server_entries(data):
                     seen += 1
                     server_id = _scp_extract_server_id(server_item)
+                    if server_id and server_id in scanned_server_ids:
+                        continue
+                    if server_id:
+                        scanned_server_ids.add(server_id)
                     candidate_ips = _scp_extract_ips(server_item)
                     if not candidate_ips and server_id:
                         if output_lines is not None:
@@ -667,10 +672,11 @@ def _xml_local_name(tag):
 
 
 def _scp_soap_endpoint(api_endpoint):
-    for candidate in _scp_endpoint_candidates(api_endpoint):
+    candidates = _scp_endpoint_candidates(api_endpoint)
+    for candidate in candidates:
         if "WSEndUser" in candidate:
             return candidate
-    first = _scp_endpoint_candidates(api_endpoint)[0]
+    first = candidates[0]
     host = first
     for marker in ("/scp-core/api/", "/api/"):
         if marker in host:
@@ -913,7 +919,6 @@ def scp_reinstall_debian11(server_row, output_lines):
     elif scp_server_id and not account:
         raise RuntimeError("已填写SCP服务器ID，但未绑定SCP账号，请在服务器设置中选择SCP账号")
     else:
-    if not account or not scp_server_id:
         account_scope = [account] if account else None
         account, scp_server_id = find_scp_server_id_by_ip(server_row["ip"], output_lines, account_candidates=account_scope)
         if not account or not scp_server_id:
