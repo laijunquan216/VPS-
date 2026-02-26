@@ -561,13 +561,17 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
         rest_errors = []
         try:
             endpoint_base, token = scp_rest_login(account)
+<<<<<<< codex/analyze-reset-task-error-dvkrfg
             if output_lines is not None:
                 output_lines.append(f"SCP账号[{account['name']}] REST鉴权成功，endpoint={endpoint_base}")
+=======
+>>>>>>> main
             for path in ("servers", "servers?limit=200", "vservers", "virtual-machines"):
                 try:
                     data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
                 except Exception as exc:
                     rest_errors.append(f"{path}: {exc}")
+<<<<<<< codex/analyze-reset-task-error-dvkrfg
                     if output_lines is not None:
                         output_lines.append(f"SCP账号[{account['name']}] REST列表调用失败 path={path}: {exc}")
                     continue
@@ -591,6 +595,16 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
                         output_lines.append(f"SCP账号[{account['name']}] REST候选 path={path}, server_id={server_id or '-'}, ips={ip_preview}")
                 if output_lines is not None:
                     output_lines.append(f"SCP账号[{account['name']}] REST列表完成 path={path}, entries={seen}")
+=======
+                    continue
+                for server_item in _scp_collect_server_entries(data):
+                    server_id = _scp_extract_server_id(server_item)
+                    candidate_ips = _scp_extract_ips(server_item)
+                    if not candidate_ips and server_id:
+                        candidate_ips = _scp_rest_fetch_server_ips(account, endpoint_base, token, server_id)
+                    if ip_text in candidate_ips and server_id:
+                        return account, server_id
+>>>>>>> main
             if output_lines is not None:
                 tail = " | ".join(rest_errors[-2:]) if rest_errors else "接口返回成功但未匹配到目标IP"
                 output_lines.append(f"SCP账号[{account['name']}] REST识别未匹配，转SOAP/JSON尝试: {tail}")
@@ -920,12 +934,16 @@ def scp_reinstall_debian11(server_row, output_lines):
 
     try:
         endpoint_base, token = scp_rest_login(account)
+<<<<<<< codex/analyze-reset-task-error-dvkrfg
         output_lines.append(f"SCP REST鉴权成功，endpoint={endpoint_base}")
         image_id = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
         if image_id:
             output_lines.append(f"SCP REST检测到 Debian11 镜像/风味ID: {image_id}")
         else:
             output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
+=======
+        image_id = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
+>>>>>>> main
         payload_variants = [
             {
                 "hostname": server_row["name"],
@@ -962,8 +980,12 @@ def scp_reinstall_debian11(server_row, output_lines):
                         )
                     output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11, path={path}")
                     return
+<<<<<<< codex/analyze-reset-task-error-dvkrfg
             except Exception as exc:
                 output_lines.append(f"SCP REST重装调用失败 path={path}: {exc}")
+=======
+            except Exception:
+>>>>>>> main
                 continue
         output_lines.append("SCP REST重装接口未命中，转SOAP/JSON尝试")
     except Exception as rest_exc:
