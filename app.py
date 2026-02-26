@@ -162,7 +162,7 @@ def init_db():
                 name TEXT NOT NULL,
                 username TEXT NOT NULL,
                 password TEXT NOT NULL,
-                api_endpoint TEXT NOT NULL DEFAULT 'https://www.servercontrolpanel.de/WSEndUser?JSON',
+                api_endpoint TEXT NOT NULL DEFAULT 'https://www.servercontrolpanel.de/api/v1',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -264,6 +264,108 @@ def get_scp_account(account_id):
         return conn.execute("SELECT * FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
 
 
+def _scp_rest_base_endpoint(api_endpoint):
+    base = (api_endpoint or "").strip() or "https://www.servercontrolpanel.de/api/v1"
+    if "WSEndUser" in base:
+        return "https://www.servercontrolpanel.de/api/v1"
+    if "?" in base:
+        base = base.split("?", 1)[0]
+    return base.rstrip("/")
+
+
+def _scp_rest_extract_token(data):
+    if not isinstance(data, dict):
+        return None
+    for key in ("token", "access_token", "jwt", "session", "session_id", "sessionId"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    nested = data.get("data")
+    if isinstance(nested, dict):
+        return _scp_rest_extract_token(nested)
+    return None
+
+
+def scp_rest_login(account_row):
+    endpoint = _scp_rest_base_endpoint(account_row["api_endpoint"])
+    login_urls = [f"{endpoint}/auth/login", f"{endpoint}/login", f"{endpoint}/session"]
+    payloads = [
+        {"username": account_row["username"], "password": account_row["password"]},
+        {"login": account_row["username"], "password": account_row["password"]},
+        {"customer_number": account_row["username"], "password": account_row["password"]},
+    ]
+    last_exc = None
+    for url in login_urls:
+        for payload in payloads:
+            req = urlrequest.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlrequest.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
+            except Exception as exc:
+                last_exc = exc
+                continue
+            token = _scp_rest_extract_token(data)
+            if token:
+                return endpoint, token
+    raise RuntimeError(f"SCP REST登录失败: {last_exc}")
+
+
+def scp_rest_request(account_row, method, path, token=None, payload=None):
+    endpoint = _scp_rest_base_endpoint(account_row["api_endpoint"])
+    url = f"{endpoint}/{path.lstrip('/')}"
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Auth-Token"] = token
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
+    req = urlrequest.Request(url, data=data, headers=headers, method=method.upper())
+    with urlrequest.urlopen(req, timeout=60) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+    return json.loads(raw) if raw else {}
+
+
+def _scp_collect_server_entries(data):
+    if isinstance(data, list):
+        for item in data:
+            yield from _scp_collect_server_entries(item)
+        return
+    if not isinstance(data, dict):
+        return
+    if any(k in data for k in ("id", "serverId", "vserverid", "vserver")):
+        yield data
+    for key in ("items", "servers", "vservers", "data", "result"):
+        nested = data.get(key)
+        if nested is not None:
+            yield from _scp_collect_server_entries(nested)
+
+
+def _scp_extract_ips(server_item):
+    ips = []
+    for key in ("ip", "ipv4", "primary_ip", "primaryIp", "mainIp"):
+        val = server_item.get(key)
+        if isinstance(val, str) and val.strip():
+            ips.append(val.strip())
+    for key in ("ips", "ipAddresses", "addresses"):
+        val = server_item.get(key)
+        if isinstance(val, list):
+            for entry in val:
+                if isinstance(entry, str):
+                    ips.append(entry.strip())
+                elif isinstance(entry, dict):
+                    cand = entry.get("ip") or entry.get("address") or entry.get("ipv4")
+                    if isinstance(cand, str) and cand.strip():
+                        ips.append(cand.strip())
+    return [x for x in ips if x]
+
+
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
     ip_text = str(server_ip or "").strip()
     if not ip_text:
@@ -273,7 +375,27 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
 
     for account in candidates:
         try:
-            # SOAP-first strategy (more compatible with classic SCP deployments).
+            _, token = scp_rest_login(account)
+            for path in ("servers", "vservers", "virtual-machines"):
+                try:
+                    data = scp_rest_request(account, "GET", path, token=token)
+                except Exception:
+                    continue
+                for server_item in _scp_collect_server_entries(data):
+                    if ip_text in _scp_extract_ips(server_item):
+                        server_id = str(
+                            server_item.get("id")
+                            or server_item.get("serverId")
+                            or server_item.get("vserverid")
+                            or server_item.get("vserver")
+                            or ""
+                        ).strip()
+                        if server_id:
+                            return account, server_id
+        except Exception as rest_exc:
+            if output_lines is not None:
+                output_lines.append(f"SCP账号[{account['name']}] REST识别失败，转SOAP/JSON尝试: {rest_exc}")
+        try:
             for vserver_name in scp_soap_get_vservers(account):
                 ips = scp_soap_get_vserver_ips(account, vserver_name)
                 if any(str(ip).strip() == ip_text for ip in ips):
@@ -354,60 +476,126 @@ def _scp_soap_endpoint(api_endpoint):
 
 def scp_soap_call(account_row, method_name, params):
     endpoint = _scp_soap_endpoint(account_row["api_endpoint"])
-    ns = "http://enduser.service.web.vserver.pcs.servercontrolpanel.de/"
+    ns_candidates = [
+        "http://enduser.service.web.vserver.pcs.servercontrolpanel.de/",
+        "http://enduser.service.web.vserver.pcs.servercontrolpanel.de",
+    ]
 
     body_parts = []
     for k, v in (params or {}).items():
         body_parts.append(f"<{k}>{xml_escape(str(v or ''))}</{k}>")
 
-    envelope = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
-        f'xmlns:ws="{ns}">'
-        '<soapenv:Header/><soapenv:Body>'
-        f'<ws:{method_name}>' + "".join(body_parts) + f'</ws:{method_name}>'
-        '</soapenv:Body></soapenv:Envelope>'
-    ).encode("utf-8")
+    soap_actions = []
+    for ns in ns_candidates:
+        soap_actions.extend([f'"{ns}{method_name}"', f'"{method_name}"', method_name, ""])
 
-    req = urlrequest.Request(
-        endpoint,
-        data=envelope,
-        headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{ns}{method_name}"'},
-    )
-    try:
-        with urlrequest.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
-        raise RuntimeError(f"SCP SOAP错误[{exc.code}]: {detail or exc.reason}") from exc
-    except urlerror.URLError as exc:
-        raise RuntimeError(f"SCP SOAP网络异常: {exc}") from exc
+    envelope_variants = []
+    for ns in ns_candidates:
+        envelope_variants.append(
+            (
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+                    f'xmlns:ws="{ns}">'
+                    '<soapenv:Header/><soapenv:Body>'
+                    f'<ws:{method_name}>' + "".join(body_parts) + f'</ws:{method_name}>'
+                    '</soapenv:Body></soapenv:Envelope>'
+                ).encode("utf-8"),
+                ns,
+                True,
+            )
+        )
+        envelope_variants.append(
+            (
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+                    '<soapenv:Header/><soapenv:Body>'
+                    f'<{method_name}>' + "".join(body_parts) + f'</{method_name}>'
+                    '</soapenv:Body></soapenv:Envelope>'
+                ).encode("utf-8"),
+                ns,
+                False,
+            )
+        )
 
     import xml.etree.ElementTree as ET
-    try:
-        root = ET.fromstring(raw)
-    except Exception as exc:
-        raise RuntimeError(f"SCP SOAP返回非XML: {raw[:300]}") from exc
+    last_exc = None
+    for envelope, ns, _ in envelope_variants:
+        for action in soap_actions:
+            headers = {"Content-Type": "text/xml; charset=utf-8"}
+            if action:
+                headers["SOAPAction"] = action
+            req = urlrequest.Request(endpoint, data=envelope, headers=headers)
+            try:
+                with urlrequest.urlopen(req, timeout=60) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+            except urlerror.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+                last_exc = RuntimeError(f"SCP SOAP错误[{exc.code}]: {detail or exc.reason}")
+                continue
+            except urlerror.URLError as exc:
+                last_exc = RuntimeError(f"SCP SOAP网络异常: {exc}")
+                continue
 
-    for el in root.iter():
-        if _xml_local_name(el.tag) == "Fault":
-            txt = " ".join((x.text or "").strip() for x in el.iter() if (x.text or "").strip())
-            raise RuntimeError(f"SCP SOAP调用失败[{method_name}]: {txt or 'SOAP Fault'}")
+            try:
+                root = ET.fromstring(raw)
+            except Exception as exc:
+                last_exc = RuntimeError(f"SCP SOAP返回非XML: {raw[:300]}")
+                continue
 
-    returns = []
-    for el in root.iter():
-        if _xml_local_name(el.tag) == "return":
-            returns.append((el.text or "").strip())
+            fault_text = ""
+            for el in root.iter():
+                if _xml_local_name(el.tag) == "Fault":
+                    fault_text = " ".join((x.text or "").strip() for x in el.iter() if (x.text or "").strip())
+                    break
+            if fault_text:
+                last_exc = RuntimeError(f"SCP SOAP调用失败[{method_name}]: {fault_text}")
+                continue
 
-    return returns
+            returns = []
+            for el in root.iter():
+                if _xml_local_name(el.tag) == "return":
+                    returns.append((el.text or "").strip())
+            return returns
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"SCP SOAP调用失败[{method_name}]: 未知错误")
 
 
 def scp_soap_get_vservers(account_row):
-    return [x for x in scp_soap_call(account_row, "getVServers", {"loginName": account_row["username"], "password": account_row["password"]}) if x]
+    auth_payload = {"loginName": account_row["username"], "password": account_row["password"]}
+    method_candidates = ["getVServers", "getVServer", "getVServerNames"]
+    last_exc = None
+    for method in method_candidates:
+        try:
+            rows = [x for x in scp_soap_call(account_row, method, auth_payload) if x]
+            if rows:
+                return rows
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if last_exc:
+        raise last_exc
+    return []
 
 
 def scp_soap_get_vserver_ips(account_row, vserver_name):
-    return [x for x in scp_soap_call(account_row, "getVServerInformation", {"loginName": account_row["username"], "password": account_row["password"], "vservername": vserver_name}) if x and "." in x]
+    payload = {"loginName": account_row["username"], "password": account_row["password"], "vservername": vserver_name}
+    method_candidates = ["getVServerInformation", "getVServerInfo"]
+    last_exc = None
+    for method in method_candidates:
+        try:
+            rows = [x for x in scp_soap_call(account_row, method, payload) if x and "." in x]
+            if rows:
+                return rows
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if last_exc:
+        raise last_exc
+    return []
 
 
 def scp_api_call(account_row, action, payload):
@@ -514,7 +702,30 @@ def scp_reinstall_debian11(server_row, output_lines):
         bind_scp_server(server_row["id"], account["id"], scp_server_id)
         output_lines.append(f"已按IP自动匹配SCP服务器并绑定: 账号[{account['name']}] server_id={scp_server_id}")
 
-    # SOAP-first strategy for reinstall.
+    try:
+        _, token = scp_rest_login(account)
+        payload = {
+            "distribution": "debian",
+            "version": "11",
+            "hostname": server_row["name"],
+            "password": server_row["ssh_password"],
+            "image": "debian-11",
+            "os": "debian11",
+        }
+        for path in (f"servers/{scp_server_id}/reinstall", f"vservers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os"):
+            try:
+                result = scp_rest_request(account, "POST", path, token=token, payload=payload)
+                request_id = "-"
+                if isinstance(result, dict):
+                    request_id = str(result.get("request_id") or result.get("job_id") or result.get("id") or "-")
+                output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11")
+                return
+            except Exception:
+                continue
+        output_lines.append("SCP REST重装接口未命中，转SOAP/JSON尝试")
+    except Exception as rest_exc:
+        output_lines.append(f"SCP REST重装提交失败，转SOAP/JSON尝试: {rest_exc}")
+
     soap_errors = []
     for method in ["reinstallVServer", "setVServerOs", "setVServerOS"]:
         for payload in [
@@ -816,7 +1027,7 @@ def restore_backup_payload(payload):
                     account.get("name", ""),
                     account.get("username", ""),
                     account.get("password", ""),
-                    account.get("api_endpoint") or "https://www.servercontrolpanel.de/WSEndUser?JSON",
+                    account.get("api_endpoint") or "https://www.servercontrolpanel.de/api/v1",
                     account.get("created_at") or now_text,
                     account.get("updated_at") or now_text,
                 ),
@@ -2227,7 +2438,7 @@ def add_scp_account():
     name = (form.get("name") or "").strip()
     username = (form.get("username") or "").strip()
     password = form.get("password") or ""
-    api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/WSEndUser?JSON"
+    api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/api/v1"
     if not name or not username or not password:
         flash("新增SCP账号失败: 名称/账号/密码均为必填", "error")
         return redirect(url_for("settings_page"))
