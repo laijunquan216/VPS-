@@ -269,7 +269,7 @@ def get_scp_account(account_id):
 def _scp_endpoint_candidates(api_endpoint):
     raw = (api_endpoint or "").strip()
     if not raw:
-        raw = "https://www.servercontrolpanel.de/api/v1"
+        raw = "https://www.servercontrolpanel.de/scp-core/api/v1"
 
     cleaned = raw.split("?", 1)[0].rstrip("/")
     if not cleaned:
@@ -392,8 +392,12 @@ def scp_rest_login(account_row):
                 continue
             token = _scp_rest_extract_token(data)
             if token:
-                endpoint = url.rsplit("/", 1)[0]
-                return endpoint, token
+                endpoint = url
+                for suffix in ("/auth/login", "/login", "/session", "/auth/session"):
+                    if endpoint.endswith(suffix):
+                        endpoint = endpoint[: -len(suffix)]
+                        break
+                return endpoint.rstrip("/"), token
     raise RuntimeError(f"SCP REST登录失败: {last_exc}")
 
 
@@ -445,7 +449,105 @@ def _scp_extract_ips(server_item):
                     cand = entry.get("ip") or entry.get("address") or entry.get("ipv4")
                     if isinstance(cand, str) and cand.strip():
                         ips.append(cand.strip())
+    # parse interfaces payloads from SCP REST (`/servers/{id}/interfaces`).
+    interfaces = server_item.get("interfaces")
+    if isinstance(interfaces, list):
+        for nic in interfaces:
+            if not isinstance(nic, dict):
+                continue
+            for key in ("ipv4", "ipv6", "addresses", "routedIps", "routed_ips"):
+                value = nic.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str) and item.strip():
+                            ips.append(item.strip())
+                        elif isinstance(item, dict):
+                            cand = item.get("ip") or item.get("address")
+                            if isinstance(cand, str) and cand.strip():
+                                ips.append(cand.strip())
+                elif isinstance(value, dict):
+                    cand = value.get("ip") or value.get("address")
+                    if isinstance(cand, str) and cand.strip():
+                        ips.append(cand.strip())
     return [x for x in ips if x]
+
+
+def _scp_extract_server_id(server_item):
+    for key in ("id", "serverId", "server_id", "vserverid", "vserver"):
+        val = server_item.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return ""
+
+
+def _scp_rest_fetch_server_ips(account, endpoint_base, token, server_id):
+    if not server_id:
+        return []
+    detail_paths = (
+        f"servers/{server_id}",
+        f"servers/{server_id}/ips",
+        f"servers/{server_id}/ip-addresses",
+        f"servers/{server_id}/interfaces",
+        f"vservers/{server_id}",
+    )
+    for path in detail_paths:
+        try:
+            data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
+        except Exception:
+            continue
+
+        # details may be object or list; reuse extraction helpers.
+        for item in _scp_collect_server_entries(data):
+            ips = _scp_extract_ips(item)
+            if ips:
+                return ips
+        if isinstance(data, dict):
+            ips = _scp_extract_ips(data)
+            if ips:
+                return ips
+        elif isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, str) and "." in entry:
+                    return [entry.strip()]
+                if isinstance(entry, dict):
+                    ips = _scp_extract_ips(entry)
+                    if ips:
+                        return ips
+    return []
+
+
+def _scp_rest_find_debian11_image(account, endpoint_base, token, server_id):
+    paths = (f"servers/{server_id}/imageflavours", f"servers/{server_id}/images", "imageflavours")
+    for path in paths:
+        try:
+            data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
+        except Exception:
+            continue
+
+        candidates = []
+        if isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict):
+            for key in ("items", "data", "result", "imageflavours", "images"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    candidates = val
+                    break
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            haystack = " ".join(
+                str(item.get(k) or "") for k in ("name", "label", "displayName", "distribution", "version", "slug", "key")
+            ).lower()
+            if "debian" in haystack and ("11" in haystack or "bullseye" in haystack):
+                image_id = item.get("id") or item.get("key") or item.get("imageId")
+                if image_id is not None:
+                    return str(image_id).strip()
+    return ""
 
 
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
@@ -456,24 +558,25 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
     candidates = account_candidates if account_candidates is not None else list_scp_accounts()
 
     for account in candidates:
+        rest_errors = []
         try:
             endpoint_base, token = scp_rest_login(account)
-            for path in ("servers", "vservers", "virtual-machines"):
+            for path in ("servers", "servers?limit=200", "vservers", "virtual-machines"):
                 try:
                     data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
-                except Exception:
+                except Exception as exc:
+                    rest_errors.append(f"{path}: {exc}")
                     continue
                 for server_item in _scp_collect_server_entries(data):
-                    if ip_text in _scp_extract_ips(server_item):
-                        server_id = str(
-                            server_item.get("id")
-                            or server_item.get("serverId")
-                            or server_item.get("vserverid")
-                            or server_item.get("vserver")
-                            or ""
-                        ).strip()
-                        if server_id:
-                            return account, server_id
+                    server_id = _scp_extract_server_id(server_item)
+                    candidate_ips = _scp_extract_ips(server_item)
+                    if not candidate_ips and server_id:
+                        candidate_ips = _scp_rest_fetch_server_ips(account, endpoint_base, token, server_id)
+                    if ip_text in candidate_ips and server_id:
+                        return account, server_id
+            if output_lines is not None:
+                tail = " | ".join(rest_errors[-2:]) if rest_errors else "接口返回成功但未匹配到目标IP"
+                output_lines.append(f"SCP账号[{account['name']}] REST识别未匹配，转SOAP/JSON尝试: {tail}")
         except Exception as rest_exc:
             if output_lines is not None:
                 output_lines.append(f"SCP账号[{account['name']}] REST识别失败，转SOAP/JSON尝试: {rest_exc}")
@@ -551,7 +654,12 @@ def _scp_soap_endpoint(api_endpoint):
         if "WSEndUser" in candidate:
             return candidate
     first = _scp_endpoint_candidates(api_endpoint)[0]
-    return f"{first}/WSEndUser"
+    host = first
+    for marker in ("/scp-core/api/", "/api/"):
+        if marker in host:
+            host = host.split(marker, 1)[0]
+            break
+    return f"{host.rstrip('/')}/WSEndUser"
 
 
 def scp_soap_call(account_row, method_name, params):
@@ -795,22 +903,43 @@ def scp_reinstall_debian11(server_row, output_lines):
 
     try:
         endpoint_base, token = scp_rest_login(account)
-        payload = {
-            "distribution": "debian",
-            "version": "11",
-            "hostname": server_row["name"],
-            "password": server_row["ssh_password"],
-            "image": "debian-11",
-            "os": "debian11",
-        }
-        for path in (f"servers/{scp_server_id}/reinstall", f"vservers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os"):
+        image_id = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
+        payload_variants = [
+            {
+                "hostname": server_row["name"],
+                "rootPassword": server_row["ssh_password"],
+                "password": server_row["ssh_password"],
+                "distribution": "debian",
+                "version": "11",
+                "os": "debian11",
+                "image": "debian-11",
+            }
+        ]
+        if image_id:
+            payload_variants.extend(
+                [
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageFlavourId": image_id},
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageId": image_id},
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "image": {"id": image_id}},
+                ]
+            )
+
+        for path in (f"servers/{scp_server_id}/image", f"servers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os", f"vservers/{scp_server_id}/reinstall"):
             try:
-                result = scp_rest_request(account, "POST", path, token=token, payload=payload, endpoint_base=endpoint_base)
-                request_id = "-"
-                if isinstance(result, dict):
-                    request_id = str(result.get("request_id") or result.get("job_id") or result.get("id") or "-")
-                output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11")
-                return
+                for payload in payload_variants:
+                    result = scp_rest_request(account, "POST", path, token=token, payload=payload, endpoint_base=endpoint_base)
+                    request_id = "-"
+                    if isinstance(result, dict):
+                        request_id = str(
+                            result.get("request_id")
+                            or result.get("job_id")
+                            or result.get("taskId")
+                            or result.get("uuid")
+                            or result.get("id")
+                            or "-"
+                        )
+                    output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11, path={path}")
+                    return
             except Exception:
                 continue
         output_lines.append("SCP REST重装接口未命中，转SOAP/JSON尝试")
