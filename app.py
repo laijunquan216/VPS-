@@ -605,13 +605,21 @@ def generate_root_password(length=16):
 
 
 def inject_random_password_if_needed(command, server_row, generated_password):
-    if "InstallNET.sh" not in command or "-pwd" not in command:
+    is_installnet = "InstallNET.sh" in command and "-pwd" in command
+    is_bin_reinstall = "reinstall/main/reinstall.sh" in command and "--password" in command
+    if not is_installnet and not is_bin_reinstall:
         return command, generated_password
 
     pwd = generated_password or generate_root_password()
-    command = re.sub(r"-pwd\s+'[^']*'", f"-pwd '{pwd}'", command)
-    command = re.sub(r'-pwd\s+"[^"]*"', f'-pwd "{pwd}"', command)
-    command = re.sub(r"-pwd\s+([^\s'\"]+)", f"-pwd '{pwd}'", command)
+    if is_installnet:
+        command = re.sub(r"-pwd\s+'[^']*'", f"-pwd '{pwd}'", command)
+        command = re.sub(r'-pwd\s+"[^"]*"', f'-pwd "{pwd}"', command)
+        command = re.sub(r'-pwd\s+([^\s\'"]+)', f"-pwd '{pwd}'", command)
+    if is_bin_reinstall:
+        command = re.sub(r"--password\s+'[^']*'", f"--password '{pwd}'", command)
+        command = re.sub(r'--password\s+"[^"]*"', f'--password "{pwd}"', command)
+        command = re.sub(r'--password\s+([^\s\'"]+)', f"--password '{pwd}'", command)
+
     update_server_password(server_row["id"], pwd)
     return command, pwd
 
@@ -839,7 +847,10 @@ def should_reset(server_row):
 
 
 def is_reinstall_command(command):
-    return "InstallNET.sh" in command and "-pwd" in command
+    text = str(command or "")
+    is_installnet = "InstallNET.sh" in text and "-pwd" in text
+    is_bin_reinstall = "reinstall/main/reinstall.sh" in text and "--password" in text
+    return is_installnet or is_bin_reinstall
 
 
 def connect_ssh(server_row, timeout=20):
@@ -865,6 +876,10 @@ def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeou
                 trial = dict(server_row)
                 trial["ssh_password"] = pwd
                 client = connect_ssh(trial, timeout=15)
+                if require_ready and not is_post_reset_environment_ready(client):
+                    output_lines.append("已连上SSH，但系统仍在DD切换阶段（基础Shell未就绪），继续等待...")
+                    client.close()
+                    continue
                 output_lines.append(f"服务器已重新上线，SSH重连成功（密码候选: {pwd[:3]}***）")
                 return client, pwd
             except Exception as exc:
@@ -1118,9 +1133,17 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
 
             if force_reinstall or is_reinstall_command(reset_command):
                 reinstall_triggered = True
+                if is_reinstall_command(reset_command):
+                    reset_command = wrap_installnet_with_downloader_bootstrap(reset_command)
+                    output_lines.append("检测到DD重置命令，已加入 wget/curl 缺失自动安装兜底")
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)
+                if force_reinstall:
+                    reboot_delay = max(30, BIN_REINSTALL_REBOOT_DELAY_SECONDS)
+                    reboot_cmd = f"nohup bash -lc 'sleep {reboot_delay}; sync; reboot' >/root/panel_reboot.log 2>&1 &"
+                    client.exec_command(reboot_cmd)
+                    output_lines.append(f"已为一键DD重置安排延迟重启（{reboot_delay}s后），避免打断DD前半段流程")
                 output_lines.append("重置任务已后台启动，等待后续重连")
                 client.close()
                 client = None
