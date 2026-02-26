@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import secrets
@@ -12,6 +13,8 @@ from contextlib import closing
 from datetime import datetime, timedelta
 from functools import wraps
 from io import BytesIO
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
@@ -152,6 +155,19 @@ def init_db():
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS scp_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                api_endpoint TEXT NOT NULL DEFAULT 'https://www.servercontrolpanel.de/WSEndUser?JSON',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS notification_batches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 batch_key TEXT NOT NULL UNIQUE,
@@ -197,6 +213,9 @@ def init_db():
         ensure_column(conn, "servers", "reset_minute INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "max_retries INTEGER NOT NULL DEFAULT 2")
         ensure_column(conn, "servers", "retry_backoff_seconds TEXT NOT NULL DEFAULT '60,180'")
+        ensure_column(conn, "servers", "scp_account_id INTEGER")
+        ensure_column(conn, "servers", "scp_server_id TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "reinstall_mode TEXT NOT NULL DEFAULT 'ssh'")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "task_queue", "trigger_type TEXT NOT NULL DEFAULT 'manual'")
         ensure_column(conn, "task_queue", "batch_key TEXT NOT NULL DEFAULT ''")
@@ -230,6 +249,116 @@ def get_server(server_id):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
 
+
+def list_scp_accounts():
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM scp_accounts ORDER BY id ASC").fetchall()
+
+
+def get_scp_account(account_id):
+    if not account_id:
+        return None
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
+
+
+def find_scp_server_id_by_ip(server_ip, output_lines=None):
+    ip_text = str(server_ip or "").strip()
+    if not ip_text:
+        return None, None
+
+    for account in list_scp_accounts():
+        try:
+            session_id = scp_api_login(account)
+            data = scp_api_call(account, "listVServers", {"session_id": session_id})
+            servers = data.get("vservers") or data.get("servers") or []
+            for item in servers:
+                item_ip = str(item.get("ip") or item.get("ipv4") or item.get("primary_ip") or "").strip()
+                if item_ip == ip_text:
+                    server_id = str(item.get("vserverid") or item.get("id") or item.get("serverid") or "").strip()
+                    if server_id:
+                        return account, server_id
+        except Exception as exc:
+            if output_lines is not None:
+                output_lines.append(f"SCP账号[{account['name']}] IP识别失败: {exc}")
+    return None, None
+
+
+def bind_scp_server(server_id, account_id, scp_server_id):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE servers SET scp_account_id=?, scp_server_id=? WHERE id=?",
+            (account_id, str(scp_server_id or "").strip(), server_id),
+        )
+        conn.commit()
+
+
+def scp_api_call(account_row, action, payload):
+    endpoint = (account_row["api_endpoint"] or "").strip() or "https://www.servercontrolpanel.de/WSEndUser?JSON"
+    body = json.dumps({"action": action, "param": payload or {}}).encode("utf-8")
+    req = urlrequest.Request(endpoint, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urlrequest.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+    except urlerror.URLError as exc:
+        raise RuntimeError(f"SCP API网络异常: {exc}") from exc
+
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"SCP API返回非JSON: {raw[:300]}") from exc
+
+    status = str(data.get("status") or "").lower()
+    if status and status != "success":
+        long_msg = data.get("longmessage") or data.get("message") or raw[:300]
+        raise RuntimeError(f"SCP API调用失败[{action}]: {long_msg}")
+    return data.get("responsedata") or {}
+
+
+def scp_api_login(account_row):
+    resp = scp_api_call(
+        account_row,
+        "login",
+        {
+            "username": account_row["username"],
+            "password": account_row["password"],
+        },
+    )
+    session_id = resp.get("apisessionid") or resp.get("sessionid") or resp.get("session_id")
+    if not session_id:
+        raise RuntimeError("SCP API登录成功但未返回session id")
+    return session_id
+
+
+def scp_reinstall_debian11(server_row, output_lines):
+    account = get_scp_account(server_row.get("scp_account_id"))
+    scp_server_id = (server_row.get("scp_server_id") or "").strip()
+
+    if not account or not scp_server_id:
+        account, scp_server_id = find_scp_server_id_by_ip(server_row["ip"], output_lines)
+        if not account or not scp_server_id:
+            raise RuntimeError("未能在已配置SCP账号中按IP匹配到目标服务器")
+        bind_scp_server(server_row["id"], account["id"], scp_server_id)
+        output_lines.append(f"已按IP自动匹配SCP服务器并绑定: 账号[{account['name']}] server_id={scp_server_id}")
+
+    session_id = scp_api_login(account)
+    output_lines.append(f"SCP API登录成功: 账号[{account['name']}] 会话已建立")
+
+    payload = {
+        "session_id": session_id,
+        "vserverid": scp_server_id,
+        "distribution": "debian",
+        "version": "11",
+        "language": "en",
+        "hostname": server_row["name"],
+        "password": server_row["ssh_password"],
+    }
+    try:
+        result = scp_api_call(account, "setVServerOs", payload)
+    except Exception:
+        result = scp_api_call(account, "reinstallVServer", payload)
+    request_id = result.get("requestid") or result.get("jobid") or "-"
+    output_lines.append(f"SCP重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11")
 
 def get_global_config():
     with closing(get_conn()) as conn:
@@ -347,6 +476,7 @@ def export_backup_payload():
         notification_batches = [dict(row) for row in conn.execute("SELECT * FROM notification_batches ORDER BY id").fetchall()]
         notification_batch_items = [dict(row) for row in conn.execute("SELECT * FROM notification_batch_items ORDER BY id").fetchall()]
         global_cfg = conn.execute("SELECT * FROM global_config WHERE id = 1").fetchone()
+        scp_accounts = [dict(row) for row in conn.execute("SELECT * FROM scp_accounts ORDER BY id").fetchall()]
 
     payload = {
         "meta": {
@@ -359,6 +489,7 @@ def export_backup_payload():
         "task_queue": queued_tasks,
         "notification_batches": notification_batches,
         "notification_batch_items": notification_batch_items,
+        "scp_accounts": scp_accounts,
     }
     return payload
 
@@ -373,8 +504,9 @@ def restore_backup_payload(payload):
     notification_batches = payload.get("notification_batches", [])
     notification_batch_items = payload.get("notification_batch_items", [])
     global_cfg = payload.get("global_config")
+    scp_accounts = payload.get("scp_accounts", [])
 
-    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict) or not isinstance(queued_tasks, list) or not isinstance(notification_batches, list) or not isinstance(notification_batch_items, list):
+    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict) or not isinstance(queued_tasks, list) or not isinstance(notification_batches, list) or not isinstance(notification_batch_items, list) or not isinstance(scp_accounts, list):
         raise ValueError("备份文件缺少必要字段")
 
     with closing(get_conn()) as conn:
@@ -384,6 +516,7 @@ def restore_backup_payload(payload):
         conn.execute("DELETE FROM task_queue")
         conn.execute("DELETE FROM notification_batch_items")
         conn.execute("DELETE FROM notification_batches")
+        conn.execute("DELETE FROM scp_accounts")
 
         conn.execute(
             """
@@ -413,8 +546,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -433,6 +566,9 @@ def restore_backup_payload(payload):
                     int(server.get("sort_order", 0)),
                     int(server.get("max_retries", 2)),
                     str(server.get("retry_backoff_seconds", "60,180")),
+                    server.get("scp_account_id"),
+                    server.get("scp_server_id", ""),
+                    (server.get("reinstall_mode") or "ssh"),
                     server.get("agent_token", ""),
                     server.get("period_key", ""),
                     int(server.get("period_upload_bytes", 0)),
@@ -443,6 +579,21 @@ def restore_backup_payload(payload):
                     server.get("last_reset_at"),
                     (server.get("ssh_status", "unknown") or "unknown"),
                     server.get("ssh_checked_at"),
+                ),
+            )
+
+        for account in scp_accounts:
+            now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "INSERT INTO scp_accounts(id, name, username, password, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    account.get("id"),
+                    account.get("name", ""),
+                    account.get("username", ""),
+                    account.get("password", ""),
+                    account.get("api_endpoint") or "https://www.servercontrolpanel.de/WSEndUser?JSON",
+                    account.get("created_at") or now_text,
+                    account.get("updated_at") or now_text,
                 ),
             )
 
@@ -1120,6 +1271,7 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         generated_password = None
         original_password = mutable_server["ssh_password"]
         global_cfg = get_global_config()
+        reinstall_mode = (mutable_server.get("reinstall_mode") or "ssh").strip().lower()
 
         reset_command = normalize_shell_command((global_cfg["reset_command"] or "").strip())
         ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
@@ -1143,7 +1295,22 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             update_server_password(mutable_server["id"], generated_password)
             output_lines.append(f"已为本次重装生成随机root密码: {generated_password}")
 
-        if reset_command:
+        if reinstall_mode == "scp_api":
+            reinstall_triggered = True
+            output_lines.append("本服务器已启用 SCP API 重置模式，准备调用SCP重装 Debian11")
+            scp_reinstall_debian11(mutable_server, output_lines)
+            output_lines.append("SCP重装命令已提交，等待后续重连")
+            if client:
+                client.close()
+                client = None
+            time.sleep(POST_REINSTALL_WAIT_SECONDS)
+            client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [mutable_server["ssh_password"]], timeout_seconds=SSH_RECONNECT_TIMEOUT_SECONDS)
+            if connected_pwd and connected_pwd != mutable_server["ssh_password"]:
+                mutable_server["ssh_password"] = connected_pwd
+                update_server_password(mutable_server["id"], connected_pwd)
+                output_lines.append("检测到实际可登录密码与预设不同，已自动回写面板")
+
+        elif reset_command:
             if not preset_password:
                 reset_command, generated_password = inject_random_password_if_needed(
                 reset_command,
@@ -1629,6 +1796,7 @@ def settings_page():
         servers=list_servers(),
         logs_grouped=list_logs_grouped_by_server(),
         global_cfg=get_global_config(),
+        scp_accounts=list_scp_accounts(),
     )
 
 
@@ -1827,6 +1995,42 @@ def agent_report():
     return jsonify({"ok": True})
 
 
+@app.route("/scp-accounts", methods=["POST"])
+@login_required
+def add_scp_account():
+    form = request.form
+    name = (form.get("name") or "").strip()
+    username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+    api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/WSEndUser?JSON"
+    if not name or not username or not password:
+        flash("新增SCP账号失败: 名称/账号/密码均为必填", "error")
+        return redirect(url_for("settings_page"))
+
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "INSERT INTO scp_accounts(name, username, password, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+            (name, username, password, api_endpoint, now_text, now_text),
+        )
+        conn.commit()
+
+    flash("SCP账号已添加", "success")
+    return redirect(url_for("settings_page"))
+
+
+@app.route("/scp-accounts/<int:account_id>/delete", methods=["POST"])
+@login_required
+def delete_scp_account(account_id):
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET scp_account_id = NULL, scp_server_id = '' WHERE scp_account_id = ?", (account_id,))
+        conn.execute("DELETE FROM scp_accounts WHERE id = ?", (account_id,))
+        conn.commit()
+
+    flash("SCP账号已删除，相关服务器绑定已清空", "success")
+    return redirect(url_for("settings_page"))
+
+
 @app.route("/global-tasks", methods=["POST"])
 @login_required
 def update_global_tasks():
@@ -1894,6 +2098,11 @@ def add_server():
         reset_hour = parse_int_form_field(form, "reset_hour", default=1, min_value=0, max_value=23)
         reset_minute = parse_int_form_field(form, "reset_minute", default=0, min_value=0, max_value=59)
         max_retries = parse_int_form_field(form, "max_retries", default=DEFAULT_MAX_RETRIES, min_value=1, max_value=10)
+        scp_account_id_raw = (form.get("scp_account_id") or "").strip()
+        scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
+        reinstall_mode = (form.get("reinstall_mode") or "ssh").strip().lower()
+        if reinstall_mode not in ("ssh", "scp_api"):
+            raise ValueError("重置方式仅支持 ssh 或 scp_api")
     except ValueError as exc:
         flash(f"添加服务器失败: {exc}", "error")
         return redirect(url_for("settings_page"))
@@ -1908,8 +2117,8 @@ def add_server():
 
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -1925,6 +2134,9 @@ def add_server():
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
+                scp_account_id,
+                (form.get("scp_server_id") or "").strip(),
+                reinstall_mode,
                 generate_agent_token(),
                 "",
                 0,
@@ -1950,6 +2162,11 @@ def update_server(server_id):
         reset_minute = parse_int_form_field(form, "reset_minute", default=0, min_value=0, max_value=59)
         sort_order = parse_int_form_field(form, "sort_order", default=0)
         max_retries = parse_int_form_field(form, "max_retries", default=DEFAULT_MAX_RETRIES, min_value=1, max_value=10)
+        scp_account_id_raw = (form.get("scp_account_id") or "").strip()
+        scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
+        reinstall_mode = (form.get("reinstall_mode") or "ssh").strip().lower()
+        if reinstall_mode not in ("ssh", "scp_api"):
+            raise ValueError("重置方式仅支持 ssh 或 scp_api")
     except ValueError as exc:
         flash(f"更新服务器失败: {exc}", "error")
         return redirect(url_for("settings_page"))
@@ -1958,7 +2175,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, sort_order=?, max_retries=?, retry_backoff_seconds=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
             WHERE id=?
             """,
             (
@@ -1975,6 +2192,9 @@ def update_server(server_id):
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
+                scp_account_id,
+                (form.get("scp_server_id") or "").strip(),
+                reinstall_mode,
                 server_id,
             ),
         )
