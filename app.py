@@ -521,6 +521,17 @@ def _scp_rest_fetch_server_ips(account, endpoint_base, token, server_id):
 
 def _scp_rest_find_debian11_image(account, endpoint_base, token, server_id):
     paths = (f"servers/{server_id}/imageflavours", f"servers/{server_id}/images", "imageflavours")
+    best = None
+
+    def _pick_first(*values):
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
     for path in paths:
         try:
             data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
@@ -540,14 +551,42 @@ def _scp_rest_find_debian11_image(account, endpoint_base, token, server_id):
         for item in candidates:
             if not isinstance(item, dict):
                 continue
+            image_meta = item.get("image") if isinstance(item.get("image"), dict) else {}
             haystack = " ".join(
-                str(item.get(k) or "") for k in ("name", "label", "displayName", "distribution", "version", "slug", "key")
+                str(item.get(k) or "") for k in ("name", "label", "displayName", "distribution", "version", "slug", "key", "alias", "text")
             ).lower()
-            if "debian" in haystack and ("11" in haystack or "bullseye" in haystack):
-                image_id = item.get("id") or item.get("key") or item.get("imageId")
-                if image_id is not None:
-                    return str(image_id).strip()
-    return ""
+            image_haystack = " ".join(
+                str(image_meta.get(k) or "") for k in ("name", "label", "displayName", "distribution", "version", "slug", "key")
+            ).lower()
+            all_text = f"{haystack} {image_haystack}".strip()
+            if "debian" not in all_text or ("11" not in all_text and "bullseye" not in all_text):
+                continue
+
+            score = 0
+            if "debian (11) bullseye" in all_text:
+                score += 50
+            if "bullseye" in all_text:
+                score += 20
+            if "debian" in all_text and "11" in all_text:
+                score += 15
+            if str(item.get("name") or "").strip().lower() == "minimal":
+                score += 5
+
+            flavour_id = _pick_first(item.get("id"), item.get("imageFlavourId"), item.get("flavourId"))
+            image_id = _pick_first(item.get("imageId"), image_meta.get("id"), item.get("key"))
+            image_name = _pick_first(image_meta.get("name"), item.get("name"), item.get("displayName"), item.get("text"))
+            candidate = {
+                "score": score,
+                "flavour_id": flavour_id,
+                "image_id": image_id,
+                "image_name": image_name,
+            }
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+
+    if best:
+        return best
+    return {"score": 0, "flavour_id": "", "image_id": "", "image_name": ""}
 
 
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
@@ -564,7 +603,14 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
             endpoint_base, token = scp_rest_login(account)
             if output_lines is not None:
                 output_lines.append(f"SCP账号[{account['name']}] REST鉴权成功，endpoint={endpoint_base}")
-            for path in ("servers", "servers?limit=200", "vservers", "virtual-machines"):
+            rest_paths = [
+                f"servers?ip={urlparse.quote(ip_text)}",
+                "servers",
+                "servers?limit=200",
+                "vservers",
+                "virtual-machines",
+            ]
+            for path in rest_paths:
                 try:
                     data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
                 except Exception as exc:
@@ -580,6 +626,10 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
                         continue
                     if server_id:
                         scanned_server_ids.add(server_id)
+                    if path.startswith("servers?ip=") and server_id:
+                        if output_lines is not None:
+                            output_lines.append(f"SCP账号[{account['name']}] REST按IP查询直接命中 server_id={server_id}, ip={ip_text}")
+                        return account, server_id
                     candidate_ips = _scp_extract_ips(server_item)
                     if not candidate_ips and server_id:
                         if output_lines is not None:
@@ -931,9 +981,14 @@ def scp_reinstall_debian11(server_row, output_lines):
     try:
         endpoint_base, token = scp_rest_login(account)
         output_lines.append(f"SCP REST鉴权成功，endpoint={endpoint_base}")
-        image_id = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
-        if image_id:
-            output_lines.append(f"SCP REST检测到 Debian11 镜像/风味ID: {image_id}")
+        image_pick = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
+        flavour_id = (image_pick.get("flavour_id") or "").strip()
+        image_id = (image_pick.get("image_id") or "").strip()
+        if flavour_id or image_id:
+            output_lines.append(
+                "SCP REST检测到 Debian11镜像候选: "
+                f"flavour_id={flavour_id or '-'}, image_id={image_id or '-'}, name={image_pick.get('image_name') or '-'}"
+            )
         else:
             output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
         payload_variants = [
@@ -947,14 +1002,18 @@ def scp_reinstall_debian11(server_row, output_lines):
                 "image": "debian-11",
             }
         ]
-        if image_id:
+        if flavour_id or image_id:
             payload_variants.extend(
                 [
-                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageFlavourId": image_id},
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageFlavourId": flavour_id},
                     {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageId": image_id},
                     {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "image": {"id": image_id}},
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "image": {"id": image_id, "name": image_pick.get("image_name")}},
                 ]
             )
+            payload_variants = [x for x in payload_variants if not ("imageFlavourId" in x and not x.get("imageFlavourId"))]
+            payload_variants = [x for x in payload_variants if not ("imageId" in x and not x.get("imageId"))]
+            payload_variants = [x for x in payload_variants if not ("image" in x and not (x["image"] or {}).get("id"))]
 
         for path in (f"servers/{scp_server_id}/image", f"servers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os", f"vservers/{scp_server_id}/reinstall"):
             try:
