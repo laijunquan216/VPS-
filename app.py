@@ -908,15 +908,12 @@ def scp_reinstall_debian11(server_row, output_lines):
     account = get_scp_account(server_row.get("scp_account_id"))
     scp_server_id = (server_row.get("scp_server_id") or "").strip()
 
-<<<<<<< codex/analyze-reset-task-error-uk20p0
     if scp_server_id and account:
         output_lines.append(f"已使用面板已配置SCP绑定: 账号[{account['name']}], server_id={scp_server_id}")
     elif scp_server_id and not account:
         raise RuntimeError("已填写SCP服务器ID，但未绑定SCP账号，请在服务器设置中选择SCP账号")
     else:
-=======
     if not account or not scp_server_id:
->>>>>>> main
         account_scope = [account] if account else None
         account, scp_server_id = find_scp_server_id_by_ip(server_row["ip"], output_lines, account_candidates=account_scope)
         if not account or not scp_server_id:
@@ -1975,15 +1972,12 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             f"has_ssh2={bool(ssh_command_2)}, "
             f"has_ssh3={bool(ssh_command_3)}"
         )
-<<<<<<< codex/analyze-reset-task-error-uk20p0
         if reinstall_mode == "scp_api":
             output_lines.append(
                 "SCP配置: "
                 f"scp_account_id={mutable_server.get('scp_account_id')}, "
                 f"scp_server_id={(mutable_server.get('scp_server_id') or '').strip() or '<empty>'}"
             )
-=======
->>>>>>> main
 
         if reinstall_mode == "ssh" and not any([reset_command, ssh_command_2, ssh_command_3]):
             raise RuntimeError("未配置任何SSH任务命令（reset_command/ssh_command_2/ssh_command_3均为空）")
