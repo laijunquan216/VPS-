@@ -591,14 +591,6 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
                         output_lines.append(f"SCP账号[{account['name']}] REST候选 path={path}, server_id={server_id or '-'}, ips={ip_preview}")
                 if output_lines is not None:
                     output_lines.append(f"SCP账号[{account['name']}] REST列表完成 path={path}, entries={seen}")
-                    continue
-                for server_item in _scp_collect_server_entries(data):
-                    server_id = _scp_extract_server_id(server_item)
-                    candidate_ips = _scp_extract_ips(server_item)
-                    if not candidate_ips and server_id:
-                        candidate_ips = _scp_rest_fetch_server_ips(account, endpoint_base, token, server_id)
-                    if ip_text in candidate_ips and server_id:
-                        return account, server_id
             if output_lines is not None:
                 tail = " | ".join(rest_errors[-2:]) if rest_errors else "接口返回成功但未匹配到目标IP"
                 output_lines.append(f"SCP账号[{account['name']}] REST识别未匹配，转SOAP/JSON尝试: {tail}")
@@ -934,7 +926,6 @@ def scp_reinstall_debian11(server_row, output_lines):
             output_lines.append(f"SCP REST检测到 Debian11 镜像/风味ID: {image_id}")
         else:
             output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
-        image_id = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
         payload_variants = [
             {
                 "hostname": server_row["name"],
@@ -973,7 +964,6 @@ def scp_reinstall_debian11(server_row, output_lines):
                     return
             except Exception as exc:
                 output_lines.append(f"SCP REST重装调用失败 path={path}: {exc}")
-            except Exception:
                 continue
         output_lines.append("SCP REST重装接口未命中，转SOAP/JSON尝试")
     except Exception as rest_exc:
@@ -1512,19 +1502,18 @@ def build_bin_reinstall_command(choice, root_password):
     return (
         "bash -lc "
         + shlex.quote(
-            f"set -e; "
             f"if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then "
             f"export DEBIAN_FRONTEND=noninteractive; "
-            f"if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y curl wget; "
-            f"elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget; "
-            f"elif command -v yum >/dev/null 2>&1; then yum install -y curl wget; "
-            f"elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget; "
+            f"if command -v apt-get >/dev/null 2>&1; then apt-get update -y >/dev/null 2>&1; apt-get install -y curl wget >/dev/null 2>&1; "
+            f"elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget >/dev/null 2>&1; "
+            f"elif command -v yum >/dev/null 2>&1; then yum install -y curl wget >/dev/null 2>&1; "
+            f"elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget >/dev/null 2>&1; "
             f"fi; "
             f"fi; "
             f"if command -v curl >/dev/null 2>&1; then "
-            f"bash <(curl -fsSL {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+                f"bash <(curl -fsSL {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
             f"elif command -v wget >/dev/null 2>&1; then "
-            f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+                f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
             f"else echo '缺少 curl/wget 且自动安装失败，无法执行 bin456789 重装'; exit 127; "
             f"fi; sync; reboot"
         )
@@ -1705,15 +1694,16 @@ def wrap_installnet_with_downloader_bootstrap(command):
         'command -v wget >/dev/null 2>&1 || missing="$missing wget"; '
         'if [ -n "$missing" ]; then '
         'export DEBIAN_FRONTEND=noninteractive; '
-        'if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y $missing; '
-        'elif command -v dnf >/dev/null 2>&1; then dnf install -y $missing; '
-        'elif command -v yum >/dev/null 2>&1; then yum install -y $missing; '
-        'elif command -v apk >/dev/null 2>&1; then apk add --no-cache $missing; '
-        "else echo '缺少 curl/wget 且无法自动安装，请手动安装后重试'; exit 127; "
+        'if command -v apt-get >/dev/null 2>&1; then apt-get update -y >/dev/null 2>&1; apt-get install -y $missing >/dev/null 2>&1; '
+        'elif command -v dnf >/dev/null 2>&1; then dnf install -y $missing >/dev/null 2>&1; '
+        'elif command -v yum >/dev/null 2>&1; then yum install -y $missing >/dev/null 2>&1; '
+        'elif command -v apk >/dev/null 2>&1; then apk add --no-cache $missing >/dev/null 2>&1; '
+        "else echo '缺少 curl/wget 且无法自动安装，继续执行原始重装命令'; "
         'fi; '
+        'command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || echo "自动安装后仍未检测到curl/wget，继续执行原始重装命令"; '
         'fi'
     )
-    return f"set -e; {bootstrap}; {text}"
+    return f"{bootstrap}; {text}"
 
 
 
@@ -1962,11 +1952,24 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         original_password = mutable_server["ssh_password"]
         global_cfg = get_global_config()
         reinstall_mode = (mutable_server.get("reinstall_mode") or "ssh").strip().lower()
+        if reinstall_mode not in ("ssh", "scp_api"):
+            output_lines.append(f"检测到未知重置模式[{reinstall_mode}]，已自动回退为 ssh")
+            reinstall_mode = "ssh"
 
         reset_command = normalize_shell_command((global_cfg["reset_command"] or "").strip())
         ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
         ssh_command_3 = normalize_shell_command((global_cfg["ssh_command_3"] or "").strip())
         agent_install_command = normalize_shell_command((global_cfg["agent_install_command"] or "").strip())
+        output_lines.append(
+            "任务配置: "
+            f"mode={reinstall_mode}, "
+            f"has_reset_command={bool(reset_command)}, "
+            f"has_ssh2={bool(ssh_command_2)}, "
+            f"has_ssh3={bool(ssh_command_3)}"
+        )
+
+        if reinstall_mode == "ssh" and not any([reset_command, ssh_command_2, ssh_command_3]):
+            raise RuntimeError("未配置任何SSH任务命令（reset_command/ssh_command_2/ssh_command_3均为空）")
         if reset_command_override:
             reset_command = normalize_shell_command(reset_command_override)
             ssh_command_2 = ""
