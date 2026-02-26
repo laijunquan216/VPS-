@@ -1035,6 +1035,7 @@ def scp_reinstall_debian11(server_row, output_lines):
             )
         else:
             output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
+<<<<<<< codex/analyze-reset-task-error-21swky
         payload_variants = []
         if flavour_id:
             payload_variants.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
@@ -1045,6 +1046,61 @@ def scp_reinstall_debian11(server_row, output_lines):
 
         output_lines.append("SCP REST将按文档接口执行: POST /servers/{serverId}/image + imageFlavourId/imageId")
         for path in (f"servers/{scp_server_id}/image",):
+=======
+        payload_variants = [
+            {
+                "hostname": server_row["name"],
+                "rootPassword": server_row["ssh_password"],
+                "password": server_row["ssh_password"],
+                "distribution": "debian",
+                "version": "11",
+                "os": "debian11",
+                "image": "debian-11",
+            }
+        ]
+        if flavour_id or image_id:
+            preferred_payloads = []
+            if flavour_id:
+                preferred_payloads.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
+            if image_id:
+                preferred_payloads.append({"imageId": int(image_id) if str(image_id).isdigit() else image_id})
+            payload_variants = [
+                {
+                    "hostname": server_row["name"],
+                    "rootPassword": server_row["ssh_password"],
+                    "password": server_row["ssh_password"],
+                    **extra,
+                }
+                for extra in preferred_payloads
+            ] + payload_variants
+            payload_variants.extend(
+                [
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageFlavourId": flavour_id},
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageId": image_id},
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "image": {"id": image_id}},
+                    {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "image": {"id": image_id, "name": image_pick.get("image_name")}},
+                ]
+            )
+            payload_variants = [x for x in payload_variants if not ("imageFlavourId" in x and not x.get("imageFlavourId"))]
+            payload_variants = [x for x in payload_variants if not ("imageId" in x and not x.get("imageId"))]
+            filtered_variants = []
+            for payload in payload_variants:
+                if "image" not in payload:
+                    filtered_variants.append(payload)
+                    continue
+                image_field = payload.get("image")
+                if isinstance(image_field, dict):
+                    if image_field.get("id"):
+                        filtered_variants.append(payload)
+                    continue
+                if isinstance(image_field, str):
+                    if image_field.strip():
+                        filtered_variants.append(payload)
+                    continue
+            payload_variants = filtered_variants
+
+        for path in (f"servers/{scp_server_id}/image", f"servers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os", f"vservers/{scp_server_id}/reinstall"):
+>>>>>>> main
             try:
                 for payload in payload_variants:
                     result = scp_rest_request(account, "POST", path, token=token, payload=payload, endpoint_base=endpoint_base)
