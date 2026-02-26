@@ -605,13 +605,21 @@ def generate_root_password(length=16):
 
 
 def inject_random_password_if_needed(command, server_row, generated_password):
-    if "InstallNET.sh" not in command or "-pwd" not in command:
+    is_installnet = "InstallNET.sh" in command and "-pwd" in command
+    is_bin_reinstall = "reinstall/main/reinstall.sh" in command and "--password" in command
+    if not is_installnet and not is_bin_reinstall:
         return command, generated_password
 
     pwd = generated_password or generate_root_password()
-    command = re.sub(r"-pwd\s+'[^']*'", f"-pwd '{pwd}'", command)
-    command = re.sub(r'-pwd\s+"[^"]*"', f'-pwd "{pwd}"', command)
-    command = re.sub(r"-pwd\s+([^\s'\"]+)", f"-pwd '{pwd}'", command)
+    if is_installnet:
+        command = re.sub(r"-pwd\s+'[^']*'", f"-pwd '{pwd}'", command)
+        command = re.sub(r'-pwd\s+"[^"]*"', f'-pwd "{pwd}"', command)
+        command = re.sub(r'-pwd\s+([^\s\'"]+)', f"-pwd '{pwd}'", command)
+    if is_bin_reinstall:
+        command = re.sub(r"--password\s+'[^']*'", f"--password '{pwd}'", command)
+        command = re.sub(r'--password\s+"[^"]*"', f'--password "{pwd}"', command)
+        command = re.sub(r'--password\s+([^\s\'"]+)', f"--password '{pwd}'", command)
+
     update_server_password(server_row["id"], pwd)
     return command, pwd
 
@@ -642,7 +650,7 @@ def wrap_installnet_with_downloader_bootstrap(command):
         "fi; "
         "fi; "
         "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-        "echo '缺少 wget/curl 且自动安装失败，无法执行 InstallNET 重置'; exit 127; "
+        "echo '缺少 wget/curl 且自动安装失败，无法执行重置命令'; exit 127; "
         "fi"
     )
     return "bash -lc " + shlex.quote(f"set -e; {bootstrap}; {command}")
@@ -855,7 +863,10 @@ def should_reset(server_row):
 
 
 def is_reinstall_command(command):
-    return "InstallNET.sh" in command and "-pwd" in command
+    text = str(command or "")
+    is_installnet = "InstallNET.sh" in text and "-pwd" in text
+    is_bin_reinstall = "reinstall/main/reinstall.sh" in text and "--password" in text
+    return is_installnet or is_bin_reinstall
 
 
 def connect_ssh(server_row, timeout=20):
@@ -1136,7 +1147,7 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 reinstall_triggered = True
                 if is_reinstall_command(reset_command):
                     reset_command = wrap_installnet_with_downloader_bootstrap(reset_command)
-                    output_lines.append("检测到 InstallNET 重置命令，已加入 wget/curl 缺失自动安装兜底")
+                    output_lines.append("检测到DD重置命令，已加入 wget/curl 缺失自动安装兜底")
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)
