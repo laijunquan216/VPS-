@@ -853,6 +853,7 @@ def is_reinstall_command(command):
     return is_installnet or is_bin_reinstall
 
 
+
 def connect_ssh(server_row, timeout=20):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -866,7 +867,7 @@ def connect_ssh(server_row, timeout=20):
     return client
 
 
-def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None):
+def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None, require_ready=False):
     output_lines.append("等待服务器重装并重启后重新连线...")
     timeout_value = timeout_seconds if timeout_seconds is not None else SSH_RECONNECT_TIMEOUT_SECONDS
     deadline = time.time() + max(1, int(timeout_value))
@@ -1133,9 +1134,6 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
 
             if force_reinstall or is_reinstall_command(reset_command):
                 reinstall_triggered = True
-                if is_reinstall_command(reset_command):
-                    reset_command = wrap_installnet_with_downloader_bootstrap(reset_command)
-                    output_lines.append("检测到DD重置命令，已加入 wget/curl 缺失自动安装兜底")
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)
