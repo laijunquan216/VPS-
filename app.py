@@ -295,13 +295,37 @@ def bind_scp_server(server_id, account_id, scp_server_id):
 
 def scp_api_call(account_row, action, payload):
     endpoint = (account_row["api_endpoint"] or "").strip() or "https://www.servercontrolpanel.de/WSEndUser?JSON"
+    if "?" not in endpoint:
+        endpoint = endpoint.rstrip("/") + "?JSON"
+
     body = json.dumps({"action": action, "param": payload or {}}).encode("utf-8")
-    req = urlrequest.Request(endpoint, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urlrequest.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-    except urlerror.URLError as exc:
-        raise RuntimeError(f"SCP API网络异常: {exc}") from exc
+    header_candidates = [
+        {"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+        {"Content-Type": "application/json", "Accept": "application/json"},
+        {"Accept": "application/json"},
+    ]
+
+    raw = ""
+    last_exc = None
+    for headers in header_candidates:
+        req = urlrequest.Request(endpoint, data=body, headers=headers)
+        try:
+            with urlrequest.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+                break
+        except urlerror.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+            last_exc = RuntimeError(f"SCP API HTTP错误[{exc.code}]: {detail or exc.reason}")
+            if exc.code == 415:
+                continue
+            raise last_exc from exc
+        except urlerror.URLError as exc:
+            last_exc = RuntimeError(f"SCP API网络异常: {exc}")
+            raise last_exc from exc
+    else:
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("SCP API请求失败: 未知错误")
 
     try:
         data = json.loads(raw)
