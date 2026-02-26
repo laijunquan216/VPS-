@@ -589,6 +589,50 @@ def _scp_rest_find_debian11_image(account, endpoint_base, token, server_id):
     return {"score": 0, "flavour_id": "", "image_id": "", "image_name": ""}
 
 
+def _scp_extract_task_uuid(task_data):
+    if not isinstance(task_data, dict):
+        return ""
+    for key in ("uuid", "taskId", "task_id", "id"):
+        value = task_data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    for key in ("task", "taskInfo", "data", "result"):
+        nested = task_data.get(key)
+        if isinstance(nested, dict):
+            value = _scp_extract_task_uuid(nested)
+            if value:
+                return value
+    return ""
+
+
+def _scp_wait_task_finished(account, task_uuid, output_lines, timeout_seconds=1800):
+    if not task_uuid:
+        return
+    deadline = time.time() + max(60, int(timeout_seconds or 1800))
+    last_state = ""
+    while time.time() < deadline:
+        endpoint_base, token = scp_rest_login(account)
+        data = scp_rest_request(account, "GET", f"tasks/{task_uuid}", token=token, endpoint_base=endpoint_base)
+        state = str((data or {}).get("state") or "").upper()
+        progress = ""
+        if isinstance(data, dict):
+            task_progress = data.get("taskProgress") or {}
+            if isinstance(task_progress, dict):
+                progress = str(task_progress.get("progressInPercent") or "").strip()
+        if state != last_state:
+            output_lines.append(f"SCP任务状态更新: uuid={task_uuid}, state={state or '-'}, progress={progress or '-'}")
+            last_state = state
+        if state == "FINISHED":
+            return
+        if state in ("ERROR", "FAILED", "CANCELED"):
+            raise RuntimeError(f"SCP任务失败: uuid={task_uuid}, state={state}, detail={str(data)[:500]}")
+        time.sleep(10)
+    raise RuntimeError(f"SCP任务超时: uuid={task_uuid} 在限定时间内未完成")
+
+
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
     ip_text = str(server_ip or "").strip()
     if not ip_text:
@@ -1003,6 +1047,20 @@ def scp_reinstall_debian11(server_row, output_lines):
             }
         ]
         if flavour_id or image_id:
+            preferred_payloads = []
+            if flavour_id:
+                preferred_payloads.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
+            if image_id:
+                preferred_payloads.append({"imageId": int(image_id) if str(image_id).isdigit() else image_id})
+            payload_variants = [
+                {
+                    "hostname": server_row["name"],
+                    "rootPassword": server_row["ssh_password"],
+                    "password": server_row["ssh_password"],
+                    **extra,
+                }
+                for extra in preferred_payloads
+            ] + payload_variants
             payload_variants.extend(
                 [
                     {"hostname": server_row["name"], "rootPassword": server_row["ssh_password"], "imageFlavourId": flavour_id},
@@ -1013,7 +1071,6 @@ def scp_reinstall_debian11(server_row, output_lines):
             )
             payload_variants = [x for x in payload_variants if not ("imageFlavourId" in x and not x.get("imageFlavourId"))]
             payload_variants = [x for x in payload_variants if not ("imageId" in x and not x.get("imageId"))]
-<<<<<<< codex/analyze-reset-task-error-zxfjj6
             filtered_variants = []
             for payload in payload_variants:
                 if "image" not in payload:
@@ -1029,15 +1086,13 @@ def scp_reinstall_debian11(server_row, output_lines):
                         filtered_variants.append(payload)
                     continue
             payload_variants = filtered_variants
-=======
-            payload_variants = [x for x in payload_variants if not ("image" in x and not (x["image"] or {}).get("id"))]
->>>>>>> main
 
         for path in (f"servers/{scp_server_id}/image", f"servers/{scp_server_id}/reinstall", f"servers/{scp_server_id}/os", f"vservers/{scp_server_id}/reinstall"):
             try:
                 for payload in payload_variants:
                     result = scp_rest_request(account, "POST", path, token=token, payload=payload, endpoint_base=endpoint_base)
                     request_id = "-"
+                    task_uuid = _scp_extract_task_uuid(result)
                     if isinstance(result, dict):
                         request_id = str(
                             result.get("request_id")
@@ -1047,6 +1102,9 @@ def scp_reinstall_debian11(server_row, output_lines):
                             or result.get("id")
                             or "-"
                         )
+                    if task_uuid:
+                        output_lines.append(f"SCP REST重装任务已创建: uuid={task_uuid}，开始轮询任务状态")
+                        _scp_wait_task_finished(account, task_uuid, output_lines)
                     output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11, path={path}")
                     return
             except Exception as exc:
