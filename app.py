@@ -266,6 +266,15 @@ def get_scp_account(account_id):
         return conn.execute("SELECT * FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
 
 
+def bind_scp_server(server_id, account_id, scp_server_id):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE servers SET scp_account_id = ?, scp_server_id = ? WHERE id = ?",
+            (account_id, str(scp_server_id or "").strip(), server_id),
+        )
+        conn.commit()
+
+
 def _scp_endpoint_candidates(api_endpoint):
     raw = (api_endpoint or "").strip()
     if not raw:
