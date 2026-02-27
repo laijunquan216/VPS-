@@ -39,6 +39,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 DB_PATH = os.environ.get("VPS_PANEL_DB", "panel.db")
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "5000"))
+PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").strip()
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECONDS", "1800"))
@@ -264,6 +265,15 @@ def get_scp_account(account_id):
         return None
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
+
+
+def bind_scp_server(server_id, account_id, scp_server_id):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE servers SET scp_account_id = ?, scp_server_id = ? WHERE id = ?",
+            (account_id, str(scp_server_id or "").strip(), server_id),
+        )
+        conn.commit()
 
 
 def _scp_endpoint_candidates(api_endpoint):
@@ -1115,19 +1125,34 @@ def format_bytes(num):
         value /= 1024
 
 
+def _request_public_base_url(request_obj):
+    forwarded_host = (request_obj.headers.get("X-Forwarded-Host") or "").strip()
+    forwarded_proto = (request_obj.headers.get("X-Forwarded-Proto") or "").strip()
+    host = forwarded_host.split(",", 1)[0].strip() or (request_obj.host or "").strip()
+    scheme = forwarded_proto.split(",", 1)[0].strip() or (request_obj.scheme or "http")
+    if host:
+        return f"{scheme}://{host}".rstrip("/")
+    return ""
+
+
 def resolve_panel_base_url(global_cfg, request_obj=None):
     configured = (global_cfg["panel_base_url"] or "").strip()
     if configured:
         return configured.rstrip("/")
+    if PANEL_BASE_URL:
+        return PANEL_BASE_URL.rstrip("/")
     if request_obj:
-        return request_obj.url_root.rstrip("/")
+        from_request = _request_public_base_url(request_obj)
+        if from_request:
+            return from_request
     return f"http://127.0.0.1:{PANEL_PORT}"
 
 
 def detect_panel_public_base_url(request_obj=None):
-    if request_obj and request_obj.host:
-        scheme = request_obj.scheme or "http"
-        return f"{scheme}://{request_obj.host}".rstrip("/")
+    if request_obj:
+        from_request = _request_public_base_url(request_obj)
+        if from_request:
+            return from_request
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
