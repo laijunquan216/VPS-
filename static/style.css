@@ -92,3 +92,18 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
   .renter-inline-form input{min-width:0;width:100%}
   .server-actions button{width:100%}
 }
+
+.settings-form-stack{display:flex;flex-direction:column;gap:14px}
+.settings-block{border:1px solid #dbe4f0;border-radius:12px;padding:14px;background:#f8fbff}
+.settings-block h3{margin:0 0 10px;font-size:18px;color:#0f172a}
+.traffic-grid{grid-template-columns:minmax(280px,2fr) minmax(220px,1fr)}
+.traffic-source-box{border:1px dashed #cbd5e1;border-radius:10px;padding:10px;background:#fff}
+@media (max-width:900px){
+  .traffic-grid{grid-template-columns:1fr}
+}
+
+.scp-account-list{display:grid;gap:12px;margin-top:12px}
+.scp-account-item{border:1px solid #e5e7eb;border-radius:10px;padding:8px 10px;background:#f8fafc}
+.scp-account-item > summary{cursor:pointer;font-weight:700}
+.scp-account-item[open]{background:#fff}
+.scp-account-item form{margin-top:10px}
