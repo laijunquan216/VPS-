@@ -19,8 +19,6 @@ from urllib import parse as urlparse
 from urllib import request as urlrequest
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
-from urllib.error import URLError
-from urllib.request import urlopen
 
 import paramiko
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -214,7 +212,6 @@ def init_db():
         ensure_column(conn, "servers", "last_agent_report_at TEXT")
         ensure_column(conn, "servers", "ssh_status TEXT NOT NULL DEFAULT 'unknown'")
         ensure_column(conn, "servers", "ssh_checked_at TEXT")
-        ensure_column(conn, "servers", "api_images_json TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "reset_hour INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "servers", "reset_minute INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "max_retries INTEGER NOT NULL DEFAULT 2")
@@ -834,7 +831,7 @@ def list_detail_rows():
             SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_agent_report_at,
-                   s.ssh_status, s.ssh_checked_at, s.api_images_json,
+                   s.ssh_status, s.ssh_checked_at,
                    l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
@@ -926,8 +923,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at, api_images_json)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -959,7 +956,22 @@ def restore_backup_payload(payload):
                     server.get("last_reset_at"),
                     (server.get("ssh_status", "unknown") or "unknown"),
                     server.get("ssh_checked_at"),
-                    server.get("api_images_json", ""),
+                ),
+            )
+
+        for account in scp_accounts:
+            now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "INSERT INTO scp_accounts(id, name, username, password, refresh_token, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    account.get("id"),
+                    account.get("name", ""),
+                    account.get("username", ""),
+                    account.get("password", ""),
+                    account.get("refresh_token", ""),
+                    account.get("api_endpoint") or "https://www.servercontrolpanel.de/scp-core/api/v1",
+                    account.get("created_at") or now_text,
+                    account.get("updated_at") or now_text,
                 ),
             )
 
@@ -1176,112 +1188,6 @@ def inject_random_ssh2_password_if_needed(command):
     return command, pwd
 
 
-def wrap_installnet_with_downloader_bootstrap(command):
-    bootstrap = (
-        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-        "export DEBIAN_FRONTEND=noninteractive; "
-        "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y wget curl; "
-        "elif command -v dnf >/dev/null 2>&1; then dnf install -y wget curl; "
-        "elif command -v yum >/dev/null 2>&1; then yum install -y wget curl; "
-        "elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget curl; "
-        "fi; "
-        "fi; "
-        "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-        "echo '缺少 wget/curl 且自动安装失败，无法执行重置命令'; exit 127; "
-        "fi"
-    )
-    return "bash -lc " + shlex.quote(f"set -e; {bootstrap}; {command}")
-
-
-def list_supported_reinstall_images():
-    labels = {
-        "debian-9": "Debian 9",
-        "debian-10": "Debian 10",
-        "debian-11": "Debian 11",
-        "debian-12": "Debian 12",
-        "debian-13": "Debian 13",
-        "ubuntu-16.04": "Ubuntu 16.04",
-        "ubuntu-18.04": "Ubuntu 18.04",
-        "ubuntu-20.04": "Ubuntu 20.04",
-        "ubuntu-22.04": "Ubuntu 22.04",
-        "ubuntu-24.04": "Ubuntu 24.04",
-        "ubuntu-25.1": "Ubuntu 25.1",
-    }
-    return [{"value": key, "label": labels.get(key, key)} for key in BIN_REINSTALL_CHOICES.keys()]
-
-
-def fetch_api_available_images_for_server(_server_row):
-    url = "https://raw.githubusercontent.com/bin456789/reinstall/main/README.md"
-    try:
-        with urlopen(url, timeout=10) as resp:
-            text = resp.read().decode("utf-8", errors="ignore")
-        matches = re.findall(r"(debian-(?:9|10|11|12|13)|ubuntu-(?:16\.04|18\.04|20\.04|22\.04|24\.04|25\.1))", text, flags=re.IGNORECASE)
-        values = []
-        for m in matches:
-            v = m.lower()
-            if v in BIN_REINSTALL_CHOICES and v not in values:
-                values.append(v)
-        if values:
-            labels = {item["value"]: item["label"] for item in list_supported_reinstall_images()}
-            return [{"value": v, "label": labels.get(v, v)} for v in values]
-    except (URLError, TimeoutError, ValueError, OSError):
-        pass
-    return list_supported_reinstall_images()
-
-
-def parse_api_images_json(text):
-    default_items = list_supported_reinstall_images()
-    try:
-        data = json.loads(text or "[]")
-    except (TypeError, ValueError):
-        return default_items
-    if not isinstance(data, list):
-        return default_items
-    allowed = {x["value"] for x in default_items}
-    normalized = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        value = str(item.get("value") or "").strip().lower()
-        label = str(item.get("label") or "").strip()
-        if value in allowed:
-            normalized.append({"value": value, "label": label or value})
-    return normalized or default_items
-
-
-def build_api_reset_command(choice, root_password):
-    distro, version = BIN_REINSTALL_CHOICES[choice]
-    script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-    return (
-        "bash -lc "
-        + shlex.quote(
-            f"set -e; "
-            f"if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then "
-            f"export DEBIAN_FRONTEND=noninteractive; "
-            f"if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y curl wget; "
-            f"elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget; "
-            f"elif command -v yum >/dev/null 2>&1; then yum install -y curl wget; "
-            f"elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget; "
-            f"fi; fi; "
-            f"if command -v curl >/dev/null 2>&1; then "
-            f"curl -fsSL {script_url} | bash -s -- {distro} {version} --password {shlex.quote(root_password)}; "
-            f"elif command -v wget >/dev/null 2>&1; then "
-            f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
-            f"else echo '缺少 curl/wget 且自动安装失败，无法执行API重置'; exit 127; fi; reboot"
-        )
-    )
-
-
-def parse_api_reset_choice(trigger_type):
-    text = str(trigger_type or "").strip().lower()
-    if not text.startswith("apireset:"):
-        return None
-    value = text.split(":", 1)[1].strip()
-    if value in BIN_REINSTALL_CHOICES:
-        return value
-    return None
-
-
 
 BIN_REINSTALL_CHOICES = {
     "debian-9": ("debian", "9"),
@@ -1310,32 +1216,26 @@ def parse_bin_reinstall_choice(trigger_type):
 
 def build_bin_reinstall_command(choice, root_password):
     distro, version = BIN_REINSTALL_CHOICES[choice]
-    installnet_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-    installnet_target = f"-{distro} {version}"
+    script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
     return (
         "bash -lc "
         + shlex.quote(
-            "set -e; "
-            "if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then "
-            "export DEBIAN_FRONTEND=noninteractive; "
-            "if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y wget curl; "
-            "elif command -v dnf >/dev/null 2>&1; then dnf install -y wget curl; "
-            "elif command -v yum >/dev/null 2>&1; then yum install -y wget curl; "
-            "elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget curl; "
-            "fi; "
-            "fi; "
-            "if command -v wget >/dev/null 2>&1; then "
-            f"wget --no-check-certificate -qO InstallNET.sh {shlex.quote(installnet_url)}; "
-            "elif command -v curl >/dev/null 2>&1; then "
-            f"curl -fsSL {shlex.quote(installnet_url)} -o InstallNET.sh; "
-            "else echo '缺少 wget/curl 且自动安装失败，无法执行InstallNET重置'; exit 127; "
-            "fi; "
-            "chmod a+x InstallNET.sh; "
-            f"bash InstallNET.sh {installnet_target} -pwd {shlex.quote(root_password)}; "
-            "reboot"
+            f"if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then "
+            f"export DEBIAN_FRONTEND=noninteractive; "
+            f"if command -v apt-get >/dev/null 2>&1; then apt-get update -y >/dev/null 2>&1; apt-get install -y curl wget >/dev/null 2>&1; "
+            f"elif command -v dnf >/dev/null 2>&1; then dnf install -y curl wget >/dev/null 2>&1; "
+            f"elif command -v yum >/dev/null 2>&1; then yum install -y curl wget >/dev/null 2>&1; "
+            f"elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl wget >/dev/null 2>&1; "
+            f"fi; "
+            f"fi; "
+            f"if command -v curl >/dev/null 2>&1; then "
+                f"bash <(curl -fsSL {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+            f"elif command -v wget >/dev/null 2>&1; then "
+                f"bash <(wget -qO- {script_url}) {distro} {version} --password {shlex.quote(root_password)}; "
+            f"else echo '缺少 curl/wget 且自动安装失败，无法执行 bin456789 重装'; exit 127; "
+            f"fi; sync; reboot"
         )
     )
-
 
 def normalize_shell_command(command):
     return command.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
@@ -1501,6 +1401,30 @@ def is_reinstall_command(command):
     return is_installnet or is_bin_reinstall
 
 
+def wrap_installnet_with_downloader_bootstrap(command):
+    text = str(command or "").strip()
+    if not text or "InstallNET.sh" not in text:
+        return text
+
+    bootstrap = (
+        'missing=""; '
+        'command -v curl >/dev/null 2>&1 || missing="$missing curl"; '
+        'command -v wget >/dev/null 2>&1 || missing="$missing wget"; '
+        'if [ -n "$missing" ]; then '
+        'export DEBIAN_FRONTEND=noninteractive; '
+        'if command -v apt-get >/dev/null 2>&1; then apt-get update -y >/dev/null 2>&1; apt-get install -y $missing >/dev/null 2>&1; '
+        'elif command -v dnf >/dev/null 2>&1; then dnf install -y $missing >/dev/null 2>&1; '
+        'elif command -v yum >/dev/null 2>&1; then yum install -y $missing >/dev/null 2>&1; '
+        'elif command -v apk >/dev/null 2>&1; then apk add --no-cache $missing >/dev/null 2>&1; '
+        "else echo '缺少 curl/wget 且无法自动安装，继续执行原始重装命令'; "
+        'fi; '
+        'command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || echo "自动安装后仍未检测到curl/wget，继续执行原始重装命令"; '
+        'fi'
+    )
+    return f"{bootstrap}; {text}"
+
+
+
 def connect_ssh(server_row, timeout=20):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1512,16 +1436,6 @@ def connect_ssh(server_row, timeout=20):
         timeout=timeout,
     )
     return client
-
-
-def is_post_reset_environment_ready(client):
-    probe = (
-        "command -v sh >/dev/null 2>&1 "
-        "&& (test -s /etc/os-release || command -v uname >/dev/null 2>&1) "
-        "&& sh -lc 'echo panel-ready >/dev/null 2>&1'"
-    )
-    _, stdout, _ = client.exec_command(probe)
-    return stdout.channel.recv_exit_status() == 0
 
 
 def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None, require_ready=False):
@@ -1762,6 +1676,21 @@ def maybe_send_batch_email(batch_key):
             conn.commit()
 
 
+class LiveLogBuffer(list):
+    def __init__(self, log_id, flush_interval_seconds=10):
+        super().__init__()
+        self.log_id = log_id
+        self.flush_interval_seconds = max(1, int(flush_interval_seconds or 10))
+        self.last_flush_at = 0.0
+
+    def append(self, item):
+        super().append(item)
+        now = time.time()
+        if self.log_id and now - self.last_flush_at >= self.flush_interval_seconds:
+            update_log(self.log_id, "running", "任务执行中", "\n\n".join(self))
+            self.last_flush_at = now
+
+
 def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True, reset_command_override=None, force_reinstall=False, preset_password=None):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = LiveLogBuffer(running_log_id, flush_interval_seconds=10)
@@ -1782,6 +1711,22 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
         ssh_command_3 = normalize_shell_command((global_cfg["ssh_command_3"] or "").strip())
         agent_install_command = normalize_shell_command((global_cfg["agent_install_command"] or "").strip())
+        output_lines.append(
+            "任务配置: "
+            f"mode={reinstall_mode}, "
+            f"has_reset_command={bool(reset_command)}, "
+            f"has_ssh2={bool(ssh_command_2)}, "
+            f"has_ssh3={bool(ssh_command_3)}"
+        )
+        if reinstall_mode == "scp_api":
+            output_lines.append(
+                "SCP配置: "
+                f"scp_account_id={mutable_server.get('scp_account_id')}, "
+                f"scp_server_id={(mutable_server.get('scp_server_id') or '').strip() or '<empty>'}"
+            )
+
+        if reinstall_mode == "ssh" and not any([reset_command, ssh_command_2, ssh_command_3]):
+            raise RuntimeError("未配置任何SSH任务命令（reset_command/ssh_command_2/ssh_command_3均为空）")
         if reset_command_override:
             reset_command = normalize_shell_command(reset_command_override)
             ssh_command_2 = ""
@@ -1803,7 +1748,19 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             update_server_password(mutable_server["id"], generated_password)
             output_lines.append(f"已为本次重装生成随机root密码: {generated_password}")
 
-        if reset_command:
+        if reinstall_mode == "scp_api":
+            reinstall_triggered = True
+            output_lines.append("本服务器已启用 SCP API 重置模式，准备调用SCP重装 Debian11")
+            scp_reinstall_debian11(mutable_server, output_lines)
+            output_lines.append("SCP重装命令已提交，等待后续重连")
+            time.sleep(POST_REINSTALL_WAIT_SECONDS)
+            client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [mutable_server["ssh_password"]], timeout_seconds=SSH_RECONNECT_TIMEOUT_SECONDS)
+            if connected_pwd and connected_pwd != mutable_server["ssh_password"]:
+                mutable_server["ssh_password"] = connected_pwd
+                update_server_password(mutable_server["id"], connected_pwd)
+                output_lines.append("检测到实际可登录密码与预设不同，已自动回写面板")
+
+        elif reset_command:
             if not preset_password:
                 reset_command, generated_password = inject_random_password_if_needed(
                 reset_command,
@@ -1816,9 +1773,9 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
 
             if force_reinstall or is_reinstall_command(reset_command):
                 reinstall_triggered = True
-                if is_reinstall_command(reset_command):
+                if "InstallNET.sh" in reset_command:
                     reset_command = wrap_installnet_with_downloader_bootstrap(reset_command)
-                    output_lines.append("检测到DD重置命令，已加入 wget/curl 缺失自动安装兜底")
+                    output_lines.append("检测到InstallNET重装命令，已执行curl/wget缺失项自动安装兜底")
                 wrapped = f"nohup bash -lc {shlex.quote(reset_command)} >/root/panel_reset.log 2>&1 &"
                 output_lines.append(f"执行 重置任务(后台): {reset_command}")
                 client.exec_command(wrapped)
@@ -1842,7 +1799,6 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                                 output_lines,
                                 [generated_password],
                                 timeout_seconds=new_pwd_wait,
-                                require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
                             )
                         except Exception as reconnect_exc:
                             if original_password and original_password != generated_password:
@@ -1852,27 +1808,15 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                                     output_lines,
                                     [original_password],
                                     timeout_seconds=180,
-                                    require_ready=False,
                                 )
                                 mutable_server["ssh_password"] = old_pwd_connected
                                 update_server_password(mutable_server["id"], old_pwd_connected)
                                 raise RuntimeError("DD重置疑似失败：旧密码仍可登录（old password still valid）") from reconnect_exc
                             raise
                     elif force_reinstall:
-                        client, connected_pwd = wait_for_ssh_reconnect(
-                            mutable_server,
-                            output_lines,
-                            [],
-                            timeout_seconds=300,
-                            require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
-                        )
+                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [], timeout_seconds=300)
                     else:
-                        client, connected_pwd = wait_for_ssh_reconnect(
-                            mutable_server,
-                            output_lines,
-                            [original_password],
-                            require_ready=bool(ssh_command_2 or ssh_command_3 or force_reinstall),
-                        )
+                        client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [original_password])
 
                     if connected_pwd and connected_pwd != mutable_server["ssh_password"]:
                         mutable_server["ssh_password"] = connected_pwd
@@ -2075,22 +2019,18 @@ def task_worker_loop():
                 f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中（第{attempt_no}/{max_attempts}次尝试）",
             )
             dd_choice = parse_bin_reinstall_choice(task["trigger_type"])
-            api_choice = parse_api_reset_choice(task["trigger_type"])
             dd_password = None
             dd_command = None
             if dd_choice:
                 dd_password = generate_root_password()
                 dd_command = build_bin_reinstall_command(dd_choice, dd_password)
-            elif api_choice:
-                dd_password = generate_root_password()
-                dd_command = build_api_reset_command(api_choice, dd_password)
             run_remote(
                 row,
                 task["log_id"],
                 notify_on_failure=(attempt_no >= max_attempts and not task["batch_key"]),
                 notify_on_success=(not task["batch_key"]),
                 reset_command_override=dd_command,
-                force_reinstall=bool(dd_choice or api_choice),
+                force_reinstall=bool(dd_choice),
                 preset_password=dd_password,
             )
 
@@ -2275,7 +2215,6 @@ def details_page():
         item["traffic_upload_text"] = format_bytes(upload)
         item["traffic_download_text"] = format_bytes(download)
         item["traffic_total_text"] = format_bytes(upload + download)
-        item["api_images"] = parse_api_images_json(item.get("api_images_json"))
         normalized_rows.append(item)
 
     rented_rows = [r for r in normalized_rows if r["is_rented"]]
@@ -2661,8 +2600,8 @@ def add_server():
 
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -2719,7 +2658,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, sort_order=?, max_retries=?, retry_backoff_seconds=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
             WHERE id=?
             """,
             (
@@ -2814,37 +2753,6 @@ def toggle_rent(server_id):
         conn.execute("UPDATE servers SET is_rented = ? WHERE id = ?", (next_state, server_id))
         conn.commit()
     flash("已标记为已出租" if next_state else "已标记为未出租", "success")
-    return redirect(url_for("details_page"))
-
-
-@app.post("/servers/refresh-api-images")
-@login_required
-def refresh_api_images():
-    rows = list_servers()
-    updated = 0
-    with closing(get_conn()) as conn:
-        for row in rows:
-            images = fetch_api_available_images_for_server(row)
-            conn.execute(
-                "UPDATE servers SET api_images_json = ? WHERE id = ?",
-                (json.dumps(images, ensure_ascii=False), row["id"]),
-            )
-            updated += 1
-        conn.commit()
-    flash(f"已依次更新 {updated} 台服务器的API可用镜像", "ok")
-    return redirect(url_for("details_page"))
-
-
-@app.route("/servers/<int:server_id>/run-api-reset", methods=["POST"])
-@login_required
-def run_api_reset(server_id):
-    choice = (request.form.get("api_reinstall_choice") or "").strip().lower()
-    if choice not in BIN_REINSTALL_CHOICES:
-        flash("镜像参数无效", "bad")
-        return redirect(url_for("details_page"))
-
-    ok, msg, _ = run_for_server(server_id, trigger_type=f"apireset:{choice}")
-    flash(msg, "ok" if ok else "bad")
     return redirect(url_for("details_page"))
 
 
