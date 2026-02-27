@@ -39,6 +39,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 DB_PATH = os.environ.get("VPS_PANEL_DB", "panel.db")
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "5000"))
+PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").strip()
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECONDS", "1800"))
@@ -57,6 +58,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|\([A-Za-z0-9])")
 TASK_QUEUE = Queue()
+API_IMAGE_REFRESH_LOCK = threading.Lock()
 
 
 def get_conn():
@@ -98,7 +100,9 @@ def init_db():
                 last_agent_report_at TEXT,
                 last_reset_at TEXT,
                 ssh_status TEXT NOT NULL DEFAULT 'unknown',
-                ssh_checked_at TEXT
+                ssh_checked_at TEXT,
+                scp_image_catalog TEXT NOT NULL DEFAULT '',
+                scp_selected_image TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -197,6 +201,22 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_image_refresh_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL DEFAULT 'running',
+                total_count INTEGER NOT NULL DEFAULT 0,
+                processed_count INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                output TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            )
+            """
+        )
 
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
@@ -212,6 +232,8 @@ def init_db():
         ensure_column(conn, "servers", "last_agent_report_at TEXT")
         ensure_column(conn, "servers", "ssh_status TEXT NOT NULL DEFAULT 'unknown'")
         ensure_column(conn, "servers", "ssh_checked_at TEXT")
+        ensure_column(conn, "servers", "scp_image_catalog TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "scp_selected_image TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "reset_hour INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "servers", "reset_minute INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "max_retries INTEGER NOT NULL DEFAULT 2")
@@ -244,6 +266,95 @@ def init_db():
             )
         conn.commit()
 
+
+
+def create_api_image_refresh_job(total_count):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO api_image_refresh_jobs(status, total_count, processed_count, success_count, failed_count, output, created_at, started_at)
+            VALUES('running', ?, 0, 0, 0, '', ?, ?)
+            """,
+            (max(0, int(total_count or 0)), now_text, now_text),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def append_api_image_refresh_job_output(job_id, message, processed_count=None, success_count=None, failed_count=None, status=None, finished=False):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT output, processed_count, success_count, failed_count, status FROM api_image_refresh_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            return
+        output = (row["output"] or "").strip()
+        output = (output + "\n" + message).strip() if output else message
+        proc = int(processed_count if processed_count is not None else (row["processed_count"] or 0))
+        succ = int(success_count if success_count is not None else (row["success_count"] or 0))
+        fail = int(failed_count if failed_count is not None else (row["failed_count"] or 0))
+        st = (status or row["status"] or "running").strip()
+        finished_at = now_text if finished else None
+        conn.execute(
+            """
+            UPDATE api_image_refresh_jobs
+            SET output = ?, processed_count = ?, success_count = ?, failed_count = ?, status = ?, finished_at = ?
+            WHERE id = ?
+            """,
+            (output, proc, succ, fail, st, finished_at, job_id),
+        )
+        conn.commit()
+
+
+def get_latest_api_image_refresh_job():
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM api_image_refresh_jobs ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def run_api_image_refresh_job(job_id):
+    rows = list_servers()
+    total = len(rows)
+    processed = 0
+    success = 0
+    failed = 0
+    append_api_image_refresh_job_output(job_id, f"开始刷新服务器API可用镜像，总计 {total} 台", processed_count=0, success_count=0, failed_count=0, status='running')
+
+    for row in rows:
+        try:
+            refresh_server_api_images(row)
+            success += 1
+            append_api_image_refresh_job_output(job_id, f"[{row['name']}] 镜像刷新成功", processed_count=processed + 1, success_count=success, failed_count=failed, status='running')
+        except Exception as exc:
+            failed += 1
+            append_api_image_refresh_job_output(job_id, f"[{row['name']}] 镜像刷新失败: {exc}", processed_count=processed + 1, success_count=success, failed_count=failed, status='running')
+        processed += 1
+
+    final_status = 'success' if failed == 0 else 'failed'
+    append_api_image_refresh_job_output(
+        job_id,
+        f"刷新完成：成功 {success} 台，失败 {failed} 台",
+        processed_count=processed,
+        success_count=success,
+        failed_count=failed,
+        status=final_status,
+        finished=True,
+    )
+
+
+def start_api_image_refresh_background_job():
+    if API_IMAGE_REFRESH_LOCK.locked():
+        return None
+    rows = list_servers()
+    job_id = create_api_image_refresh_job(len(rows))
+
+    def _runner():
+        with API_IMAGE_REFRESH_LOCK:
+            run_api_image_refresh_job(job_id)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    return job_id
+
 def list_servers():
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
@@ -265,6 +376,59 @@ def get_scp_account(account_id):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
 
+
+def bind_scp_server(server_id, account_id, scp_server_id):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE servers SET scp_account_id = ?, scp_server_id = ? WHERE id = ?",
+            (account_id, str(scp_server_id or "").strip(), server_id),
+        )
+        conn.commit()
+
+
+
+
+def save_server_scp_images(server_id, images, selected_key=""):
+    payload = json.dumps(images or [], ensure_ascii=False)
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE servers SET scp_image_catalog = ?, scp_selected_image = ? WHERE id = ?",
+            (payload, str(selected_key or "").strip(), server_id),
+        )
+        conn.commit()
+
+
+def load_server_scp_images(server_row):
+    text = (server_row.get("scp_image_catalog") or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def make_scp_image_option_key(option):
+    flavour = str(option.get("imageFlavourId") or "").strip()
+    image = str(option.get("imageId") or "").strip()
+    if flavour:
+        return f"flavour:{flavour}"
+    if image:
+        return f"image:{image}"
+    return ""
+
+
+def pick_scp_image_option_by_key(options, key):
+    key_text = str(key or "").strip()
+    if not key_text:
+        return None
+    for item in options or []:
+        if make_scp_image_option_key(item) == key_text:
+            return item
+    return None
 
 def _scp_endpoint_candidates(api_endpoint):
     raw = (api_endpoint or "").strip()
@@ -480,6 +644,75 @@ def _scp_rest_fetch_server_ips(account, endpoint_base, token, server_id):
     return []
 
 
+
+
+def _scp_rest_list_server_images(account, endpoint_base, token, server_id):
+    paths = (f"servers/{server_id}/imageflavours", f"servers/{server_id}/images", "imageflavours")
+    options = []
+    seen = set()
+
+    def _pick_first(*values):
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    for path in paths:
+        try:
+            data = scp_rest_request(account, "GET", path, token=token, endpoint_base=endpoint_base)
+        except Exception:
+            continue
+
+        candidates = []
+        if isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict):
+            for key in ("items", "data", "result", "imageflavours", "images"):
+                nested = data.get(key)
+                if isinstance(nested, list):
+                    candidates.extend(nested)
+            if not candidates and any(k in data for k in ("id", "imageId", "imageFlavourId", "flavourId", "name", "displayName", "text")):
+                candidates = [data]
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            image_meta = item.get("image") if isinstance(item.get("image"), dict) else {}
+            flavour_id = _pick_first(item.get("id"), item.get("imageFlavourId"), item.get("flavourId"))
+            image_id = _pick_first(item.get("imageId"), image_meta.get("id"), item.get("key"))
+            image_name = _pick_first(
+                image_meta.get("name"),
+                item.get("name"),
+                item.get("displayName"),
+                item.get("text"),
+                item.get("label"),
+                item.get("slug"),
+            )
+            distribution = _pick_first(image_meta.get("distribution"), item.get("distribution"))
+            version = _pick_first(image_meta.get("version"), item.get("version"))
+            if not flavour_id and not image_id:
+                continue
+
+            option = {
+                "imageFlavourId": flavour_id,
+                "imageId": image_id,
+                "name": image_name or "未命名镜像",
+                "distribution": distribution,
+                "version": version,
+            }
+            key = make_scp_image_option_key(option)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            options.append(option)
+
+    options.sort(key=lambda x: (str(x.get("distribution") or "").lower(), str(x.get("version") or "").lower(), str(x.get("name") or "").lower()))
+    return options
+
+
 def _scp_rest_find_debian11_image(account, endpoint_base, token, server_id):
     paths = (f"servers/{server_id}/imageflavours", f"servers/{server_id}/images", "imageflavours")
     best = None
@@ -661,8 +894,41 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
 # 旧版 SOAP/JSON 接口已移除：仅保留 OIDC Refresh Token + REST OpenAPI 流程。
 
 
+def refresh_server_api_images(server_row, output_lines=None):
+    mutable_server = dict(server_row)
+    account = get_scp_account(mutable_server.get("scp_account_id"))
+    scp_server_id = (mutable_server.get("scp_server_id") or "").strip()
 
-def scp_reinstall_debian11(server_row, output_lines):
+    if not scp_server_id:
+        account_scope = [account] if account else None
+        account, scp_server_id = find_scp_server_id_by_ip(mutable_server.get("ip"), output_lines, account_candidates=account_scope)
+        if not account or not scp_server_id:
+            if account_scope:
+                raise RuntimeError(f"未能在指定SCP账号[{account_scope[0]['name']}]中按IP匹配到目标服务器")
+            raise RuntimeError("未能在已配置SCP账号中按IP匹配到目标服务器")
+        bind_scp_server(mutable_server["id"], account["id"], scp_server_id)
+        mutable_server["scp_server_id"] = scp_server_id
+        mutable_server["scp_account_id"] = account["id"]
+        if output_lines is not None:
+            output_lines.append(f"已按IP自动匹配SCP服务器并绑定: 账号[{account['name']}] server_id={scp_server_id}")
+    elif not account:
+        raise RuntimeError("已填写SCP服务器ID，但未绑定SCP账号，请在服务器设置中选择SCP账号")
+
+    endpoint_base, token = scp_rest_login(account)
+    options = _scp_rest_list_server_images(account, endpoint_base, token, scp_server_id)
+    selected_key = ""
+    if options:
+        selected = pick_scp_image_option_by_key(options, mutable_server.get("scp_selected_image"))
+        if not selected:
+            selected = options[0]
+        selected_key = make_scp_image_option_key(selected)
+    save_server_scp_images(mutable_server["id"], options, selected_key=selected_key)
+    if output_lines is not None:
+        output_lines.append(f"镜像刷新完成: {mutable_server['name']} 可用镜像 {len(options)} 个")
+    return options
+
+
+def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
     account = get_scp_account(server_row.get("scp_account_id"))
     scp_server_id = (server_row.get("scp_server_id") or "").strip()
 
@@ -683,23 +949,37 @@ def scp_reinstall_debian11(server_row, output_lines):
     try:
         endpoint_base, token = scp_rest_login(account)
         output_lines.append(f"SCP REST鉴权成功，endpoint={endpoint_base}")
-        image_pick = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
-        flavour_id = (image_pick.get("flavour_id") or "").strip()
-        image_id = (image_pick.get("image_id") or "").strip()
-        if flavour_id or image_id:
-            output_lines.append(
-                "SCP REST检测到 Debian11镜像候选: "
-                f"flavour_id={flavour_id or '-'}, image_id={image_id or '-'}, name={image_pick.get('image_name') or '-'}"
-            )
-        else:
-            output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
         payload_variants = []
-        if flavour_id:
-            payload_variants.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
-        if image_id:
-            payload_variants.append({"imageId": int(image_id) if str(image_id).isdigit() else image_id})
+        preferred = preferred_image if isinstance(preferred_image, dict) else {}
+        preferred_flavour = str(preferred.get("imageFlavourId") or "").strip()
+        preferred_image_id = str(preferred.get("imageId") or "").strip()
+        preferred_name = str(preferred.get("name") or "").strip()
+        if preferred_flavour or preferred_image_id:
+            output_lines.append(
+                "SCP REST使用手动选择镜像: "
+                f"name={preferred_name or '-'}, flavour_id={preferred_flavour or '-'}, image_id={preferred_image_id or '-'}"
+            )
+            if preferred_flavour:
+                payload_variants.append({"imageFlavourId": int(preferred_flavour) if preferred_flavour.isdigit() else preferred_flavour})
+            if preferred_image_id:
+                payload_variants.append({"imageId": int(preferred_image_id) if preferred_image_id.isdigit() else preferred_image_id})
+        else:
+            image_pick = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
+            flavour_id = (image_pick.get("flavour_id") or "").strip()
+            image_id = (image_pick.get("image_id") or "").strip()
+            if flavour_id or image_id:
+                output_lines.append(
+                    "SCP REST检测到 Debian11镜像候选: "
+                    f"flavour_id={flavour_id or '-'}, image_id={image_id or '-'}, name={image_pick.get('image_name') or '-'}"
+                )
+            else:
+                output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
+            if flavour_id:
+                payload_variants.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
+            if image_id:
+                payload_variants.append({"imageId": int(image_id) if str(image_id).isdigit() else image_id})
         if not payload_variants:
-            raise RuntimeError("未找到 Debian11 可用 imageFlavourId，无法按SCP文档接口执行重装")
+            raise RuntimeError("未找到可用镜像ID，无法按SCP文档接口执行重装")
 
         output_lines.append("SCP REST将按文档接口执行: POST /servers/{serverId}/image + imageFlavourId/imageId")
         for path in (f"servers/{scp_server_id}/image",):
@@ -831,7 +1111,7 @@ def list_detail_rows():
             SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_agent_report_at,
-                   s.ssh_status, s.ssh_checked_at,
+                   s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
                    l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
@@ -1115,19 +1395,34 @@ def format_bytes(num):
         value /= 1024
 
 
+def _request_public_base_url(request_obj):
+    forwarded_host = (request_obj.headers.get("X-Forwarded-Host") or "").strip()
+    forwarded_proto = (request_obj.headers.get("X-Forwarded-Proto") or "").strip()
+    host = forwarded_host.split(",", 1)[0].strip() or (request_obj.host or "").strip()
+    scheme = forwarded_proto.split(",", 1)[0].strip() or (request_obj.scheme or "http")
+    if host:
+        return f"{scheme}://{host}".rstrip("/")
+    return ""
+
+
 def resolve_panel_base_url(global_cfg, request_obj=None):
     configured = (global_cfg["panel_base_url"] or "").strip()
     if configured:
         return configured.rstrip("/")
+    if PANEL_BASE_URL:
+        return PANEL_BASE_URL.rstrip("/")
     if request_obj:
-        return request_obj.url_root.rstrip("/")
+        from_request = _request_public_base_url(request_obj)
+        if from_request:
+            return from_request
     return f"http://127.0.0.1:{PANEL_PORT}"
 
 
 def detect_panel_public_base_url(request_obj=None):
-    if request_obj and request_obj.host:
-        scheme = request_obj.scheme or "http"
-        return f"{scheme}://{request_obj.host}".rstrip("/")
+    if request_obj:
+        from_request = _request_public_base_url(request_obj)
+        if from_request:
+            return from_request
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
@@ -1213,6 +1508,19 @@ def parse_bin_reinstall_choice(trigger_type):
         return choice
     return None
 
+
+
+
+def is_api_reinstall_trigger(trigger_type):
+    return str(trigger_type or "").strip().lower() == "apireinstall"
+
+
+def get_selected_scp_image(server_row):
+    options = load_server_scp_images(server_row)
+    selected = pick_scp_image_option_by_key(options, server_row.get("scp_selected_image"))
+    if selected:
+        return selected
+    return options[0] if options else None
 
 def build_bin_reinstall_command(choice, root_password):
     distro, version = BIN_REINSTALL_CHOICES[choice]
@@ -1691,7 +1999,7 @@ class LiveLogBuffer(list):
             self.last_flush_at = now
 
 
-def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True, reset_command_override=None, force_reinstall=False, preset_password=None):
+def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True, reset_command_override=None, force_reinstall=False, preset_password=None, force_api_reinstall=False, selected_api_image=None):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = LiveLogBuffer(running_log_id, flush_interval_seconds=10)
     output_lines.append(f"开始执行重置任务 {title}")
@@ -1706,6 +2014,8 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         if reinstall_mode not in ("ssh", "scp_api"):
             output_lines.append(f"检测到未知重置模式[{reinstall_mode}]，已自动回退为 ssh")
             reinstall_mode = "ssh"
+        if force_api_reinstall:
+            reinstall_mode = "scp_api"
 
         reset_command = normalize_shell_command((global_cfg["reset_command"] or "").strip())
         ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
@@ -1751,7 +2061,9 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         if reinstall_mode == "scp_api":
             reinstall_triggered = True
             output_lines.append("本服务器已启用 SCP API 重置模式，准备调用SCP重装 Debian11")
-            scp_reinstall_debian11(mutable_server, output_lines)
+            if force_api_reinstall and selected_api_image:
+                output_lines.append(f"一键API重置已指定镜像: {selected_api_image.get('name') or '-'}")
+            scp_reinstall_debian11(mutable_server, output_lines, preferred_image=selected_api_image)
             output_lines.append("SCP重装命令已提交，等待后续重连")
             time.sleep(POST_REINSTALL_WAIT_SECONDS)
             client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [mutable_server["ssh_password"]], timeout_seconds=SSH_RECONNECT_TIMEOUT_SECONDS)
@@ -2019,11 +2331,15 @@ def task_worker_loop():
                 f"开始执行重置任务 [{row['name']} - {row['ip']}]\n\n状态: 执行中（第{attempt_no}/{max_attempts}次尝试）",
             )
             dd_choice = parse_bin_reinstall_choice(task["trigger_type"])
+            api_reinstall = is_api_reinstall_trigger(task["trigger_type"])
             dd_password = None
             dd_command = None
+            selected_api_image = None
             if dd_choice:
                 dd_password = generate_root_password()
                 dd_command = build_bin_reinstall_command(dd_choice, dd_password)
+            if api_reinstall:
+                selected_api_image = get_selected_scp_image(row)
             run_remote(
                 row,
                 task["log_id"],
@@ -2032,6 +2348,8 @@ def task_worker_loop():
                 reset_command_override=dd_command,
                 force_reinstall=bool(dd_choice),
                 preset_password=dd_password,
+                force_api_reinstall=api_reinstall,
+                selected_api_image=selected_api_image,
             )
 
             with closing(get_conn()) as conn:
@@ -2215,6 +2533,16 @@ def details_page():
         item["traffic_upload_text"] = format_bytes(upload)
         item["traffic_download_text"] = format_bytes(download)
         item["traffic_total_text"] = format_bytes(upload + download)
+        image_options = load_server_scp_images(item)
+        for opt in image_options:
+            distro = str(opt.get("distribution") or "").strip()
+            version = str(opt.get("version") or "").strip()
+            name = str(opt.get("name") or "未命名镜像").strip()
+            tags = " ".join(x for x in (distro, version) if x).strip()
+            opt["key"] = make_scp_image_option_key(opt)
+            opt["label"] = f"{name} ({tags})" if tags else name
+        item["api_image_options"] = image_options
+        item["scp_selected_image"] = (item.get("scp_selected_image") or "").strip()
         normalized_rows.append(item)
 
     rented_rows = [r for r in normalized_rows if r["is_rented"]]
@@ -2236,6 +2564,7 @@ def details_page():
         success=success,
         failed=failed,
         never=never,
+        latest_api_image_refresh_job=get_latest_api_image_refresh_job(),
     )
 
 
@@ -2755,6 +3084,47 @@ def toggle_rent(server_id):
     flash("已标记为已出租" if next_state else "已标记为未出租", "success")
     return redirect(url_for("details_page"))
 
+
+
+
+@app.route("/servers/refresh-api-images", methods=["POST"])
+@login_required
+def refresh_api_images_all_servers():
+    rows = list_servers()
+    if not rows:
+        flash("暂无服务器，无需刷新", "error")
+        return redirect(url_for("details_page"))
+
+    job_id = start_api_image_refresh_background_job()
+    if not job_id:
+        flash("已有镜像刷新任务在后台执行，请稍后刷新页面查看进度", "error")
+    else:
+        flash(f"镜像刷新任务已在后台启动（任务ID: {job_id}），页面刷新/关闭不会中断", "success")
+    return redirect(url_for("details_page"))
+
+
+@app.route("/servers/<int:server_id>/run-api-reinstall", methods=["POST"])
+@login_required
+def run_api_reinstall(server_id):
+    row = get_server(server_id)
+    if not row:
+        flash("服务器不存在", "error")
+        return redirect(url_for("details_page"))
+
+    selected_key = (request.form.get("api_image_key") or "").strip()
+    options = load_server_scp_images(dict(row))
+    selected = pick_scp_image_option_by_key(options, selected_key)
+    if not selected:
+        flash("请先更新镜像列表并选择有效镜像", "error")
+        return redirect(url_for("details_page"))
+
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET scp_selected_image = ? WHERE id = ?", (selected_key, server_id))
+        conn.commit()
+
+    ok, msg, _ = run_for_server(server_id, trigger_type="apireinstall")
+    flash(msg if ok else f"提交失败: {msg}", "success" if ok else "error")
+    return redirect(url_for("details_page"))
 
 @app.route("/servers/<int:server_id>/run-bin-reinstall", methods=["POST"])
 @login_required
