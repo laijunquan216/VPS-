@@ -75,6 +75,14 @@
       </select>
       <button type="submit" class="warn">一键DD重置</button>
     </form>
+    <form method="post" action="/servers/{{ row.id }}/run-api-reset" class="dd-form">
+      <select name="api_reinstall_choice">
+        {% for img in row.api_images %}
+        <option value="{{ img.value }}">{{ img.label }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="warn">一键API重置</button>
+    </form>
     <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
   </div>
 
@@ -92,7 +100,12 @@
 </section>
 
 <section class="panel">
-  <h2>服务器详情</h2>
+  <div class="panel-head-inline">
+    <h2>服务器详情</h2>
+    <form method="post" action="/servers/refresh-api-images">
+      <button type="submit">更新服务器api可用镜像</button>
+    </form>
+  </div>
   <div class="server-columns">
     <div class="server-column">
       <h3>未出租（{{ unrented_count }}）</h3>
