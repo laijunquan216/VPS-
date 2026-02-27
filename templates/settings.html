@@ -4,35 +4,60 @@
 {% block content %}
 <section class="panel">
   <h2>服务器设置：全局任务（所有服务器共用）</h2>
-  <form method="post" action="/global-tasks" class="grid-form">
-    <label class="full">重置任务代码（单独配置）
-      <textarea name="reset_command" rows="4" placeholder="例如 InstallNET.sh ...">{{ global_cfg.reset_command }}</textarea>
-    </label>
-    <label class="full">SSH任务2（安装PT环境）
-      <textarea name="ssh_command_2" rows="4">{{ global_cfg.ssh_command_2 }}</textarea>
-    </label>
-    <label class="full">SSH任务3（例如 reboot）
-      <textarea name="ssh_command_3" rows="3">{{ global_cfg.ssh_command_3 }}</textarea>
-    </label>
-    <label>面板公网地址（Agent上报地址）
-      <input name="panel_base_url" placeholder="例如 http://1.2.3.4:5000" value="{{ global_cfg.panel_base_url }}" />
-    </label>
-    <label class="full">重装后 Agent 安装命令（可选）
-      <textarea name="agent_install_command" rows="3" placeholder="例如 curl -fsSL https://example.com/install-agent.sh | bash -s -- --id xxx --key yyy">{{ global_cfg.agent_install_command }}</textarea>
-      <p class="hint">重装后会先自动安装内置上报 Agent（上传到本面板），这里可选填额外命令。支持变量：{ip}、{name}、{ssh_user}</p>
-    </label>
-    <label class="full">流量统计来源（二选一）</label>
-    <label class="inline"><input type="radio" name="traffic_data_source" value="agent" {% if (global_cfg.traffic_data_source or 'agent') == 'agent' %}checked{% endif %}/> Agent 上报</label>
-    <label class="inline"><input type="radio" name="traffic_data_source" value="ssh" {% if (global_cfg.traffic_data_source or 'agent') == 'ssh' %}checked{% endif %}/> SSH 定时采集（每 5 分钟）</label>
-    <label>SSH连通性检测间隔（分钟，0为关闭）<input name="ssh_check_interval_minutes" type="number" min="0" max="1440" value="{{ global_cfg.ssh_check_interval_minutes or 120 }}" /></label>
-    <label class="full">邮件通知（服务器重置成功/失败）</label>
-    <label class="inline"><input name="notify_email_enabled" type="checkbox" {% if global_cfg.notify_email_enabled %}checked{% endif %}/> 启用邮件通知</label>
-    <label>SMTP Host<input name="smtp_host" placeholder="smtp.example.com" value="{{ global_cfg.smtp_host }}" /></label>
-    <label>SMTP Port<input name="smtp_port" type="number" value="{{ global_cfg.smtp_port or 587 }}" /></label>
-    <label>SMTP User<input name="smtp_user" value="{{ global_cfg.smtp_user }}" /></label>
-    <label>SMTP Password<input type="password" name="smtp_password" value="{{ global_cfg.smtp_password }}" /></label>
-    <label>发件人邮箱<input name="smtp_from" placeholder="panel@example.com" value="{{ global_cfg.smtp_from }}" /></label>
-    <label>收件人邮箱<input name="notify_email_to" placeholder="you@example.com" value="{{ global_cfg.notify_email_to }}" /></label>
+  <form method="post" action="/global-tasks" class="settings-form-stack">
+    <section class="settings-block">
+      <h3>重置任务设置</h3>
+      <div class="grid-form">
+        <label class="full">重置任务代码（单独配置）
+          <textarea name="reset_command" rows="4" placeholder="例如 InstallNET.sh ...">{{ global_cfg.reset_command }}</textarea>
+        </label>
+        <label class="full">SSH任务2（安装PT环境）
+          <textarea name="ssh_command_2" rows="4">{{ global_cfg.ssh_command_2 }}</textarea>
+        </label>
+        <label class="full">SSH任务3（例如 reboot）
+          <textarea name="ssh_command_3" rows="3">{{ global_cfg.ssh_command_3 }}</textarea>
+        </label>
+      </div>
+    </section>
+
+    <section class="settings-block">
+      <h3>Agent设置</h3>
+      <div class="grid-form">
+        <label>面板公网地址（Agent上报地址）
+          <input name="panel_base_url" placeholder="例如 http://1.2.3.4:5000" value="{{ global_cfg.panel_base_url or panel_base_url_default }}" />
+        </label>
+        <label class="full">重装后 Agent 安装命令（可选）
+          <textarea name="agent_install_command" rows="3" placeholder="例如 curl -fsSL https://example.com/install-agent.sh | bash -s -- --id xxx --key yyy">{{ global_cfg.agent_install_command }}</textarea>
+          <p class="hint">重装后会先自动安装内置上报 Agent（上传到本面板），这里可选填额外命令。支持变量：{ip}、{name}、{ssh_user}</p>
+        </label>
+      </div>
+    </section>
+
+    <section class="settings-block">
+      <h3>流量统计设置</h3>
+      <div class="grid-form traffic-grid">
+        <div class="traffic-source-box">
+          <label class="full">流量统计来源（二选一）</label>
+          <label class="inline"><input type="radio" name="traffic_data_source" value="agent" {% if (global_cfg.traffic_data_source or 'agent') == 'agent' %}checked{% endif %}/> Agent 上报</label>
+          <label class="inline"><input type="radio" name="traffic_data_source" value="ssh" {% if (global_cfg.traffic_data_source or 'agent') == 'ssh' %}checked{% endif %}/> SSH 定时采集（每 5 分钟）</label>
+        </div>
+        <label>SSH连通性检测间隔（分钟，0为关闭）<input name="ssh_check_interval_minutes" type="number" min="0" max="1440" value="{{ global_cfg.ssh_check_interval_minutes or 120 }}" /></label>
+      </div>
+    </section>
+
+    <section class="settings-block">
+      <h3>邮件设置</h3>
+      <div class="grid-form">
+        <label class="full">邮件通知（服务器重置成功/失败）</label>
+        <label class="inline"><input name="notify_email_enabled" type="checkbox" {% if global_cfg.notify_email_enabled %}checked{% endif %}/> 启用邮件通知</label>
+        <label>SMTP Host<input name="smtp_host" placeholder="smtp.example.com" value="{{ global_cfg.smtp_host }}" /></label>
+        <label>SMTP Port<input name="smtp_port" type="number" value="{{ global_cfg.smtp_port or 587 }}" /></label>
+        <label>SMTP User<input name="smtp_user" value="{{ global_cfg.smtp_user }}" /></label>
+        <label>SMTP Password<input type="password" name="smtp_password" value="{{ global_cfg.smtp_password }}" /></label>
+        <label>发件人邮箱<input name="smtp_from" placeholder="panel@example.com" value="{{ global_cfg.smtp_from }}" /></label>
+        <label>收件人邮箱<input name="notify_email_to" placeholder="you@example.com" value="{{ global_cfg.notify_email_to }}" /></label>
+      </div>
+    </section>
 
     <div class="button-row">
       <button type="submit">保存全局任务</button>
@@ -42,6 +67,42 @@
     <button type="submit">邮箱测试</button>
   </form>
 </section>
+
+<section class="panel">
+  <h2>SCP 账号管理（可配置多个）</h2>
+  <form method="post" action="/scp-accounts" class="grid-form">
+    <label>账号别名<input name="name" placeholder="例如 netcup-A" required /></label>
+    <label>SCP账号<input name="username" required /></label>
+    <label class="full">OIDC Refresh Token（必填）<input name="refresh_token" placeholder="离线refresh_token，用于换取Bearer access_token" required /></label>
+    <label class="full">API Endpoint<input name="api_endpoint" value="https://www.servercontrolpanel.de/scp-core/api/v1" /></label>
+    <button type="submit">添加SCP账号</button>
+  </form>
+  {% if scp_accounts %}
+  <ul>
+    {% for a in scp_accounts %}
+      <li>
+        #{{ loop.index }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }} [OIDC]
+        <details style="display:inline-block;margin-left:8px;vertical-align:middle;">
+          <summary style="cursor:pointer;display:inline;color:#2563eb;">编辑</summary>
+          <form method="post" action="/scp-accounts/{{ a.id }}/update" class="grid-form" style="margin-top:8px;">
+            <label>账号别名<input name="name" value="{{ a.name }}" required /></label>
+            <label>SCP账号<input name="username" value="{{ a.username }}" required /></label>
+            <label class="full">OIDC Refresh Token<input name="refresh_token" value="{{ a.refresh_token }}" required /></label>
+            <label class="full">API Endpoint<input name="api_endpoint" value="{{ a.api_endpoint }}" required /></label>
+            <button type="submit">保存</button>
+          </form>
+        </details>
+        <form method="post" action="/scp-accounts/{{ a.id }}/delete" style="display:inline" onsubmit="return confirm('确认删除该SCP账号?')">
+          <button class="danger" type="submit">删除</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>暂无SCP账号。</p>
+  {% endif %}
+</section>
+
 
 <section class="panel">
   <h2>服务器设置：新增服务器</h2>
@@ -58,6 +119,10 @@
     <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="0" required /></label>
     <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="2" required /></label>
     <label>重试退避秒数<input name="retry_backoff_seconds" value="60,180" placeholder="例如 60,180" /></label>
+    <label>重置方式<select name="reinstall_mode"><option value="ssh" selected>SSH脚本</option><option value="scp_api">SCP REST API (Debian11)</option></select></label>
+    <label>SCP账号<select name="scp_account_id"><option value="">自动识别</option>{% for a in scp_accounts %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}</select></label>
+    <label>SCP服务器ID（可选）<input name="scp_server_id" placeholder="留空按IP识别" /></label>
+    <p class="hint">未指定SCP账号时，会自动遍历所有SCP账号按服务器IP识别并绑定。</p>
     <label class="inline"><input name="auto_reset" type="checkbox" checked /> 到期自动重置</label>
     <button type="submit">添加服务器</button>
   </form>
@@ -67,7 +132,7 @@
   <h2>服务器配置列表</h2>
   {% for s in servers %}
   <details>
-    <summary>#{{ s.id }} {{ s.name }} ({{ s.ip }}) | 排序序号: {{ s.sort_order }} | 每月{{ s.reset_day }}日 {{ "%02d"|format(s.reset_hour or 1) }}:{{ "%02d"|format(s.reset_minute or 0) }} | 重试: {{ s.max_retries }}次 / 退避 {{ s.retry_backoff_seconds }} | 自动重置开关: {{ '开' if s.auto_reset else '关' }} | 续租状态: {{ '续租中（跳过定时重置）' if s.is_renewed else '未续租' }}</summary>
+    <summary>{{ s.sort_order }} {{ s.name }} ({{ s.ip }}) | 每月{{ s.reset_day }}日 {{ "%02d"|format(s.reset_hour or 1) }}:{{ "%02d"|format(s.reset_minute or 0) }} | 重试: {{ s.max_retries }}次 / 退避 {{ s.retry_backoff_seconds }} | 自动重置开关: {{ '开' if s.auto_reset else '关' }} | 续租状态: {{ '续租中（跳过定时重置）' if s.is_renewed else '未续租' }}</summary>
     <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
       <label>名称<input name="name" value="{{ s.name }}" required /></label>
       <label>租赁人<input name="renter_name" value="{{ s.renter_name }}" placeholder="例如 咸鱼：DABA" /></label>
@@ -81,6 +146,10 @@
       <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="{{ s.reset_minute or 0 }}" required /></label>
       <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="{{ s.max_retries or 2 }}" required /></label>
       <label>重试退避秒数<input name="retry_backoff_seconds" value="{{ s.retry_backoff_seconds or "60,180" }}" /></label>
+      <label>重置方式<select name="reinstall_mode"><option value="ssh" {% if (s.reinstall_mode or "ssh") == "ssh" %}selected{% endif %}>SSH脚本</option><option value="scp_api" {% if s.reinstall_mode == "scp_api" %}selected{% endif %}>SCP REST API (Debian11)</option></select></label>
+      <label>SCP账号<select name="scp_account_id"><option value="">自动识别</option>{% for a in scp_accounts %}<option value="{{ a.id }}" {% if s.scp_account_id == a.id %}selected{% endif %}>{{ a.name }}</option>{% endfor %}</select></label>
+      <label>SCP服务器ID（可选）<input name="scp_server_id" value="{{ s.scp_server_id }}" placeholder="留空按IP识别" /></label>
+      <p class="hint">未指定SCP账号时，会自动遍历所有SCP账号按服务器IP识别并绑定。</p>
       <label class="inline"><input name="auto_reset" type="checkbox" {% if s.auto_reset %}checked{% endif %}/> 到期自动重置</label>
       <p class="hint">说明：当“服务器详情”里切到“续租中”时，即使这里是开启，也会跳过该服务器的定时重置。</p>
       <div class="button-row"><button type="submit">保存</button></div>
@@ -96,8 +165,9 @@
   {% endfor %}
 </section>
 
-<section class="panel">
+<section class="panel" id="logs-panel">
   <h2>完整任务日志（按服务器分类）</h2>
+  {% if has_running_logs %}<p class="hint">检测到有任务执行中，日志区域每10秒自动刷新。</p>{% endif %}
   {% for item in logs_grouped %}
   <details class="log-group">
     <summary>{{ item.server.name }} ({{ item.server.ip }}) - {{ item.logs|length }} 条日志</summary>
@@ -116,4 +186,9 @@
   <p>暂无服务器。</p>
   {% endfor %}
 </section>
+{% if has_running_logs %}
+<script>
+setTimeout(function(){ window.location.reload(); }, 10000);
+</script>
+{% endif %}
 {% endblock %}
