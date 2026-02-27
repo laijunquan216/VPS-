@@ -5,6 +5,7 @@
 nav{display:flex;gap:10px;flex-wrap:wrap}.nav-link{padding:10px 14px;border-radius:10px;text-decoration:none;color:#334155;background:#f1f5f9}.nav-link.active{background:var(--primary);color:#fff}
 .container{max-width:1400px;margin:24px auto;padding:0 16px}
 .stats-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px}
+.stats-grid-5{grid-template-columns:repeat(5,minmax(0,1fr))}
 .stat-card{background:var(--card);padding:20px;border-radius:14px;border:1px solid #e5e7eb}.stat-card h3{font-size:48px;margin:0}.stat-card p{margin:6px 0 0;color:var(--muted);font-weight:700}
 .stat-card.focus{border:2px solid var(--primary)}.stat-card.ok h3{color:var(--ok)}.stat-card.bad h3{color:var(--bad)}
 .panel{background:var(--card);border:1px solid #e5e7eb;border-radius:14px;padding:16px;margin-bottom:16px}
@@ -17,6 +18,7 @@ textarea{min-height:60px}button{background:var(--primary);color:#fff;border:none
 .button-row{display:flex;gap:10px;margin-top:10px}
 .inline-form{margin-top:10px}
 .warn{background:#f59e0b;color:#111827}
+.secondary{background:#64748b;color:#fff}
 .table{width:100%;border-collapse:collapse}.table th,.table td{padding:12px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
 .badge{padding:4px 10px;border-radius:999px;background:#eef2f7;color:#475569;font-weight:700}.badge.ok{background:#dcfce7;color:#166534}.badge.bad{background:#fee2e2;color:#991b1b}.badge.running{background:#dbeafe;color:#1d4ed8}.badge.queued{background:#fef3c7;color:#92400e}.badge.retrying{background:#ede9fe;color:#5b21b6}
 .badge.rent{border:1px solid transparent}.badge.rent-on{background:#fee2e2;color:#991b1b;border-color:#fecaca}.badge.rent-off{background:#dcfce7;color:#166534;border-color:#bbf7d0}
@@ -24,17 +26,31 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
 .flash-wrap{margin-bottom:10px}.flash{padding:10px;border-radius:8px}.flash.success{background:#dcfce7;color:#166534}
 .log-card{margin-bottom:10px}.log-card.failed h3{color:#991b1b}.log-card.success h3{color:#166534}
 
+.server-columns{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.server-column h3{margin:4px 0 10px}
 .server-list{display:grid;gap:14px}
 .server-card{border:1px solid #e5e7eb;border-radius:14px;padding:14px}
 .server-card.not-rented{background:#f0fdf4;border-color:#bbf7d0}
 .server-card.rented{background:#fff1f2;border-color:#fecdd3}
 .server-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:10px}
 .server-head h3{margin:0}
+.server-title-wrap{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.renter-badge{display:inline-block;padding:4px 10px;border-radius:8px;background:#e2e8f0;color:#334155;font-size:14px;font-weight:600;border:none;cursor:text}
 .server-badges{display:flex;gap:8px;flex-wrap:wrap}
+.ssh-check-form{display:inline-flex}
+.ssh-status{border:none;cursor:pointer}
+.ssh-status.ssh-online{background:#dcfce7;color:#166534}
+.ssh-status.ssh-offline{background:#fee2e2;color:#991b1b}
+.ssh-status.ssh-unknown{background:#e2e8f0;color:#475569}
 .server-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin-bottom:12px}
 .server-meta span{display:block;color:var(--muted);font-size:12px}
 .server-meta strong{font-size:15px;word-break:break-all}
 .server-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.dd-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dd-form select{min-width:140px}
+.renter-inline-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.renter-inline-form input{min-width:220px}
+.hidden{display:none !important}
 .rent-btn{font-weight:700}
 .rent-btn-on{background:#ef4444;color:#fff}
 .rent-btn-off{background:#16a34a;color:#fff}
@@ -70,7 +86,13 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
   .stat-card{padding:14px}
   .stat-card h3{font-size:34px}
   .server-meta{grid-template-columns:1fr}
+  .server-columns{grid-template-columns:1fr}
   .server-actions{display:grid;grid-template-columns:1fr 1fr}
   .server-actions form,.server-actions .copy-btn{width:100%}
+  .renter-inline-form input{min-width:0;width:100%}
   .server-actions button{width:100%}
 }
+
+
+.panel-head-inline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.panel-head-inline h2{margin:0}
