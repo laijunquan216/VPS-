@@ -110,6 +110,14 @@
       <button type="submit">更新服务器API可用镜像</button>
     </form>
   </div>
+  {% if latest_api_image_refresh_job %}
+  <p class="hint">
+    镜像刷新任务#{{ latest_api_image_refresh_job.id }} 状态：{{ latest_api_image_refresh_job.status }}，
+    进度：{{ latest_api_image_refresh_job.processed_count }}/{{ latest_api_image_refresh_job.total_count }}，
+    成功 {{ latest_api_image_refresh_job.success_count }} 台，失败 {{ latest_api_image_refresh_job.failed_count }} 台。
+    {% if latest_api_image_refresh_job.finished_at %}完成时间：{{ latest_api_image_refresh_job.finished_at }}{% endif %}
+  </p>
+  {% endif %}
   <div class="server-columns">
     <div class="server-column">
       <h3>未出租（{{ unrented_count }}）</h3>

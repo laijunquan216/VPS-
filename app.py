@@ -58,6 +58,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|\([A-Za-z0-9])")
 TASK_QUEUE = Queue()
+API_IMAGE_REFRESH_LOCK = threading.Lock()
 
 
 def get_conn():
@@ -200,6 +201,22 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_image_refresh_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL DEFAULT 'running',
+                total_count INTEGER NOT NULL DEFAULT 0,
+                processed_count INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                output TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            )
+            """
+        )
 
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
@@ -248,6 +265,95 @@ def init_db():
                 (generate_password_hash("admin"), datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
             )
         conn.commit()
+
+
+
+def create_api_image_refresh_job(total_count):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO api_image_refresh_jobs(status, total_count, processed_count, success_count, failed_count, output, created_at, started_at)
+            VALUES('running', ?, 0, 0, 0, '', ?, ?)
+            """,
+            (max(0, int(total_count or 0)), now_text, now_text),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def append_api_image_refresh_job_output(job_id, message, processed_count=None, success_count=None, failed_count=None, status=None, finished=False):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT output, processed_count, success_count, failed_count, status FROM api_image_refresh_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            return
+        output = (row["output"] or "").strip()
+        output = (output + "\n" + message).strip() if output else message
+        proc = int(processed_count if processed_count is not None else (row["processed_count"] or 0))
+        succ = int(success_count if success_count is not None else (row["success_count"] or 0))
+        fail = int(failed_count if failed_count is not None else (row["failed_count"] or 0))
+        st = (status or row["status"] or "running").strip()
+        finished_at = now_text if finished else None
+        conn.execute(
+            """
+            UPDATE api_image_refresh_jobs
+            SET output = ?, processed_count = ?, success_count = ?, failed_count = ?, status = ?, finished_at = ?
+            WHERE id = ?
+            """,
+            (output, proc, succ, fail, st, finished_at, job_id),
+        )
+        conn.commit()
+
+
+def get_latest_api_image_refresh_job():
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM api_image_refresh_jobs ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def run_api_image_refresh_job(job_id):
+    rows = list_servers()
+    total = len(rows)
+    processed = 0
+    success = 0
+    failed = 0
+    append_api_image_refresh_job_output(job_id, f"开始刷新服务器API可用镜像，总计 {total} 台", processed_count=0, success_count=0, failed_count=0, status='running')
+
+    for row in rows:
+        try:
+            refresh_server_api_images(row)
+            success += 1
+            append_api_image_refresh_job_output(job_id, f"[{row['name']}] 镜像刷新成功", processed_count=processed + 1, success_count=success, failed_count=failed, status='running')
+        except Exception as exc:
+            failed += 1
+            append_api_image_refresh_job_output(job_id, f"[{row['name']}] 镜像刷新失败: {exc}", processed_count=processed + 1, success_count=success, failed_count=failed, status='running')
+        processed += 1
+
+    final_status = 'success' if failed == 0 else 'failed'
+    append_api_image_refresh_job_output(
+        job_id,
+        f"刷新完成：成功 {success} 台，失败 {failed} 台",
+        processed_count=processed,
+        success_count=success,
+        failed_count=failed,
+        status=final_status,
+        finished=True,
+    )
+
+
+def start_api_image_refresh_background_job():
+    if API_IMAGE_REFRESH_LOCK.locked():
+        return None
+    rows = list_servers()
+    job_id = create_api_image_refresh_job(len(rows))
+
+    def _runner():
+        with API_IMAGE_REFRESH_LOCK:
+            run_api_image_refresh_job(job_id)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    return job_id
 
 def list_servers():
     with closing(get_conn()) as conn:
@@ -2458,6 +2564,7 @@ def details_page():
         success=success,
         failed=failed,
         never=never,
+        latest_api_image_refresh_job=get_latest_api_image_refresh_job(),
     )
 
 
@@ -2988,16 +3095,11 @@ def refresh_api_images_all_servers():
         flash("暂无服务器，无需刷新", "error")
         return redirect(url_for("details_page"))
 
-    ok_count = 0
-    fail_count = 0
-    for row in rows:
-        try:
-            refresh_server_api_images(row)
-            ok_count += 1
-        except Exception as exc:
-            fail_count += 1
-            flash(f"{row['name']} 镜像刷新失败: {exc}", "error")
-    flash(f"镜像刷新完成：成功 {ok_count} 台，失败 {fail_count} 台", "success" if fail_count == 0 else "error")
+    job_id = start_api_image_refresh_background_job()
+    if not job_id:
+        flash("已有镜像刷新任务在后台执行，请稍后刷新页面查看进度", "error")
+    else:
+        flash(f"镜像刷新任务已在后台启动（任务ID: {job_id}），页面刷新/关闭不会中断", "success")
     return redirect(url_for("details_page"))
 
 
