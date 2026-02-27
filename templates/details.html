@@ -75,6 +75,18 @@
       </select>
       <button type="submit" class="warn">一键DD重置</button>
     </form>
+    <form method="post" action="/servers/{{ row.id }}/run-api-reinstall" class="dd-form">
+      <select name="api_image_key">
+        {% if row.api_image_options %}
+        {% for image in row.api_image_options %}
+        <option value="{{ image.key }}" {% if row.scp_selected_image == image.key %}selected{% endif %}>{{ image.label }}</option>
+        {% endfor %}
+        {% else %}
+        <option value="">请先点击顶部按钮更新镜像</option>
+        {% endif %}
+      </select>
+      <button type="submit" {% if not row.api_image_options %}disabled{% endif %}>一键API重置</button>
+    </form>
     <button type="button" class="copy-btn" onclick="copySummary({{ row.id }})">一键复制结果</button>
   </div>
 
@@ -92,7 +104,12 @@
 </section>
 
 <section class="panel">
-  <h2>服务器详情</h2>
+  <div class="section-head">
+    <h2>服务器详情</h2>
+    <form method="post" action="/servers/refresh-api-images">
+      <button type="submit">更新服务器API可用镜像</button>
+    </form>
+  </div>
   <div class="server-columns">
     <div class="server-column">
       <h3>未出租（{{ unrented_count }}）</h3>
