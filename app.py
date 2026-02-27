@@ -2601,7 +2601,7 @@ def add_server():
         conn.execute(
             """
             INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
