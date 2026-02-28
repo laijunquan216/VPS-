@@ -399,7 +399,10 @@ def save_server_scp_images(server_id, images, selected_key=""):
 
 
 def load_server_scp_images(server_row):
-    text = (server_row.get("scp_image_catalog") or "").strip()
+    if isinstance(server_row, sqlite3.Row):
+        text = str(server_row["scp_image_catalog"] or "").strip()
+    else:
+        text = str((server_row or {}).get("scp_image_catalog") or "").strip()
     if not text:
         return []
     try:
@@ -929,8 +932,13 @@ def refresh_server_api_images(server_row, output_lines=None):
 
 
 def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
-    account = get_scp_account(server_row.get("scp_account_id"))
-    scp_server_id = (server_row.get("scp_server_id") or "").strip()
+    if isinstance(server_row, sqlite3.Row):
+        account_id = server_row["scp_account_id"]
+        scp_server_id = str(server_row["scp_server_id"] or "").strip()
+    else:
+        account_id = (server_row or {}).get("scp_account_id")
+        scp_server_id = str((server_row or {}).get("scp_server_id") or "").strip()
+    account = get_scp_account(account_id)
 
     if scp_server_id and account:
         output_lines.append(f"已使用面板已配置SCP绑定: 账号[{account['name']}], server_id={scp_server_id}")
@@ -1517,7 +1525,11 @@ def is_api_reinstall_trigger(trigger_type):
 
 def get_selected_scp_image(server_row):
     options = load_server_scp_images(server_row)
-    selected = pick_scp_image_option_by_key(options, server_row.get("scp_selected_image"))
+    if isinstance(server_row, sqlite3.Row):
+        selected_key = server_row["scp_selected_image"]
+    else:
+        selected_key = (server_row or {}).get("scp_selected_image")
+    selected = pick_scp_image_option_by_key(options, selected_key)
     if selected:
         return selected
     return options[0] if options else None
@@ -1834,7 +1846,7 @@ def extract_summary(server_row, raw_output):
     fb = re.search(r"📁\s*FileBrowser[\s\S]*?--------", raw_output)
 
     lines = [
-        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row.get('reset_hour', 1)):02d}:{int(server_row.get('reset_minute', 0)):02d}（北京时间）重置，需要续租请提前下单",
+        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row['reset_hour'] or 1):02d}:{int(server_row['reset_minute'] or 0):02d}（北京时间）重置，需要续租请提前下单",
         f"IP address: {ip_match.group(1) if ip_match else server_row['ip']}",
         f"Your new root passwort is {pass_match.group(1).strip() if pass_match else server_row['ssh_password']}",
     ]
