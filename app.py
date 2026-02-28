@@ -399,7 +399,10 @@ def save_server_scp_images(server_id, images, selected_key=""):
 
 
 def load_server_scp_images(server_row):
-    text = (server_row.get("scp_image_catalog") or "").strip()
+    if isinstance(server_row, sqlite3.Row):
+        text = str(server_row["scp_image_catalog"] or "").strip()
+    else:
+        text = str((server_row or {}).get("scp_image_catalog") or "").strip()
     if not text:
         return []
     try:
@@ -929,8 +932,13 @@ def refresh_server_api_images(server_row, output_lines=None):
 
 
 def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
-    account = get_scp_account(server_row.get("scp_account_id"))
-    scp_server_id = (server_row.get("scp_server_id") or "").strip()
+    if isinstance(server_row, sqlite3.Row):
+        account_id = server_row["scp_account_id"]
+        scp_server_id = str(server_row["scp_server_id"] or "").strip()
+    else:
+        account_id = (server_row or {}).get("scp_account_id")
+        scp_server_id = str((server_row or {}).get("scp_server_id") or "").strip()
+    account = get_scp_account(account_id)
 
     if scp_server_id and account:
         output_lines.append(f"已使用面板已配置SCP绑定: 账号[{account['name']}], server_id={scp_server_id}")
@@ -1517,7 +1525,11 @@ def is_api_reinstall_trigger(trigger_type):
 
 def get_selected_scp_image(server_row):
     options = load_server_scp_images(server_row)
-    selected = pick_scp_image_option_by_key(options, server_row.get("scp_selected_image"))
+    if isinstance(server_row, sqlite3.Row):
+        selected_key = server_row["scp_selected_image"]
+    else:
+        selected_key = (server_row or {}).get("scp_selected_image")
+    selected = pick_scp_image_option_by_key(options, selected_key)
     if selected:
         return selected
     return options[0] if options else None
@@ -1834,7 +1846,7 @@ def extract_summary(server_row, raw_output):
     fb = re.search(r"📁\s*FileBrowser[\s\S]*?--------", raw_output)
 
     lines = [
-        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row.get('reset_hour', 1)):02d}:{int(server_row.get('reset_minute', 0)):02d}（北京时间）重置，需要续租请提前下单",
+        f"{server_row['name']}（名称），{server_row['reset_day']}日 {int(server_row['reset_hour'] or 1):02d}:{int(server_row['reset_minute'] or 0):02d}（北京时间）重置，需要续租请提前下单",
         f"IP address: {ip_match.group(1) if ip_match else server_row['ip']}",
         f"Your new root passwort is {pass_match.group(1).strip() if pass_match else server_row['ssh_password']}",
     ]
@@ -1999,7 +2011,7 @@ class LiveLogBuffer(list):
             self.last_flush_at = now
 
 
-def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True, reset_command_override=None, force_reinstall=False, preset_password=None, force_api_reinstall=False, selected_api_image=None):
+def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_success=True, reset_command_override=None, force_reinstall=False, preset_password=None, force_api_reinstall=False, selected_api_image=None, skip_post_deploy=False):
     title = f"[{server_row['name']} - {server_row['ip']}]"
     output_lines = LiveLogBuffer(running_log_id, flush_interval_seconds=10)
     output_lines.append(f"开始执行重置任务 {title}")
@@ -2138,19 +2150,22 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 execute_command_and_collect(client, "重置任务", reset_command, output_lines)
 
         if reinstall_triggered and not force_reinstall:
-            token = ensure_server_agent_token(mutable_server["id"])
-            builtin_agent_command = build_agent_install_command(panel_base_url, token)
-            if client is None:
-                client = connect_ssh(mutable_server)
-                output_lines.append("执行 Agent安装任务 前重新建立SSH连接成功")
-            ensure_curl_available_for_agent(client, output_lines)
-            execute_command_and_collect(client, "Agent安装任务", builtin_agent_command, output_lines)
+            if skip_post_deploy:
+                output_lines.append("本次任务为一键API重置：仅执行系统重装，跳过Agent/SSH任务2/SSH任务3")
+            else:
+                token = ensure_server_agent_token(mutable_server["id"])
+                builtin_agent_command = build_agent_install_command(panel_base_url, token)
+                if client is None:
+                    client = connect_ssh(mutable_server)
+                    output_lines.append("执行 Agent安装任务 前重新建立SSH连接成功")
+                ensure_curl_available_for_agent(client, output_lines)
+                execute_command_and_collect(client, "Agent安装任务", builtin_agent_command, output_lines)
 
-            if agent_install_command:
-                prepared_agent_command = render_agent_install_command(agent_install_command, mutable_server)
-                execute_command_and_collect(client, "自定义Agent安装任务", prepared_agent_command, output_lines)
+                if agent_install_command:
+                    prepared_agent_command = render_agent_install_command(agent_install_command, mutable_server)
+                    execute_command_and_collect(client, "自定义Agent安装任务", prepared_agent_command, output_lines)
 
-        if ssh_command_2:
+        if ssh_command_2 and not skip_post_deploy:
             ssh_command_2, ssh2_password = inject_random_ssh2_password_if_needed(ssh_command_2)
             if ssh2_password:
                 output_lines.append(f"SSH任务2检测到固定密码参数，已替换为随机12位密码: {ssh2_password}")
@@ -2159,7 +2174,7 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 output_lines.append("执行 SSH任务2 前重新建立SSH连接成功")
             execute_command_and_collect(client, "SSH任务2", ssh_command_2, output_lines)
 
-        if ssh_command_3:
+        if ssh_command_3 and not skip_post_deploy:
             if client is None:
                 client = connect_ssh(mutable_server)
                 output_lines.append("执行 SSH任务3 前重新建立SSH连接成功")
@@ -2350,6 +2365,7 @@ def task_worker_loop():
                 preset_password=dd_password,
                 force_api_reinstall=api_reinstall,
                 selected_api_image=selected_api_image,
+                skip_post_deploy=api_reinstall,
             )
 
             with closing(get_conn()) as conn:
