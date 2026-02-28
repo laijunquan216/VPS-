@@ -1,5 +1,9 @@
 :root{--bg:#f3f5f9;--card:#fff;--text:#1f2937;--muted:#6b7280;--primary:#1f6fff;--ok:#0f9d58;--bad:#d93025;}
 *{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:var(--bg);color:var(--text)}
+body{overflow-x:hidden}
+.server-card,.panel{max-width:100%}
+.dd-form select{max-width:100%}
+
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:0;z-index:9;flex-wrap:wrap}
 .brand{font-size:34px;font-weight:800;line-height:1.05}.brand span{color:var(--primary)}
 nav{display:flex;gap:10px;flex-wrap:wrap}.nav-link{padding:10px 14px;border-radius:10px;text-decoration:none;color:#334155;background:#f1f5f9}.nav-link.active{background:var(--primary);color:#fff}
@@ -13,7 +17,7 @@ nav{display:flex;gap:10px;flex-wrap:wrap}.nav-link{padding:10px 14px;border-radi
 .grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
 .grid-form label{display:flex;flex-direction:column;gap:5px;font-size:14px}
 .grid-form .full{grid-column:1/-1}.inline{flex-direction:row!important;align-items:center;gap:8px!important}
-input,textarea,button{border:1px solid #d1d5db;border-radius:10px;padding:10px;font-size:15px}
+input,textarea,select,button{border:1px solid #d1d5db;border-radius:10px;padding:10px;font-size:15px;max-width:100%}
 textarea{min-height:60px}button{background:var(--primary);color:#fff;border:none;cursor:pointer}.danger{background:#b42318}
 .button-row{display:flex;gap:10px;margin-top:10px}
 .inline-form{margin-top:10px}
@@ -90,8 +94,11 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
   .stat-card h3{font-size:34px}
   .server-meta{grid-template-columns:1fr}
   .server-columns{grid-template-columns:1fr}
-  .server-actions{display:grid;grid-template-columns:1fr 1fr}
+  .server-actions{display:grid;grid-template-columns:1fr}
   .server-actions form,.server-actions .copy-btn{width:100%}
+  .dd-form{display:grid;grid-template-columns:1fr;gap:8px}
+  .dd-form select{min-width:0;width:100%}
+  .renter-inline-form{display:grid;grid-template-columns:1fr;gap:8px}
   .renter-inline-form input{min-width:0;width:100%}
   .server-actions button{width:100%}
 }
