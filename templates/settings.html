@@ -21,19 +21,6 @@
     </section>
 
     <section class="settings-block">
-      <h3>Agent设置</h3>
-      <div class="grid-form">
-        <label>面板公网地址（Agent上报地址）
-          <input name="panel_base_url" placeholder="例如 https://panel.example.com" value="{{ global_cfg.panel_base_url or panel_base_url_default }}" />
-        </label>
-        <label class="full">重装后 Agent 安装命令（可选）
-          <textarea name="agent_install_command" rows="3" placeholder="例如 curl -fsSL https://example.com/install-agent.sh | bash -s -- --id xxx --key yyy">{{ global_cfg.agent_install_command }}</textarea>
-          <p class="hint">重装后会先自动安装内置上报 Agent（上传到本面板），这里可选填额外命令。若使用反向代理，请填写可被目标服务器访问的域名地址。支持变量：{ip}、{name}、{ssh_user}</p>
-        </label>
-      </div>
-    </section>
-
-    <section class="settings-block">
       <h3>流量统计设置（SCP API）</h3>
       <div class="grid-form traffic-grid">
         <label>当月流量数据采样间隔（分钟）
