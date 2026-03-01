@@ -134,6 +134,7 @@ def init_db():
                 backup_interval_days INTEGER NOT NULL DEFAULT 7,
                 backup_last_sent_at TEXT,
                 data_zip_url TEXT NOT NULL DEFAULT '',
+                data_zip_enabled INTEGER NOT NULL DEFAULT 0,
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -273,6 +274,7 @@ def init_db():
         ensure_column(conn, "global_config", "backup_interval_days INTEGER NOT NULL DEFAULT 7")
         ensure_column(conn, "global_config", "backup_last_sent_at TEXT")
         ensure_column(conn, "global_config", "data_zip_url TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "data_zip_enabled INTEGER NOT NULL DEFAULT 0")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -1067,12 +1069,12 @@ def update_backup_email_config(enabled, backup_email_to, interval_days):
             ),
         )
         conn.commit()
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -1089,6 +1091,7 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 smtp_from.strip(),
                 notify_email_to.strip(),
                 max(1, int(traffic_sample_interval_minutes)),
+                int(data_zip_enabled),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -1218,8 +1221,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1240,6 +1243,7 @@ def restore_backup_payload(payload):
                 int(global_cfg.get("backup_interval_days", 7) or 7),
                 global_cfg.get("backup_last_sent_at"),
                 global_cfg.get("data_zip_url", ""),
+                int(global_cfg.get("data_zip_enabled", 0) or 0),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -2205,6 +2209,8 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 execute_command_and_collect(client, "自定义部署任务", prepared_agent_command, output_lines)
 
         if ssh_command_2 and not skip_post_deploy:
+            if int(global_cfg["data_zip_enabled"] or 0) and (global_cfg["data_zip_url"] or "").strip():
+                ssh_command_2 = _inject_data_zip_url_into_ssh2(ssh_command_2, (global_cfg["data_zip_url"] or "").strip())
             ssh_command_2, ssh2_password = inject_random_ssh2_password_if_needed(ssh_command_2)
             if ssh2_password:
                 output_lines.append(f"SSH任务2检测到固定密码参数，已替换为随机12位密码: {ssh2_password}")
@@ -2289,12 +2295,9 @@ def save_uploaded_data_zip(file_storage, request_obj=None):
     direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
 
     with closing(get_conn()) as conn:
-        cfg = conn.execute("SELECT ssh_command_2 FROM global_config WHERE id=1").fetchone()
-        current_ssh2 = cfg["ssh_command_2"] if cfg else ""
-        updated_ssh2 = _inject_data_zip_url_into_ssh2(current_ssh2, direct_url)
         conn.execute(
-            "UPDATE global_config SET data_zip_url=?, ssh_command_2=?, updated_at=? WHERE id=1",
-            (direct_url, updated_ssh2, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+            "UPDATE global_config SET data_zip_url=?, updated_at=? WHERE id=1",
+            (direct_url, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
 
@@ -2879,6 +2882,7 @@ def update_global_tasks():
         form.get("smtp_from", ""),
         form.get("notify_email_to", ""),
         traffic_sample_interval_minutes,
+        1 if form.get("data_zip_enabled") == "on" else 0,
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
