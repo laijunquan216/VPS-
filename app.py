@@ -29,12 +29,14 @@ from flask import (
     render_template,
     request,
     send_file,
+    send_from_directory,
     Response,
     jsonify,
     session,
     url_for,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
 DB_PATH = os.environ.get("VPS_PANEL_DB", "panel.db")
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
@@ -53,6 +55,8 @@ DD_NEW_PASSWORD_GRACE_SECONDS = int(os.environ.get("DD_NEW_PASSWORD_GRACE_SECOND
 AGENT_REPORT_INTERVAL_SECONDS = int(os.environ.get("AGENT_REPORT_INTERVAL_SECONDS", "60"))
 DEFAULT_MAX_RETRIES = int(os.environ.get("DEFAULT_MAX_RETRIES", "2"))
 DEFAULT_RETRY_BACKOFF_SECONDS = os.environ.get("DEFAULT_RETRY_BACKOFF_SECONDS", "60,180")
+UPLOAD_DATA_DIR = os.environ.get("VPS_PANEL_UPLOAD_DATA_DIR", os.path.join(os.getcwd(), "uploaded_data"))
+os.makedirs(UPLOAD_DATA_DIR, exist_ok=True)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
@@ -129,6 +133,7 @@ def init_db():
                 backup_email_to TEXT NOT NULL DEFAULT '',
                 backup_interval_days INTEGER NOT NULL DEFAULT 7,
                 backup_last_sent_at TEXT,
+                data_zip_url TEXT NOT NULL DEFAULT '',
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -267,6 +272,7 @@ def init_db():
         ensure_column(conn, "global_config", "backup_email_to TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "backup_interval_days INTEGER NOT NULL DEFAULT 7")
         ensure_column(conn, "global_config", "backup_last_sent_at TEXT")
+        ensure_column(conn, "global_config", "data_zip_url TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -1212,8 +1218,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1233,6 +1239,7 @@ def restore_backup_payload(payload):
                 global_cfg.get("backup_email_to", ""),
                 int(global_cfg.get("backup_interval_days", 7) or 7),
                 global_cfg.get("backup_last_sent_at"),
+                global_cfg.get("data_zip_url", ""),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -2251,6 +2258,47 @@ def has_pending_or_running(server_id):
     return bool(row and row["status"] in ("queued", "running", "retrying"))
 
 
+
+
+def _inject_data_zip_url_into_ssh2(command_text, data_zip_url):
+    command = (command_text or "").strip()
+    if not command:
+        return f'-d "{data_zip_url}"'
+
+    pattern = r'-d\s+(?:"[^"]*"|\'[^\']*\'|\S+)'
+    if re.search(pattern, command):
+        return re.sub(pattern, f'-d "{data_zip_url}"', command, count=1)
+    return f'{command} -d "{data_zip_url}"'
+
+
+def save_uploaded_data_zip(file_storage, request_obj=None):
+    if not file_storage or not file_storage.filename:
+        raise ValueError("请先选择数据压缩包")
+
+    original_name = secure_filename(file_storage.filename)
+    if not original_name.lower().endswith('.zip'):
+        raise ValueError("仅支持上传 .zip 压缩包")
+
+    ts = datetime.now(TIMEZONE).strftime("%Y%m%d-%H%M%S")
+    token = secrets.token_hex(6)
+    saved_name = f"{ts}-{token}-{original_name}"
+    save_path = os.path.join(UPLOAD_DATA_DIR, saved_name)
+    file_storage.save(save_path)
+
+    base_url = resolve_panel_base_url(get_global_config(), request_obj)
+    direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
+
+    with closing(get_conn()) as conn:
+        cfg = conn.execute("SELECT ssh_command_2 FROM global_config WHERE id=1").fetchone()
+        current_ssh2 = cfg["ssh_command_2"] if cfg else ""
+        updated_ssh2 = _inject_data_zip_url_into_ssh2(current_ssh2, direct_url)
+        conn.execute(
+            "UPDATE global_config SET data_zip_url=?, ssh_command_2=?, updated_at=? WHERE id=1",
+            (direct_url, updated_ssh2, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+    return direct_url
 def parse_backoff_plan(text):
     values = []
     for piece in str(text or "").split(","):
@@ -2534,7 +2582,7 @@ def login_required(func):
 
 @app.before_request
 def require_login():
-    public_endpoints = {"login_page", "login_submit", "static"}
+    public_endpoints = {"login_page", "login_submit", "static", "uploaded_data_file"}
     if request.endpoint in public_endpoints:
         return None
     if not session.get("logged_in"):
@@ -2637,6 +2685,23 @@ def settings_page():
     )
 
 
+
+
+@app.route("/files/<path:filename>")
+def uploaded_data_file(filename):
+    return send_from_directory(UPLOAD_DATA_DIR, filename, as_attachment=False)
+
+
+@app.route("/settings/upload-data-zip", methods=["POST"])
+@login_required
+def upload_data_zip_for_ssh2():
+    file = request.files.get("data_zip_file")
+    try:
+        direct_url = save_uploaded_data_zip(file, request_obj=request)
+        flash(f"数据压缩包上传成功，直链已写入SSH任务2: {direct_url}", "success")
+    except Exception as exc:
+        flash(f"上传失败: {exc}", "error")
+    return redirect(url_for("settings_page"))
 @app.route("/management")
 @login_required
 def management_page():
