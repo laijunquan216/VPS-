@@ -2405,9 +2405,14 @@ def task_worker_loop():
                         "UPDATE task_queue SET status='success', attempt=?, updated_at=? WHERE id=?",
                         (attempt_no, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
                     )
+                    if str(task["trigger_type"] or "").strip().lower() == "scheduled":
+                        conn.execute("UPDATE servers SET is_rented = 0 WHERE id = ?", (row["id"],))
                     conn.commit()
                 if task["batch_key"]:
-                    upsert_notification_batch_item(task["batch_key"], row, "success", note="任务执行完成", log_id=task["log_id"])
+                    note = "任务执行完成"
+                    if str(task["trigger_type"] or "").strip().lower() == "scheduled":
+                        note = "任务执行完成；已自动切换为未出租"
+                    upsert_notification_batch_item(task["batch_key"], row, "success", note=note, log_id=task["log_id"])
                     maybe_send_batch_email(task["batch_key"])
                 continue
 
@@ -2500,7 +2505,10 @@ def check_scheduled_jobs():
 
     for row in due_rows:
         if row["is_renewed"]:
-            upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置")
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE servers SET is_renewed = 0 WHERE id = ?", (row["id"],))
+                conn.commit()
+            upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置；已自动切换为未续租")
             continue
 
         if not should_reset(row):
