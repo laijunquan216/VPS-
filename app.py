@@ -125,6 +125,10 @@ def init_db():
                 smtp_from TEXT NOT NULL DEFAULT '',
                 notify_email_to TEXT NOT NULL DEFAULT '',
                 traffic_sample_interval_minutes INTEGER NOT NULL DEFAULT 60,
+                backup_email_enabled INTEGER NOT NULL DEFAULT 0,
+                backup_email_to TEXT NOT NULL DEFAULT '',
+                backup_interval_days INTEGER NOT NULL DEFAULT 7,
+                backup_last_sent_at TEXT,
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -259,6 +263,10 @@ def init_db():
         ensure_column(conn, "global_config", "smtp_from TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "notify_email_to TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "traffic_sample_interval_minutes INTEGER NOT NULL DEFAULT 60")
+        ensure_column(conn, "global_config", "backup_email_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "global_config", "backup_email_to TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "backup_interval_days INTEGER NOT NULL DEFAULT 7")
+        ensure_column(conn, "global_config", "backup_last_sent_at TEXT")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -1035,6 +1043,24 @@ def get_global_config():
         return row
 
 
+
+
+def update_backup_email_config(enabled, backup_email_to, interval_days):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            UPDATE global_config
+            SET backup_email_enabled=?, backup_email_to=?, backup_interval_days=?, updated_at=?
+            WHERE id=1
+            """,
+            (
+                int(enabled),
+                (backup_email_to or "").strip(),
+                max(1, int(interval_days)),
+                datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
 def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes):
     with closing(get_conn()) as conn:
         conn.execute(
@@ -1186,8 +1212,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1203,6 +1229,10 @@ def restore_backup_payload(payload):
                 global_cfg.get("smtp_from", ""),
                 global_cfg.get("notify_email_to", ""),
                 int(global_cfg.get("traffic_sample_interval_minutes", 60) or 60),
+                int(global_cfg.get("backup_email_enabled", 0) or 0),
+                global_cfg.get("backup_email_to", ""),
+                int(global_cfg.get("backup_interval_days", 7) or 7),
+                global_cfg.get("backup_last_sent_at"),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -1843,6 +1873,71 @@ def send_email_message(subject, body):
     return True
 
 
+
+
+def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None):
+    smtp = get_smtp_config()
+    if not smtp:
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp["from"]
+    msg["To"] = (to_email or smtp["to"]).strip()
+    msg.set_content(body)
+    msg.add_attachment(attachment_bytes, maintype="application", subtype="json", filename=attachment_name)
+
+    with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
+        server.starttls()
+        if smtp["user"]:
+            server.login(smtp["user"], smtp["password"])
+        server.send_message(msg)
+    return True
+
+
+def run_scheduled_backup_email(now_dt=None):
+    cfg = get_global_config()
+    if not cfg or not int(cfg["backup_email_enabled"] or 0):
+        return
+
+    to_email = (cfg["backup_email_to"] or cfg["notify_email_to"] or "").strip()
+    if not to_email:
+        return
+
+    interval_days = max(1, int(cfg["backup_interval_days"] or 7))
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    last_sent_raw = (cfg["backup_last_sent_at"] or "").strip()
+
+    if last_sent_raw:
+        try:
+            last_sent = datetime.strptime(last_sent_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+            if now_dt < (last_sent + timedelta(days=interval_days)):
+                return
+        except Exception:
+            pass
+
+    payload = export_backup_payload()
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    ts = now_dt.strftime("%Y%m%d-%H%M%S")
+    ok = send_email_with_attachment(
+        subject=f"[VPS面板] 定期备份文件 {ts}",
+        body=(
+            "这是系统自动发送的数据备份附件。\n"
+            f"发送时间: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"备份周期: 每 {interval_days} 天一次\n"
+        ),
+        attachment_name=f"vps-panel-backup-{ts}.json",
+        attachment_bytes=content,
+        to_email=to_email,
+    )
+
+    if ok:
+        with closing(get_conn()) as conn:
+            conn.execute(
+                "UPDATE global_config SET backup_last_sent_at=?, updated_at=? WHERE id=1",
+                (now_dt.strftime("%Y-%m-%d %H:%M:%S"), now_dt.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            conn.commit()
 def send_result_email(server_row, status, summary, output):
     title_state = "成功" if status == "success" else "失败"
     body = (
@@ -2390,6 +2485,7 @@ def run_for_server(server_id, trigger_type="manual", batch_key=""):
 
 def check_scheduled_jobs():
     now = datetime.now(TIMEZONE)
+    run_scheduled_backup_email(now)
     batch_key = now.strftime("%Y-%m-%d %H:%M")
     scheduled_for = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2536,9 +2632,29 @@ def settings_page():
 @app.route("/management")
 @login_required
 def management_page():
-    return render_template("management.html", title="面板管理")
+    global_cfg = get_global_config()
+    return render_template("management.html", title="面板管理", global_cfg=global_cfg)
 
 
+
+
+@app.route("/management/backup-email", methods=["POST"])
+@login_required
+def update_backup_email_settings():
+    form = request.form
+    try:
+        interval_days = parse_int_form_field(form, "backup_interval_days", default=7, min_value=1, max_value=365)
+    except ValueError as exc:
+        flash(f"备份邮件配置保存失败: {exc}", "error")
+        return redirect(url_for("management_page"))
+
+    update_backup_email_config(
+        1 if form.get("backup_email_enabled") == "on" else 0,
+        form.get("backup_email_to", ""),
+        interval_days,
+    )
+    flash("定期备份邮件配置已更新", "success")
+    return redirect(url_for("management_page"))
 @app.route("/management/change-password", methods=["POST"])
 @login_required
 def change_panel_password():
