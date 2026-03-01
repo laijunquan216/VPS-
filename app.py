@@ -98,6 +98,8 @@ def init_db():
                 last_agent_rx_bytes INTEGER NOT NULL DEFAULT 0,
                 last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0,
                 last_agent_report_at TEXT,
+                last_traffic_sync_at TEXT,
+                traffic_throttled INTEGER NOT NULL DEFAULT 0,
                 last_reset_at TEXT,
                 ssh_status TEXT NOT NULL DEFAULT 'unknown',
                 ssh_checked_at TEXT,
@@ -122,8 +124,7 @@ def init_db():
                 smtp_password TEXT NOT NULL DEFAULT '',
                 smtp_from TEXT NOT NULL DEFAULT '',
                 notify_email_to TEXT NOT NULL DEFAULT '',
-                traffic_data_source TEXT NOT NULL DEFAULT 'agent',
-                ssh_check_interval_minutes INTEGER NOT NULL DEFAULT 120,
+                traffic_sample_interval_minutes INTEGER NOT NULL DEFAULT 60,
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -230,6 +231,8 @@ def init_db():
         ensure_column(conn, "servers", "last_agent_rx_bytes INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "last_agent_report_at TEXT")
+        ensure_column(conn, "servers", "last_traffic_sync_at TEXT")
+        ensure_column(conn, "servers", "traffic_throttled INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "ssh_status TEXT NOT NULL DEFAULT 'unknown'")
         ensure_column(conn, "servers", "ssh_checked_at TEXT")
         ensure_column(conn, "servers", "scp_image_catalog TEXT NOT NULL DEFAULT ''")
@@ -255,8 +258,7 @@ def init_db():
         ensure_column(conn, "global_config", "smtp_password TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "smtp_from TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "notify_email_to TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "global_config", "traffic_data_source TEXT NOT NULL DEFAULT 'agent'")
-        ensure_column(conn, "global_config", "ssh_check_interval_minutes INTEGER NOT NULL DEFAULT 120")
+        ensure_column(conn, "global_config", "traffic_sample_interval_minutes INTEGER NOT NULL DEFAULT 60")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -1033,12 +1035,12 @@ def get_global_config():
         return row
 
 
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source, ssh_check_interval_minutes):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_data_source=?, ssh_check_interval_minutes=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -1054,8 +1056,7 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 smtp_password,
                 smtp_from.strip(),
                 notify_email_to.strip(),
-                normalize_traffic_data_source(traffic_data_source),
-                max(0, int(ssh_check_interval_minutes)),
+                max(1, int(traffic_sample_interval_minutes)),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -1118,7 +1119,7 @@ def list_detail_rows():
             """
             SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
-                   s.period_upload_bytes, s.period_download_bytes, s.last_agent_report_at,
+                   s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
                    l.summary, l.status, l.created_at AS latest_run_at
             FROM servers s
@@ -1185,7 +1186,7 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_data_source, ssh_check_interval_minutes, panel_password_hash, updated_at)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, panel_password_hash, updated_at)
             VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
@@ -1201,8 +1202,7 @@ def restore_backup_payload(payload):
                 global_cfg.get("smtp_password", ""),
                 global_cfg.get("smtp_from", ""),
                 global_cfg.get("notify_email_to", ""),
-                normalize_traffic_data_source(global_cfg.get("traffic_data_source", "agent")),
-                int(global_cfg.get("ssh_check_interval_minutes", 120) or 120),
+                int(global_cfg.get("traffic_sample_interval_minutes", 60) or 60),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -1350,24 +1350,6 @@ def update_server_password(server_id, new_password):
         conn.commit()
 
 
-def generate_agent_token(length=40):
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
-def ensure_server_agent_token(server_id):
-    with closing(get_conn()) as conn:
-        row = conn.execute("SELECT agent_token FROM servers WHERE id = ?", (server_id,)).fetchone()
-        if not row:
-            return None
-        token = (row["agent_token"] or "").strip()
-        if token:
-            return token
-        token = generate_agent_token()
-        conn.execute("UPDATE servers SET agent_token = ? WHERE id = ?", (token, server_id))
-        conn.commit()
-        return token
-
 
 def month_day_safe(year, month, day):
     import calendar
@@ -1445,11 +1427,6 @@ def has_running_logs():
     with closing(get_conn()) as conn:
         row = conn.execute("SELECT 1 FROM job_logs WHERE status='running' LIMIT 1").fetchone()
         return bool(row)
-
-
-def build_agent_install_command(base_url, token):
-    install_url = f"{base_url}/api/agent/install.sh?token={token}"
-    return f"curl -fsSL {shlex.quote(install_url)} | bash"
 
 def generate_root_password(length=16):
     alphabet = string.ascii_letters + string.digits
@@ -1577,90 +1554,89 @@ def sanitize_terminal_text(text):
     return text
 
 
-def refresh_server_traffic(server_row):
-    now_dt = datetime.now(TIMEZONE)
-    period_key = current_period_key(int(server_row["reset_day"]), now_dt)
+def refresh_server_traffic_via_scp(server_row):
+    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
+    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
+    if not account_id or not scp_server_id:
+        raise RuntimeError("缺少SCP账号绑定或服务器ID")
 
-    command = "awk -F'[: ]+' 'NR>2 && $1!=\"lo\" {rx+=$3; tx+=$11} END{printf \"%d %d\", rx+0, tx+0}' /proc/net/dev"
-    client = connect_ssh(server_row, timeout=15)
-    try:
-        _, stdout, stderr = client.exec_command(command)
-        out = stdout.read().decode("utf-8", errors="ignore").strip()
-        err = stderr.read().decode("utf-8", errors="ignore").strip()
-        if err:
-            raise RuntimeError(err)
-        parts = out.split()
-        if len(parts) != 2:
-            raise RuntimeError(f"无法解析网卡统计输出: {out}")
-        rx_now = int(parts[0])
-        tx_now = int(parts[1])
-    finally:
-        client.close()
+    account = get_scp_account(account_id)
+    if not account:
+        raise RuntimeError("SCP账号不存在")
+
+    endpoint_base, token = scp_rest_login(account)
+    payload = scp_rest_request(
+        account,
+        "GET",
+        f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
+        token=token,
+        endpoint_base=endpoint_base,
+    )
+
+    live = payload.get("serverLiveInfo") if isinstance(payload, dict) else {}
+    interfaces = live.get("interfaces") if isinstance(live, dict) else []
+    if not isinstance(interfaces, list):
+        interfaces = []
+
+    rx_monthly_mib = 0.0
+    tx_monthly_mib = 0.0
+    throttled = False
+    for item in interfaces:
+        if not isinstance(item, dict):
+            continue
+        try:
+            rx_monthly_mib += float(item.get("rxMonthlyInMiB") or 0)
+        except Exception:
+            pass
+        try:
+            tx_monthly_mib += float(item.get("txMonthlyInMiB") or 0)
+        except Exception:
+            pass
+        throttled = throttled or bool(item.get("trafficThrottled"))
+
+    upload_bytes = int(max(tx_monthly_mib, 0) * 1024 * 1024)
+    download_bytes = int(max(rx_monthly_mib, 0) * 1024 * 1024)
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     with closing(get_conn()) as conn:
-        row = conn.execute(
-            "SELECT period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes FROM servers WHERE id = ?",
-            (server_row["id"],),
-        ).fetchone()
-        if not row:
-            return
-
-        upload = int(row["period_upload_bytes"] or 0)
-        download = int(row["period_download_bytes"] or 0)
-        last_rx = int(row["last_agent_rx_bytes"] or 0)
-        last_tx = int(row["last_agent_tx_bytes"] or 0)
-
-        if row["period_key"] != period_key:
-            upload = 0
-            download = 0
-            last_rx = rx_now
-            last_tx = tx_now
-        else:
-            delta_rx = rx_now - last_rx
-            delta_tx = tx_now - last_tx
-            if delta_rx < 0:
-                delta_rx = rx_now
-            if delta_tx < 0:
-                delta_tx = tx_now
-            download += delta_rx
-            upload += delta_tx
-            last_rx = rx_now
-            last_tx = tx_now
-
         conn.execute(
             """
             UPDATE servers
             SET period_key=?, period_upload_bytes=?, period_download_bytes=?,
-                last_agent_rx_bytes=?, last_agent_tx_bytes=?, last_agent_report_at=?
+                last_traffic_sync_at=?, traffic_throttled=?
             WHERE id=?
             """,
             (
-                period_key,
-                upload,
-                download,
-                last_rx,
-                last_tx,
-                now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                datetime.now(TIMEZONE).strftime("%Y-%m"),
+                upload_bytes,
+                download_bytes,
+                now_text,
+                1 if throttled else 0,
                 server_row["id"],
             ),
         )
         conn.commit()
 
 
-def refresh_all_traffic_data():
+def refresh_all_traffic_data_via_scp(now_dt=None):
     cfg = get_global_config()
-    if normalize_traffic_data_source(cfg["traffic_data_source"] if cfg else "agent") != "ssh":
+    interval = int(cfg["traffic_sample_interval_minutes"] or 60) if cfg else 60
+    if interval <= 0:
+        return
+
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
+    if minutes_since_midnight % interval != 0:
         return
 
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
     for row in rows:
         try:
-            refresh_server_traffic(row)
+            refresh_server_traffic_via_scp(row)
         except Exception:
             continue
-
-
 
 
 def update_server_ssh_status(server_id, is_online):
@@ -1681,23 +1657,6 @@ def check_server_ssh_connectivity(server_row, timeout=8):
         update_server_ssh_status(server_row["id"], False)
         return False
 
-
-def run_scheduled_ssh_checks(now_dt=None):
-    cfg = get_global_config()
-    interval = int(cfg["ssh_check_interval_minutes"] or 0) if cfg else 0
-    if interval <= 0:
-        return
-
-    now_dt = now_dt or datetime.now(TIMEZONE)
-    minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
-    if minutes_since_midnight % interval != 0:
-        return
-
-    with closing(get_conn()) as conn:
-        rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
-
-    for row in rows:
-        check_server_ssh_connectivity(row)
 
 def should_reset(server_row):
     now = datetime.now(TIMEZONE)
@@ -1818,22 +1777,6 @@ def execute_command_and_collect(client, title, command, output_lines):
         if benign_lines:
             output_lines.append(f"{title}提示:\n" + "\n".join(dict.fromkeys(benign_lines)))
 
-
-def ensure_curl_available_for_agent(client, output_lines):
-    check_cmd = "command -v curl >/dev/null 2>&1 && echo __CURL_OK__ || echo __CURL_MISSING__"
-    stdin, stdout, _ = client.exec_command(check_cmd)
-    marker = (stdout.read() or b"").decode("utf-8", errors="ignore")
-    if "__CURL_OK__" in marker:
-        return
-
-    output_lines.append("检测到 curl 缺失，准备在安装Agent前执行 apt update && apt install -y curl")
-    install_cmd = "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y curl"
-    execute_command_and_collect(client, "Agent前置依赖安装", install_cmd, output_lines)
-
-    stdin, stdout, _ = client.exec_command(check_cmd)
-    marker = (stdout.read() or b"").decode("utf-8", errors="ignore")
-    if "__CURL_OK__" not in marker:
-        raise RuntimeError("Agent安装前依赖检查失败：curl 仍不可用")
 
 
 def extract_summary(server_row, raw_output):
@@ -2151,19 +2094,13 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
 
         if reinstall_triggered and not force_reinstall:
             if skip_post_deploy:
-                output_lines.append("本次任务为一键API重置：仅执行系统重装，跳过Agent/SSH任务2/SSH任务3")
-            else:
-                token = ensure_server_agent_token(mutable_server["id"])
-                builtin_agent_command = build_agent_install_command(panel_base_url, token)
+                output_lines.append("本次任务为一键API重置：仅执行系统重装，跳过SSH任务2/SSH任务3")
+            elif agent_install_command:
                 if client is None:
                     client = connect_ssh(mutable_server)
-                    output_lines.append("执行 Agent安装任务 前重新建立SSH连接成功")
-                ensure_curl_available_for_agent(client, output_lines)
-                execute_command_and_collect(client, "Agent安装任务", builtin_agent_command, output_lines)
-
-                if agent_install_command:
-                    prepared_agent_command = render_agent_install_command(agent_install_command, mutable_server)
-                    execute_command_and_collect(client, "自定义Agent安装任务", prepared_agent_command, output_lines)
+                    output_lines.append("执行自定义部署任务前重新建立SSH连接成功")
+                prepared_agent_command = render_agent_install_command(agent_install_command, mutable_server)
+                execute_command_and_collect(client, "自定义部署任务", prepared_agent_command, output_lines)
 
         if ssh_command_2 and not skip_post_deploy:
             ssh_command_2, ssh2_password = inject_random_ssh2_password_if_needed(ssh_command_2)
@@ -2232,10 +2169,6 @@ def parse_backoff_plan(text):
 
 def normalize_backoff_plan_text(text):
     return ",".join(str(v) for v in parse_backoff_plan(text))
-
-
-def normalize_traffic_data_source(value):
-    return "ssh" if str(value or "").strip().lower() == "ssh" else "agent"
 
 
 def parse_int_form_field(form, field_name, default=None, min_value=None, max_value=None):
@@ -2457,7 +2390,6 @@ def run_for_server(server_id, trigger_type="manual", batch_key=""):
 
 def check_scheduled_jobs():
     now = datetime.now(TIMEZONE)
-    run_scheduled_ssh_checks(now)
     batch_key = now.strftime("%Y-%m-%d %H:%M")
     scheduled_for = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2498,7 +2430,7 @@ def login_required(func):
 
 @app.before_request
 def require_login():
-    public_endpoints = {"login_page", "login_submit", "static", "agent_install_script", "agent_report"}
+    public_endpoints = {"login_page", "login_submit", "static"}
     if request.endpoint in public_endpoints:
         return None
     if not session.get("logged_in"):
@@ -2549,6 +2481,7 @@ def details_page():
         item["traffic_upload_text"] = format_bytes(upload)
         item["traffic_download_text"] = format_bytes(download)
         item["traffic_total_text"] = format_bytes(upload + download)
+        item["traffic_throttled"] = bool(item.get("traffic_throttled"))
         image_options = load_server_scp_images(item)
         for opt in image_options:
             distro = str(opt.get("distribution") or "").strip()
@@ -2667,133 +2600,6 @@ def restore_backup():
     return redirect(url_for("management_page"))
 
 
-@app.get("/api/agent/install.sh")
-def agent_install_script():
-    token = (request.args.get("token") or "").strip()
-    if not token:
-        return Response("missing token\n", status=400, mimetype="text/plain")
-
-    with closing(get_conn()) as conn:
-        row = conn.execute("SELECT id FROM servers WHERE agent_token = ?", (token,)).fetchone()
-        if not row:
-            return Response("invalid token\n", status=403, mimetype="text/plain")
-
-    base_url = resolve_panel_base_url(get_global_config(), request)
-    report_url = f"{base_url}/api/agent/report"
-    script = f"""#!/usr/bin/env bash
-set -euo pipefail
-cat >/usr/local/bin/vps-panel-agent.sh <<'AGENT'
-#!/usr/bin/env bash
-set -euo pipefail
-TOKEN={token}
-REPORT_URL={report_url}
-collect() {{
-  awk -F'[: ]+' 'NR>2 && $1!="lo" {{rx+=$3; tx+=$11}} END{{printf "%d %d", rx+0, tx+0}}' /proc/net/dev
-}}
-read -r RX TX < <(collect)
-curl -fsS -m 20 -H 'Content-Type: application/json' -d "{{\\"token\\":\\"$TOKEN\\",\\"rx_bytes\\":$RX,\\"tx_bytes\\":$TX}}" "$REPORT_URL" >/dev/null || true
-AGENT
-chmod +x /usr/local/bin/vps-panel-agent.sh
-
-cat >/etc/systemd/system/vps-panel-agent.service <<'UNIT'
-[Unit]
-Description=VPS Panel Agent Reporter
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/vps-panel-agent.sh
-UNIT
-
-cat >/etc/systemd/system/vps-panel-agent.timer <<'UNIT'
-[Unit]
-Description=Run VPS Panel Agent reporter
-
-[Timer]
-OnBootSec=30s
-OnUnitActiveSec={AGENT_REPORT_INTERVAL_SECONDS}s
-AccuracySec=5s
-Unit=vps-panel-agent.service
-
-[Install]
-WantedBy=timers.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now vps-panel-agent.timer
-systemctl restart vps-panel-agent.timer
-echo "[OK] vps-panel-agent installed"
-"""
-    return Response(script, mimetype="text/x-shellscript")
-
-
-@app.post("/api/agent/report")
-def agent_report():
-    payload = request.get_json(silent=True) or {}
-    token = str(payload.get("token", "")).strip()
-    if not token:
-        return jsonify({"ok": False, "error": "missing token"}), 400
-
-    try:
-        rx_now = int(payload.get("rx_bytes", 0))
-        tx_now = int(payload.get("tx_bytes", 0))
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "invalid rx/tx"}), 400
-
-    cfg = get_global_config()
-    if normalize_traffic_data_source(cfg["traffic_data_source"] if cfg else "agent") != "agent":
-        return jsonify({"ok": True, "ignored": True, "reason": "traffic source is ssh"})
-
-    now_dt = datetime.now(TIMEZONE)
-    with closing(get_conn()) as conn:
-        row = conn.execute("SELECT * FROM servers WHERE agent_token = ?", (token,)).fetchone()
-        if not row:
-            return jsonify({"ok": False, "error": "invalid token"}), 403
-
-        period_key = current_period_key(int(row["reset_day"]), now_dt)
-        upload = int(row["period_upload_bytes"] or 0)
-        download = int(row["period_download_bytes"] or 0)
-        last_rx = int(row["last_agent_rx_bytes"] or 0)
-        last_tx = int(row["last_agent_tx_bytes"] or 0)
-
-        if row["period_key"] != period_key:
-            upload = 0
-            download = 0
-            last_rx = rx_now
-            last_tx = tx_now
-        else:
-            delta_rx = rx_now - last_rx
-            delta_tx = tx_now - last_tx
-            if delta_rx < 0:
-                delta_rx = rx_now
-            if delta_tx < 0:
-                delta_tx = tx_now
-            download += delta_rx
-            upload += delta_tx
-            last_rx = rx_now
-            last_tx = tx_now
-
-        conn.execute(
-            """
-            UPDATE servers
-            SET period_key=?, period_upload_bytes=?, period_download_bytes=?,
-                last_agent_rx_bytes=?, last_agent_tx_bytes=?, last_agent_report_at=?
-            WHERE id=?
-            """,
-            (
-                period_key,
-                upload,
-                download,
-                last_rx,
-                last_tx,
-                now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                row["id"],
-            ),
-        )
-        conn.commit()
-
-    return jsonify({"ok": True})
-
 
 @app.route("/scp-accounts", methods=["POST"])
 @login_required
@@ -2865,7 +2671,7 @@ def update_global_tasks():
     form = request.form
     try:
         smtp_port = parse_int_form_field(form, "smtp_port", default=587, min_value=1, max_value=65535)
-        ssh_check_interval_minutes = parse_int_form_field(form, "ssh_check_interval_minutes", default=120, min_value=0, max_value=1440)
+        traffic_sample_interval_minutes = parse_int_form_field(form, "traffic_sample_interval_minutes", default=60, min_value=1, max_value=1440)
     except ValueError as exc:
         flash(f"全局配置保存失败: {exc}", "error")
         return redirect(url_for("settings_page"))
@@ -2883,8 +2689,7 @@ def update_global_tasks():
         form.get("smtp_password", ""),
         form.get("smtp_from", ""),
         form.get("notify_email_to", ""),
-        form.get("traffic_data_source", "agent"),
-        ssh_check_interval_minutes,
+        traffic_sample_interval_minutes,
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
@@ -2965,7 +2770,7 @@ def add_server():
                 scp_account_id,
                 (form.get("scp_server_id") or "").strip(),
                 reinstall_mode,
-                generate_agent_token(),
+                "",
                 "",
                 0,
                 0,
@@ -3166,7 +2971,7 @@ def run_now(server_id):
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TIMEZONE)
     scheduler.add_job(check_scheduled_jobs, "cron", minute="*")
-    scheduler.add_job(refresh_all_traffic_data, "interval", minutes=5)
+    scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*")
     scheduler.start()
     return scheduler
 
