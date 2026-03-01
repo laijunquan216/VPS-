@@ -21,27 +21,12 @@
     </section>
 
     <section class="settings-block">
-      <h3>Agent设置</h3>
-      <div class="grid-form">
-        <label>面板公网地址（Agent上报地址）
-          <input name="panel_base_url" placeholder="例如 https://panel.example.com" value="{{ global_cfg.panel_base_url or panel_base_url_default }}" />
-        </label>
-        <label class="full">重装后 Agent 安装命令（可选）
-          <textarea name="agent_install_command" rows="3" placeholder="例如 curl -fsSL https://example.com/install-agent.sh | bash -s -- --id xxx --key yyy">{{ global_cfg.agent_install_command }}</textarea>
-          <p class="hint">重装后会先自动安装内置上报 Agent（上传到本面板），这里可选填额外命令。若使用反向代理，请填写可被目标服务器访问的域名地址。支持变量：{ip}、{name}、{ssh_user}</p>
-        </label>
-      </div>
-    </section>
-
-    <section class="settings-block">
-      <h3>流量统计设置</h3>
+      <h3>流量统计设置（SCP API）</h3>
       <div class="grid-form traffic-grid">
-        <div class="traffic-source-box">
-          <label class="full">流量统计来源（二选一）</label>
-          <label class="inline"><input type="radio" name="traffic_data_source" value="agent" {% if (global_cfg.traffic_data_source or 'agent') == 'agent' %}checked{% endif %}/> Agent 上报</label>
-          <label class="inline"><input type="radio" name="traffic_data_source" value="ssh" {% if (global_cfg.traffic_data_source or 'agent') == 'ssh' %}checked{% endif %}/> SSH 定时采集（每 5 分钟）</label>
-        </div>
-        <label>SSH连通性检测间隔（分钟，0为关闭）<input name="ssh_check_interval_minutes" type="number" min="0" max="1440" value="{{ global_cfg.ssh_check_interval_minutes or 120 }}" /></label>
+        <label>当月流量数据采样间隔（分钟）
+          <input name="traffic_sample_interval_minutes" type="number" min="1" max="1440" value="{{ global_cfg.traffic_sample_interval_minutes or 60 }}" />
+        </label>
+        <p class="hint">例如填写 60，则每 60 分钟依次通过 SCP API 采集各服务器当月上传/下载流量及是否限速状态。</p>
       </div>
     </section>
 

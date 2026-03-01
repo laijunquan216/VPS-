@@ -13,6 +13,20 @@
     </label>
     <button type="submit" onclick="return confirm('恢复会覆盖当前所有数据，确认继续？')">恢复备份</button>
   </form>
+
+  <hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb;" />
+  <h3>定期备份邮件</h3>
+  <form method="post" action="{{ url_for('update_backup_email_settings') }}" class="grid-form">
+    <label class="inline"><input name="backup_email_enabled" type="checkbox" {% if global_cfg and global_cfg.backup_email_enabled %}checked{% endif %}/> 启用定期备份邮件</label>
+    <label>接收邮箱
+      <input name="backup_email_to" placeholder="默认使用邮件设置中的收件人" value="{{ global_cfg.backup_email_to if global_cfg else '' }}" />
+    </label>
+    <label>发送间隔（天）
+      <input name="backup_interval_days" type="number" min="1" max="365" value="{{ (global_cfg.backup_interval_days if global_cfg else 7) or 7 }}" required />
+    </label>
+    <button type="submit">保存定期备份配置</button>
+  </form>
+  <p class="hint">启用后系统会按天数周期自动生成 JSON 备份并以附件发送到指定邮箱（需先配置SMTP）。</p>
 </section>
 
 <section class="panel">
