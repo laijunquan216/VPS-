@@ -28,9 +28,6 @@
       <span class="badge {% if row.traffic_throttled %}bad{% else %}ok{% endif %}">
         {{ '限速' if row.traffic_throttled else '不限速' }}
       </span>
-      <span class="badge rent {% if row.is_rented %}rent-on{% else %}rent-off{% endif %}">
-        {{ '已出租' if row.is_rented else '未出租' }}
-      </span>
     </div>
   </div>
 
