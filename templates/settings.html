@@ -72,7 +72,17 @@
       </label>
       <button type="submit">打包指定VT数据</button>
     </form>
+
+    <form method="post" action="{{ url_for('upload_local_setting_json_for_packaging') }}" enctype="multipart/form-data" class="grid-form" style="margin-top:10px;">
+      <label class="full">上传替换用 setting.json（仅用于打包，不修改本机原文件）
+        <input type="file" name="local_setting_json_file" accept="application/json,.json" required />
+      </label>
+      <button type="submit">上传 setting.json</button>
+    </form>
+    <label class="inline" style="margin-top:8px;"><input name="local_setting_json_enabled" type="checkbox" form="global-task-form" {% if global_cfg.local_setting_json_enabled %}checked{% endif %}/> 是否替换 setting.json 文件（仅替换压缩包内 data/setting.json）</label>
+
     <p class="hint">本机打包压缩包直链：{{ global_cfg.local_vt_data_zip_url or '暂无' }}</p>
+    <p class="hint">替换用 setting.json 文件：{{ global_cfg.local_setting_json_path or '暂无' }}</p>
     <p class="hint">说明：开启上方开关后，按“压缩包来源”注入SSH任务2；关闭开关时，始终使用SSH任务2原始代码。</p>
   </section>
   <div class="button-row">
