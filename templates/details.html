@@ -25,8 +25,8 @@
       {% elif row.status == 'queued' %}<span class="badge queued">排队中</span>
       {% elif row.status == 'retrying' %}<span class="badge retrying">重试中</span>
       {% else %}<span class="badge">未执行</span>{% endif %}
-      <span class="badge rent {% if row.is_rented %}rent-on{% else %}rent-off{% endif %}">
-        {{ '已出租' if row.is_rented else '未出租' }}
+      <span class="badge {% if row.traffic_throttled %}bad{% else %}ok{% endif %}">
+        {{ '限速' if row.traffic_throttled else '不限速' }}
       </span>
     </div>
   </div>
@@ -39,8 +39,7 @@
     <div><span>上传流量（本周期）</span><strong>{{ row.traffic_upload_text }}</strong></div>
     <div><span>下载流量（本周期）</span><strong>{{ row.traffic_download_text }}</strong></div>
     <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
-    <div><span>最近上报</span><strong>{{ row.last_agent_report_at or '暂无' }}</strong></div>
-    <div><span>SSH检测时间</span><strong>{{ row.ssh_checked_at or '暂无' }}</strong></div>
+    <div><span>最近采样</span><strong>{{ row.last_traffic_sync_at or '暂无' }}</strong></div>
   </div>
 
   <div class="server-actions">
@@ -57,7 +56,7 @@
       {% endif %}
     </form>
     <form method="post" action="/servers/{{ row.id }}/run">
-      <button type="submit">执行一次重置</button>
+      <button type="submit">重置-部署PT</button>
     </form>
     <form method="post" action="/servers/{{ row.id }}/run-bin-reinstall" class="dd-form">
       <select name="reinstall_choice">
