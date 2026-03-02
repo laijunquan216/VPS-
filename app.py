@@ -286,7 +286,6 @@ def init_db():
         ensure_column(conn, "global_config", "local_vt_data_zip_url TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_setting_json_path TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_setting_json_enabled INTEGER NOT NULL DEFAULT 0")
-
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -1082,13 +1081,11 @@ def update_backup_email_config(enabled, backup_email_to, interval_days):
         )
         conn.commit()
 def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path, local_setting_json_enabled):
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
             SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, local_setting_json_enabled=?, updated_at=?
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -1240,8 +1237,6 @@ def restore_backup_payload(payload):
             """
             INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, panel_password_hash, updated_at)
             VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1658,11 +1653,6 @@ def refresh_server_traffic_via_scp(server_row):
         except Exception:
             pass
         throttled = throttled or bool(item.get("trafficThrottled"))
-
-    upload_bytes = int(max(tx_monthly_mib, 0) * 1024 * 1024)
-    download_bytes = int(max(rx_monthly_mib, 0) * 1024 * 1024)
-    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
-
 
     upload_bytes = int(max(tx_monthly_mib, 0) * 1024 * 1024)
     download_bytes = int(max(rx_monthly_mib, 0) * 1024 * 1024)
@@ -2341,6 +2331,20 @@ def save_uploaded_data_zip(file_storage, request_obj=None):
     return direct_url
 
 
+def _resolve_uploaded_local_setting_json_path(stored_value):
+    value = (stored_value or "").strip()
+    if not value:
+        return ""
+
+    if os.path.isabs(value) and os.path.isfile(value):
+        return value
+
+    candidate = os.path.join(UPLOAD_DATA_DIR, os.path.basename(value))
+    if os.path.isfile(candidate):
+        return candidate
+    return ""
+
+
 def save_uploaded_local_setting_json(file_storage):
     if not file_storage or not file_storage.filename:
         raise ValueError("请先选择 setting.json 文件")
@@ -2355,14 +2359,24 @@ def save_uploaded_local_setting_json(file_storage):
     save_path = os.path.join(UPLOAD_DATA_DIR, saved_name)
     file_storage.save(save_path)
 
+    try:
+        with open(save_path, "r", encoding="utf-8") as f:
+            json.load(f)
+    except Exception as exc:
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+        raise ValueError(f"setting.json 不是合法JSON: {exc}")
+
     with closing(get_conn()) as conn:
         conn.execute(
             "UPDATE global_config SET local_setting_json_path=?, updated_at=? WHERE id=1",
-            (save_path, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+            (saved_name, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
 
-    return save_path
+    return saved_name
 
 
 def package_local_vt_data_to_zip(source_dir, request_obj=None):
@@ -2385,15 +2399,13 @@ def package_local_vt_data_to_zip(source_dir, request_obj=None):
 
     global_cfg = get_global_config()
     replace_setting_json = int(global_cfg["local_setting_json_enabled"] or 0) == 1
-    uploaded_setting_path = (global_cfg["local_setting_json_path"] or "").strip()
+    uploaded_setting_path = _resolve_uploaded_local_setting_json_path(global_cfg["local_setting_json_path"])
     if replace_setting_json and not uploaded_setting_path:
-        raise ValueError("已启用替换 setting.json，但未上传 setting.json 文件")
-    if replace_setting_json and not os.path.isfile(uploaded_setting_path):
-        raise ValueError("已上传的 setting.json 文件不存在，请重新上传")
+        raise ValueError("已启用替换 setting.json，但未上传可用的 setting.json 文件，请重新上传")
 
     setting_arcname = f"{source_base_name}/setting.json"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(normalized_source):
+        for root, dirs, files in os.walk(normalized_source, followlinks=True):
             rel_dir = os.path.relpath(root, source_parent)
             if rel_dir != ".":
                 zipf.writestr(f"{rel_dir}/", "")
@@ -2856,15 +2868,6 @@ def management_page():
     return render_template("management.html", title="面板管理", global_cfg=global_cfg)
 
 
-@app.route("/management/backup-email", methods=["POST"])
-@login_required
-def update_backup_email_settings():
-    form = request.form
-    try:
-        interval_days = parse_int_form_field(form, "backup_interval_days", default=7, min_value=1, max_value=365)
-    except ValueError as exc:
-        flash(f"备份邮件配置保存失败: {exc}", "error")
-        return redirect(url_for("management_page"))
 
 
 @app.route("/management/backup-email", methods=["POST"])
