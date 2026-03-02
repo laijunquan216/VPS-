@@ -139,11 +139,8 @@ def init_db():
                 data_zip_source TEXT NOT NULL DEFAULT 'original',
                 local_vt_data_path TEXT NOT NULL DEFAULT '',
                 local_vt_data_zip_url TEXT NOT NULL DEFAULT '',
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
                 local_setting_json_path TEXT NOT NULL DEFAULT '',
                 local_setting_json_enabled INTEGER NOT NULL DEFAULT 0,
-=======
->>>>>>> main
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -287,11 +284,9 @@ def init_db():
         ensure_column(conn, "global_config", "data_zip_source TEXT NOT NULL DEFAULT 'original'")
         ensure_column(conn, "global_config", "local_vt_data_path TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_vt_data_zip_url TEXT NOT NULL DEFAULT ''")
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
         ensure_column(conn, "global_config", "local_setting_json_path TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_setting_json_enabled INTEGER NOT NULL DEFAULT 0")
-=======
->>>>>>> main
+
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -1086,20 +1081,14 @@ def update_backup_email_config(enabled, backup_email_to, interval_days):
             ),
         )
         conn.commit()
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
 def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path, local_setting_json_enabled):
-=======
 def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path):
->>>>>>> main
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
             SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, local_setting_json_enabled=?, updated_at=?
-=======
             SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, updated_at=?
->>>>>>> main
             WHERE id=1
             """,
             (
@@ -1119,10 +1108,7 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 int(data_zip_enabled),
                 (data_zip_source or "original").strip() if (data_zip_source or "original").strip() in {"original", "uploaded", "local_pack"} else "original",
                 (local_vt_data_path or "").strip(),
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
                 int(local_setting_json_enabled),
-=======
->>>>>>> main
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -1252,13 +1238,10 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
             INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, panel_password_hash, updated_at)
             VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-=======
             INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, panel_password_hash, updated_at)
             VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
->>>>>>> main
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1283,11 +1266,8 @@ def restore_backup_payload(payload):
                 global_cfg.get("data_zip_source", "original"),
                 global_cfg.get("local_vt_data_path", ""),
                 global_cfg.get("local_vt_data_zip_url", ""),
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
                 global_cfg.get("local_setting_json_path", ""),
                 int(global_cfg.get("local_setting_json_enabled", 0) or 0),
-=======
->>>>>>> main
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -1678,19 +1658,16 @@ def refresh_server_traffic_via_scp(server_row):
         except Exception:
             pass
         throttled = throttled or bool(item.get("trafficThrottled"))
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
 
     upload_bytes = int(max(tx_monthly_mib, 0) * 1024 * 1024)
     download_bytes = int(max(rx_monthly_mib, 0) * 1024 * 1024)
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
-=======
 
     upload_bytes = int(max(tx_monthly_mib, 0) * 1024 * 1024)
     download_bytes = int(max(rx_monthly_mib, 0) * 1024 * 1024)
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
->>>>>>> main
     with closing(get_conn()) as conn:
         conn.execute(
             """
@@ -2364,7 +2341,6 @@ def save_uploaded_data_zip(file_storage, request_obj=None):
     return direct_url
 
 
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
 def save_uploaded_local_setting_json(file_storage):
     if not file_storage or not file_storage.filename:
         raise ValueError("请先选择 setting.json 文件")
@@ -2389,8 +2365,6 @@ def save_uploaded_local_setting_json(file_storage):
     return save_path
 
 
-=======
->>>>>>> main
 def package_local_vt_data_to_zip(source_dir, request_obj=None):
     source_dir = (source_dir or "").strip()
     if not source_dir:
@@ -2409,7 +2383,6 @@ def package_local_vt_data_to_zip(source_dir, request_obj=None):
     source_parent = os.path.dirname(normalized_source)
     source_base_name = os.path.basename(normalized_source)
 
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
     global_cfg = get_global_config()
     replace_setting_json = int(global_cfg["local_setting_json_enabled"] or 0) == 1
     uploaded_setting_path = (global_cfg["local_setting_json_path"] or "").strip()
@@ -2419,8 +2392,6 @@ def package_local_vt_data_to_zip(source_dir, request_obj=None):
         raise ValueError("已上传的 setting.json 文件不存在，请重新上传")
 
     setting_arcname = f"{source_base_name}/setting.json"
-=======
->>>>>>> main
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(normalized_source):
             rel_dir = os.path.relpath(root, source_parent)
@@ -2429,22 +2400,16 @@ def package_local_vt_data_to_zip(source_dir, request_obj=None):
             for filename in files:
                 file_path = os.path.join(root, filename)
                 arcname = os.path.relpath(file_path, source_parent)
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
                 if replace_setting_json and arcname == setting_arcname:
                     continue
-=======
->>>>>>> main
                 zipf.write(file_path, arcname)
 
         if not os.listdir(normalized_source):
             zipf.writestr(f"{source_base_name}/", "")
 
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
         if replace_setting_json:
             zipf.write(uploaded_setting_path, setting_arcname)
 
-=======
->>>>>>> main
     base_url = resolve_panel_base_url(get_global_config(), request_obj)
     direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
@@ -2850,7 +2815,6 @@ def uploaded_data_file(filename):
     return send_from_directory(UPLOAD_DATA_DIR, filename, as_attachment=False)
 
 
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
 @app.route("/settings/upload-local-setting-json", methods=["POST"])
 @login_required
 def upload_local_setting_json_for_packaging():
@@ -2863,8 +2827,6 @@ def upload_local_setting_json_for_packaging():
     return redirect(url_for("settings_page"))
 
 
-=======
->>>>>>> main
 @app.route("/settings/package-local-vt-data", methods=["POST"])
 @login_required
 def package_local_vt_data_for_ssh2():
@@ -2893,11 +2855,6 @@ def management_page():
     global_cfg = get_global_config()
     return render_template("management.html", title="面板管理", global_cfg=global_cfg)
 
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
-
-
-=======
->>>>>>> main
 
 @app.route("/management/backup-email", methods=["POST"])
 @login_required
@@ -2909,8 +2866,6 @@ def update_backup_email_settings():
         flash(f"备份邮件配置保存失败: {exc}", "error")
         return redirect(url_for("management_page"))
 
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
-=======
 
 @app.route("/management/backup-email", methods=["POST"])
 @login_required
@@ -2922,7 +2877,6 @@ def update_backup_email_settings():
         flash(f"备份邮件配置保存失败: {exc}", "error")
         return redirect(url_for("management_page"))
 
->>>>>>> main
     update_backup_email_config(
         1 if form.get("backup_email_enabled") == "on" else 0,
         form.get("backup_email_to", ""),
@@ -3084,10 +3038,7 @@ def update_global_tasks():
         1 if form.get("data_zip_enabled") == "on" else 0,
         form.get("data_zip_source", "original"),
         form.get("local_vt_data_path", ""),
-<<<<<<< codex/analyze-and-fix-api-reset-code-issue-mwx7a0
         1 if form.get("local_setting_json_enabled") == "on" else 0,
-=======
->>>>>>> main
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
