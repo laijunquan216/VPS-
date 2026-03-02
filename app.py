@@ -2,7 +2,7 @@ import json
 import os
 import re
 import secrets
-import shutil
+import zipfile
 import shlex
 import smtplib
 import socket
@@ -2335,9 +2335,15 @@ def package_local_vt_data_to_zip(source_dir, request_obj=None):
 
     ts = datetime.now(TIMEZONE).strftime("%Y%m%d-%H%M%S")
     token = secrets.token_hex(4)
-    archive_base = os.path.join(UPLOAD_DATA_DIR, f"local-vt-{ts}-{token}")
-    archive_path = shutil.make_archive(archive_base, "zip", root_dir=source_dir)
-    saved_name = os.path.basename(archive_path)
+    saved_name = f"local-vt-{ts}-{token}.zip"
+    archive_path = os.path.join(UPLOAD_DATA_DIR, saved_name)
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(source_dir):
+            for filename in files:
+                file_path = os.path.join(root, filename)
+                arcname = os.path.relpath(file_path, source_dir)
+                zipf.write(file_path, arcname)
 
     base_url = resolve_panel_base_url(get_global_config(), request_obj)
     direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
