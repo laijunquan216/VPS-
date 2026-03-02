@@ -2338,12 +2338,22 @@ def package_local_vt_data_to_zip(source_dir, request_obj=None):
     saved_name = f"local-vt-{ts}-{token}.zip"
     archive_path = os.path.join(UPLOAD_DATA_DIR, saved_name)
 
+    normalized_source = os.path.normpath(source_dir)
+    source_parent = os.path.dirname(normalized_source)
+    source_base_name = os.path.basename(normalized_source)
+
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(source_dir):
+        for root, dirs, files in os.walk(normalized_source):
+            rel_dir = os.path.relpath(root, source_parent)
+            if rel_dir != ".":
+                zipf.writestr(f"{rel_dir}/", "")
             for filename in files:
                 file_path = os.path.join(root, filename)
-                arcname = os.path.relpath(file_path, source_dir)
+                arcname = os.path.relpath(file_path, source_parent)
                 zipf.write(file_path, arcname)
+
+        if not os.listdir(normalized_source):
+            zipf.writestr(f"{source_base_name}/", "")
 
     base_url = resolve_panel_base_url(get_global_config(), request_obj)
     direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
