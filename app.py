@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import shlex
 import smtplib
 import socket
@@ -135,6 +136,9 @@ def init_db():
                 backup_last_sent_at TEXT,
                 data_zip_url TEXT NOT NULL DEFAULT '',
                 data_zip_enabled INTEGER NOT NULL DEFAULT 0,
+                data_zip_source TEXT NOT NULL DEFAULT 'original',
+                local_vt_data_path TEXT NOT NULL DEFAULT '',
+                local_vt_data_zip_url TEXT NOT NULL DEFAULT '',
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -275,6 +279,9 @@ def init_db():
         ensure_column(conn, "global_config", "backup_last_sent_at TEXT")
         ensure_column(conn, "global_config", "data_zip_url TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "data_zip_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "global_config", "data_zip_source TEXT NOT NULL DEFAULT 'original'")
+        ensure_column(conn, "global_config", "local_vt_data_path TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "global_config", "local_vt_data_zip_url TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -1069,12 +1076,12 @@ def update_backup_email_config(enabled, backup_email_to, interval_days):
             ),
         )
         conn.commit()
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -1092,6 +1099,8 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 notify_email_to.strip(),
                 max(1, int(traffic_sample_interval_minutes)),
                 int(data_zip_enabled),
+                (data_zip_source or "original").strip() if (data_zip_source or "original").strip() in {"original", "uploaded", "local_pack"} else "original",
+                (local_vt_data_path or "").strip(),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -1221,8 +1230,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1244,6 +1253,9 @@ def restore_backup_payload(payload):
                 global_cfg.get("backup_last_sent_at"),
                 global_cfg.get("data_zip_url", ""),
                 int(global_cfg.get("data_zip_enabled", 0) or 0),
+                global_cfg.get("data_zip_source", "original"),
+                global_cfg.get("local_vt_data_path", ""),
+                global_cfg.get("local_vt_data_zip_url", ""),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -2209,8 +2221,16 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 execute_command_and_collect(client, "自定义部署任务", prepared_agent_command, output_lines)
 
         if ssh_command_2 and not skip_post_deploy:
-            if int(global_cfg["data_zip_enabled"] or 0) and (global_cfg["data_zip_url"] or "").strip():
-                ssh_command_2 = _inject_data_zip_url_into_ssh2(ssh_command_2, (global_cfg["data_zip_url"] or "").strip())
+            if int(global_cfg["data_zip_enabled"] or 0):
+                data_zip_source = (global_cfg["data_zip_source"] or "original").strip()
+                selected_zip_url = ""
+                if data_zip_source == "uploaded":
+                    selected_zip_url = (global_cfg["data_zip_url"] or "").strip()
+                elif data_zip_source == "local_pack":
+                    selected_zip_url = (global_cfg["local_vt_data_zip_url"] or "").strip()
+                if selected_zip_url:
+                    ssh_command_2 = _inject_data_zip_url_into_ssh2(ssh_command_2, selected_zip_url)
+                    output_lines.append(f"SSH任务2已按数据源[{data_zip_source}]注入VT数据压缩包链接")
             ssh_command_2, ssh2_password = inject_random_ssh2_password_if_needed(ssh_command_2)
             if ssh2_password:
                 output_lines.append(f"SSH任务2检测到固定密码参数，已替换为随机12位密码: {ssh2_password}")
@@ -2298,6 +2318,35 @@ def save_uploaded_data_zip(file_storage, request_obj=None):
         conn.execute(
             "UPDATE global_config SET data_zip_url=?, updated_at=? WHERE id=1",
             (direct_url, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+    return direct_url
+
+
+def package_local_vt_data_to_zip(source_dir, request_obj=None):
+    source_dir = (source_dir or "").strip()
+    if not source_dir:
+        raise ValueError("请填写本机VT数据目录")
+    if not os.path.isabs(source_dir):
+        raise ValueError("VT数据目录必须使用绝对路径")
+    if not os.path.isdir(source_dir):
+        raise ValueError("VT数据目录不存在或不可访问")
+
+    ts = datetime.now(TIMEZONE).strftime("%Y%m%d-%H%M%S")
+    token = secrets.token_hex(4)
+    archive_base = os.path.join(UPLOAD_DATA_DIR, f"local-vt-{ts}-{token}")
+    archive_path = shutil.make_archive(archive_base, "zip", root_dir=source_dir)
+    saved_name = os.path.basename(archive_path)
+
+    base_url = resolve_panel_base_url(get_global_config(), request_obj)
+    direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET local_vt_data_path=?, local_vt_data_zip_url=?, updated_at=? WHERE id=1",
+            (source_dir, direct_url, now_text),
         )
         conn.commit()
 
@@ -2695,6 +2744,18 @@ def uploaded_data_file(filename):
     return send_from_directory(UPLOAD_DATA_DIR, filename, as_attachment=False)
 
 
+@app.route("/settings/package-local-vt-data", methods=["POST"])
+@login_required
+def package_local_vt_data_for_ssh2():
+    source_dir = (request.form.get("local_vt_data_path") or "").strip()
+    try:
+        direct_url = package_local_vt_data_to_zip(source_dir, request_obj=request)
+        flash(f"本机VT数据已打包并托管成功: {direct_url}", "success")
+    except Exception as exc:
+        flash(f"打包本机VT数据失败: {exc}", "error")
+    return redirect(url_for("settings_page"))
+
+
 @app.route("/settings/upload-data-zip", methods=["POST"])
 @login_required
 def upload_data_zip_for_ssh2():
@@ -2883,6 +2944,8 @@ def update_global_tasks():
         form.get("notify_email_to", ""),
         traffic_sample_interval_minutes,
         1 if form.get("data_zip_enabled") == "on" else 0,
+        form.get("data_zip_source", "original"),
+        form.get("local_vt_data_path", ""),
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
