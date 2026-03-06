@@ -264,6 +264,7 @@ def init_db():
                 subject TEXT NOT NULL,
                 status TEXT NOT NULL,
                 error_message TEXT NOT NULL DEFAULT '',
+                body_text TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )
             """
@@ -326,6 +327,7 @@ def init_db():
         ensure_column(conn, "global_config", "local_setting_json_path TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_setting_json_enabled INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "global_config", "api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "email_history", "body_text TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -596,10 +598,20 @@ def _scp_rest_refresh_access_token(account_row):
 
 
 def scp_rest_login(account_row):
-    token = _scp_rest_refresh_access_token(account_row)
-    if not token:
-        raise RuntimeError("SCP REST登录失败: 未配置可用的 OIDC Refresh Token")
-    return _scp_rest_base_endpoint(account_row["api_endpoint"]), token
+    try:
+        token = _scp_rest_refresh_access_token(account_row)
+        if not token:
+            raise RuntimeError("SCP REST登录失败: 未配置可用的 OIDC Refresh Token")
+        account_id = account_row["id"] if isinstance(account_row, sqlite3.Row) else account_row.get("id")
+        if account_id:
+            update_scp_account_api_status(account_id, "ok", "")
+        return _scp_rest_base_endpoint(account_row["api_endpoint"]), token
+    except Exception as exc:
+        account_id = account_row["id"] if isinstance(account_row, sqlite3.Row) else account_row.get("id")
+        if account_id:
+            update_scp_account_api_status(account_id, "failed", str(exc))
+            notify_scp_api_failure_if_needed(account_row, str(exc))
+        raise
 
 
 def scp_rest_request(account_row, method, path, token=None, payload=None, endpoint_base=None):
@@ -1280,8 +1292,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, api_failure_notify_enabled, panel_password_hash, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1308,6 +1320,7 @@ def restore_backup_payload(payload):
                 global_cfg.get("local_vt_data_zip_url", ""),
                 global_cfg.get("local_setting_json_path", ""),
                 int(global_cfg.get("local_setting_json_enabled", 0) or 0),
+                int(global_cfg.get("api_failure_notify_enabled", 0) or 0),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 global_cfg.get("updated_at"),
             ),
@@ -1677,15 +1690,15 @@ def list_system_events(limit=300):
         return conn.execute("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
 
 
-def record_email_history(category, recipient, subject, status, error_message=""):
+def record_email_history(category, recipient, subject, status, error_message="", body_text=""):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     with closing(get_conn()) as conn:
         conn.execute(
             """
-            INSERT INTO email_history(category, recipient, subject, status, error_message, created_at)
-            VALUES(?,?,?,?,?,?)
+            INSERT INTO email_history(category, recipient, subject, status, error_message, body_text, created_at)
+            VALUES(?,?,?,?,?,?,?)
             """,
-            (str(category or "general")[:64], str(recipient or "")[:255], str(subject or "")[:255], str(status or "unknown")[:16], str(error_message or "")[:1000], now_text),
+            (str(category or "general")[:64], str(recipient or "")[:255], str(subject or "")[:255], str(status or "unknown")[:16], str(error_message or "")[:1000], str(body_text or "")[:50000], now_text),
         )
         conn.commit()
 
@@ -1753,13 +1766,7 @@ def refresh_server_traffic_via_scp(server_row):
     if not account:
         raise RuntimeError("SCP账号不存在")
 
-    try:
-        endpoint_base, token = scp_rest_login(account)
-        update_scp_account_api_status(account["id"], "ok", "")
-    except Exception as exc:
-        update_scp_account_api_status(account["id"], "failed", str(exc))
-        notify_scp_api_failure_if_needed(account, str(exc))
-        raise
+    endpoint_base, token = scp_rest_login(account)
     payload = scp_rest_request(
         account,
         "GET",
@@ -2073,7 +2080,7 @@ def get_smtp_config():
 def send_email_message(subject, body, category="general"):
     smtp = get_smtp_config()
     if not smtp:
-        record_email_history(category, "", subject, "skipped", "SMTP未配置")
+        record_email_history(category, "", subject, "skipped", "SMTP未配置", body)
         return False
 
     msg = EmailMessage()
@@ -2088,10 +2095,10 @@ def send_email_message(subject, body, category="general"):
             if smtp["user"]:
                 server.login(smtp["user"], smtp["password"])
             server.send_message(msg)
-        record_email_history(category, smtp["to"], subject, "success")
+        record_email_history(category, smtp["to"], subject, "success", "", body)
         return True
     except Exception as exc:
-        record_email_history(category, smtp.get("to", ""), subject, "failed", str(exc))
+        record_email_history(category, smtp.get("to", ""), subject, "failed", str(exc), body)
         return False
 
 
@@ -2100,7 +2107,7 @@ def send_email_message(subject, body, category="general"):
 def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None, category="backup"):
     smtp = get_smtp_config()
     if not smtp:
-        record_email_history(category, (to_email or ""), subject, "skipped", "SMTP未配置")
+        record_email_history(category, (to_email or ""), subject, "skipped", "SMTP未配置", body)
         return False
 
     msg = EmailMessage()
@@ -2116,10 +2123,10 @@ def send_email_with_attachment(subject, body, attachment_name, attachment_bytes,
             if smtp["user"]:
                 server.login(smtp["user"], smtp["password"])
             server.send_message(msg)
-        record_email_history(category, msg["To"], subject, "success")
+        record_email_history(category, msg["To"], subject, "success", "", body)
         return True
     except Exception as exc:
-        record_email_history(category, msg["To"], subject, "failed", str(exc))
+        record_email_history(category, msg["To"], subject, "failed", str(exc), body)
         return False
 
 
@@ -3591,7 +3598,6 @@ def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TIMEZONE)
     scheduler.add_job(check_scheduled_jobs, "cron", minute="*")
     scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*")
-    scheduler.add_job(refresh_scp_account_statuses, "cron", minute="*/10")
     scheduler.start()
     return scheduler
 

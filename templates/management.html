@@ -74,6 +74,14 @@
         <tr>
           <td>{{ m.created_at }}</td><td>{{ m.category }}</td><td>{{ m.recipient }}</td><td>{{ m.subject }}</td><td>{{ m.status }}</td><td>{{ m.error_message }}</td>
         </tr>
+        <tr>
+          <td colspan="6" style="background:#f8fafc;">
+            <details>
+              <summary style="cursor:pointer;">查看邮件全文</summary>
+              <pre style="white-space:pre-wrap;margin-top:8px;">{{ m.body_text or '无正文记录' }}</pre>
+            </details>
+          </td>
+        </tr>
       {% else %}
         <tr><td colspan="6">暂无邮件记录</td></tr>
       {% endfor %}
