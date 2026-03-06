@@ -35,6 +35,7 @@
       <div class="grid-form">
         <label class="full">邮件通知（服务器重置成功/失败）</label>
         <label class="inline"><input name="notify_email_enabled" type="checkbox" {% if global_cfg.notify_email_enabled %}checked{% endif %}/> 启用邮件通知</label>
+        <label class="inline"><input name="api_failure_notify_enabled" type="checkbox" {% if global_cfg.api_failure_notify_enabled %}checked{% endif %}/> 启用SCP账号API失败邮件提醒</label>
         <label>SMTP Host<input name="smtp_host" placeholder="smtp.example.com" value="{{ global_cfg.smtp_host }}" /></label>
         <label>SMTP Port<input name="smtp_port" type="number" value="{{ global_cfg.smtp_port or 587 }}" /></label>
         <label>SMTP User<input name="smtp_user" value="{{ global_cfg.smtp_user }}" /></label>
@@ -96,6 +97,16 @@
     <label>账号别名<input name="name" placeholder="例如 netcup-A" required /></label>
     <label>SCP账号<input name="username" required /></label>
     <label class="full">OIDC Refresh Token（必填）<input name="refresh_token" placeholder="离线refresh_token，用于换取Bearer access_token" required /></label>
+    <details class="full" style="margin-top:4px;">
+      <summary style="cursor:pointer;">获取教程</summary>
+      <ol class="hint" style="margin:8px 0 0 18px;">
+        <li>浏览器登录 SCP 面板并保持登录状态。</li>
+        <li>按 F12 打开开发者工具，切换到 Network（网络）面板。</li>
+        <li>在 SCP 页面执行任意操作，找到请求中含 <code>openid-connect/token</code> 的 POST 请求。</li>
+        <li>查看请求体中的 <code>refresh_token=...</code>，复制完整值填入本面板。</li>
+        <li>保存后点击“检测API”确认连通性。</li>
+      </ol>
+    </details>
     <label class="full">API Endpoint<input name="api_endpoint" value="https://www.servercontrolpanel.de/scp-core/api/v1" /></label>
     <button type="submit">添加SCP账号</button>
   </form>
@@ -103,7 +114,7 @@
   <div class="scp-account-list">
     {% for a in scp_accounts %}
       <details class="scp-account-item">
-        <summary>{{ loop.index }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }} [OIDC]</summary>
+        <summary>{{ loop.index }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }} [OIDC] | API状态: {{ a.api_status or "unknown" }} {% if a.api_checked_at %}({{ a.api_checked_at }}){% endif %}</summary>
         <form method="post" action="/scp-accounts/{{ a.id }}/update" class="grid-form">
           <label>账号别名<input name="name" value="{{ a.name }}" required /></label>
           <label>SCP账号<input name="username" value="{{ a.username }}" required /></label>
@@ -114,10 +125,14 @@
           </div>
         </form>
         <div class="button-row">
+          <form method="post" action="/scp-accounts/{{ a.id }}/check">
+            <button type="submit">检测API</button>
+          </form>
           <form method="post" action="/scp-accounts/{{ a.id }}/delete" onsubmit="return confirm('确认删除该SCP账号?')">
             <button class="danger" type="submit">删除</button>
           </form>
         </div>
+        {% if a.api_last_error %}<p class="hint" style="color:#b91c1c;">最近错误：{{ a.api_last_error }}</p>{% endif %}
       </details>
     {% endfor %}
   </div>

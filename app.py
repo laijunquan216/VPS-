@@ -94,6 +94,7 @@ def init_db():
                 auto_reset INTEGER NOT NULL DEFAULT 1,
                 is_renewed INTEGER NOT NULL DEFAULT 0,
                 is_rented INTEGER NOT NULL DEFAULT 0,
+                renew_until_date TEXT NOT NULL DEFAULT '',
                 renter_name TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 agent_token TEXT NOT NULL DEFAULT '',
@@ -141,6 +142,7 @@ def init_db():
                 local_vt_data_zip_url TEXT NOT NULL DEFAULT '',
                 local_setting_json_path TEXT NOT NULL DEFAULT '',
                 local_setting_json_enabled INTEGER NOT NULL DEFAULT 0,
+                api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0,
                 panel_password_hash TEXT,
                 updated_at TEXT
             )
@@ -185,6 +187,10 @@ def init_db():
                 password TEXT NOT NULL,
                 refresh_token TEXT NOT NULL DEFAULT '',
                 api_endpoint TEXT NOT NULL DEFAULT 'https://www.servercontrolpanel.de/scp-core/api/v1',
+                api_status TEXT NOT NULL DEFAULT 'unknown',
+                api_checked_at TEXT,
+                api_last_error TEXT NOT NULL DEFAULT '',
+                api_last_notified_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -235,9 +241,38 @@ def init_db():
             """
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level TEXT NOT NULL DEFAULT 'info',
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '',
+                server_id INTEGER,
+                account_id INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL DEFAULT 'general',
+                recipient TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "is_rented INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "renew_until_date TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "renter_name TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
@@ -261,6 +296,10 @@ def init_db():
         ensure_column(conn, "servers", "scp_server_id TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "reinstall_mode TEXT NOT NULL DEFAULT 'ssh'")
         ensure_column(conn, "scp_accounts", "refresh_token TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "scp_accounts", "api_status TEXT NOT NULL DEFAULT 'unknown'")
+        ensure_column(conn, "scp_accounts", "api_checked_at TEXT")
+        ensure_column(conn, "scp_accounts", "api_last_error TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "scp_accounts", "api_last_notified_at TEXT")
         ensure_column(conn, "job_logs", "summary TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "task_queue", "trigger_type TEXT NOT NULL DEFAULT 'manual'")
         ensure_column(conn, "task_queue", "batch_key TEXT NOT NULL DEFAULT ''")
@@ -286,6 +325,7 @@ def init_db():
         ensure_column(conn, "global_config", "local_vt_data_zip_url TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_setting_json_path TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_setting_json_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "global_config", "api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
@@ -347,15 +387,18 @@ def run_api_image_refresh_job(job_id):
     success = 0
     failed = 0
     append_api_image_refresh_job_output(job_id, f"开始刷新服务器API可用镜像，总计 {total} 台", processed_count=0, success_count=0, failed_count=0, status='running')
+    log_system_event("api_image_refresh", f"开始刷新服务器镜像，总计{total}台")
 
     for row in rows:
         try:
             refresh_server_api_images(row)
             success += 1
             append_api_image_refresh_job_output(job_id, f"[{row['name']}] 镜像刷新成功", processed_count=processed + 1, success_count=success, failed_count=failed, status='running')
+            log_system_event("api_image_refresh", f"镜像刷新成功: {row['name']}", server_id=row["id"])
         except Exception as exc:
             failed += 1
             append_api_image_refresh_job_output(job_id, f"[{row['name']}] 镜像刷新失败: {exc}", processed_count=processed + 1, success_count=success, failed_count=failed, status='running')
+            log_system_event("api_image_refresh", f"镜像刷新失败: {row['name']}", level="error", server_id=row["id"], details=str(exc))
         processed += 1
 
     final_status = 'success' if failed == 0 else 'failed'
@@ -368,6 +411,7 @@ def run_api_image_refresh_job(job_id):
         status=final_status,
         finished=True,
     )
+    log_system_event("api_image_refresh", f"镜像刷新完成：成功{success}台，失败{failed}台")
 
 
 def start_api_image_refresh_background_job():
@@ -1080,12 +1124,12 @@ def update_backup_email_config(enabled, backup_email_to, interval_days):
             ),
         )
         conn.commit()
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path, local_setting_json_enabled):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path, local_setting_json_enabled, api_failure_notify_enabled):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, local_setting_json_enabled=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, local_setting_json_enabled=?, api_failure_notify_enabled=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -1106,6 +1150,7 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 (data_zip_source or "original").strip() if (data_zip_source or "original").strip() in {"original", "uploaded", "local_pack"} else "original",
                 (local_vt_data_path or "").strip(),
                 int(local_setting_json_enabled),
+                int(api_failure_notify_enabled),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -1167,7 +1212,7 @@ def list_detail_rows():
         return conn.execute(
             """
             SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
-                   s.auto_reset, s.is_renewed, s.is_rented, s.sort_order,
+                   s.auto_reset, s.is_renewed, s.is_rented, s.renew_until_date, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
                    l.summary, l.status, l.created_at AS latest_run_at
@@ -1614,6 +1659,90 @@ def sanitize_terminal_text(text):
     return text
 
 
+def log_system_event(event_type, message, level="info", server_id=None, account_id=None, details=""):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            INSERT INTO system_events(level, event_type, message, details, server_id, account_id, created_at)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (str(level or "info")[:16], str(event_type or "general")[:64], str(message or "")[:500], str(details or "")[:4000], server_id, account_id, now_text),
+        )
+        conn.commit()
+
+
+def list_system_events(limit=300):
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+
+
+def record_email_history(category, recipient, subject, status, error_message=""):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            INSERT INTO email_history(category, recipient, subject, status, error_message, created_at)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (str(category or "general")[:64], str(recipient or "")[:255], str(subject or "")[:255], str(status or "unknown")[:16], str(error_message or "")[:1000], now_text),
+        )
+        conn.commit()
+
+
+def list_email_history(limit=200):
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM email_history ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+
+
+def update_scp_account_api_status(account_id, status, error_message=""):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE scp_accounts SET api_status=?, api_checked_at=?, api_last_error=?, updated_at=? WHERE id=?",
+            ((status or "unknown")[:16], now_text, str(error_message or "")[:500], now_text, account_id),
+        )
+        conn.commit()
+
+
+def notify_scp_api_failure_if_needed(account, error_message):
+    cfg = get_global_config()
+    if not cfg or not int(cfg["api_failure_notify_enabled"] or 0):
+        return
+    account_id = account["id"] if isinstance(account, sqlite3.Row) else account.get("id")
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT api_last_notified_at FROM scp_accounts WHERE id=?", (account_id,)).fetchone()
+        if row and row["api_last_notified_at"]:
+            try:
+                last_dt = datetime.strptime(row["api_last_notified_at"], "%Y-%m-%d %H:%M:%S")
+                if datetime.now(TIMEZONE) - last_dt.replace(tzinfo=TIMEZONE) < timedelta(hours=6):
+                    return
+            except Exception:
+                pass
+        conn.execute("UPDATE scp_accounts SET api_last_notified_at=? WHERE id=?", (now_text, account_id))
+        conn.commit()
+
+    subject = f"[VPS面板] SCP账号API连接失败: {account['name']}"
+    body = f"账号: {account['name']} ({account['username']})\n时间: {now_text}\n错误: {error_message}"
+    send_email_message(subject, body, category="scp_api_failure")
+
+
+def check_scp_account_connection(account):
+    try:
+        endpoint_base, token = scp_rest_login(account)
+        scp_rest_request(account, "GET", "servers?limit=1", token=token, endpoint_base=endpoint_base)
+        update_scp_account_api_status(account["id"], "ok", "")
+        log_system_event("scp_api_check", f"SCP账号[{account['name']}] API连接正常", account_id=account["id"])
+        return True, "连接正常"
+    except Exception as exc:
+        msg = str(exc)
+        update_scp_account_api_status(account["id"], "failed", msg)
+        log_system_event("scp_api_check", f"SCP账号[{account['name']}] API连接失败", level="error", account_id=account["id"], details=msg)
+        notify_scp_api_failure_if_needed(account, msg)
+        return False, msg
+
+
 def refresh_server_traffic_via_scp(server_row):
     account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
     scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
@@ -1624,7 +1753,13 @@ def refresh_server_traffic_via_scp(server_row):
     if not account:
         raise RuntimeError("SCP账号不存在")
 
-    endpoint_base, token = scp_rest_login(account)
+    try:
+        endpoint_base, token = scp_rest_login(account)
+        update_scp_account_api_status(account["id"], "ok", "")
+    except Exception as exc:
+        update_scp_account_api_status(account["id"], "failed", str(exc))
+        notify_scp_api_failure_if_needed(account, str(exc))
+        raise
     payload = scp_rest_request(
         account,
         "GET",
@@ -1692,11 +1827,34 @@ def refresh_all_traffic_data_via_scp(now_dt=None):
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
 
+    ok_count = 0
+    fail_count = 0
     for row in rows:
         try:
             refresh_server_traffic_via_scp(row)
-        except Exception:
+            ok_count += 1
+            log_system_event("traffic_sampling", f"流量采样成功: {row['name']} ({row['ip']})", server_id=row["id"])
+        except Exception as exc:
+            fail_count += 1
+            log_system_event("traffic_sampling", f"流量采样失败: {row['name']} ({row['ip']})", level="error", server_id=row["id"], details=str(exc))
             continue
+
+    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+
+
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 
 def update_server_ssh_status(server_id, is_online):
@@ -1718,11 +1876,39 @@ def check_server_ssh_connectivity(server_row, timeout=8):
         return False
 
 
+def _parse_date_text(date_text):
+    text = str(date_text or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _one_month_before(date_obj):
+    year, month = date_obj.year, date_obj.month - 1
+    if month <= 0:
+        month = 12
+        year -= 1
+    day = month_day_safe(year, month, date_obj.day)
+    return datetime(year, month, day).date()
+
+
+def is_before_renew_until(server_row, now_dt):
+    renew_until = _parse_date_text(server_row["renew_until_date"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("renew_until_date"))
+    if not renew_until:
+        return False
+    return now_dt.date() < renew_until
+
+
 def should_reset(server_row):
     now = datetime.now(TIMEZONE)
     if not server_row["auto_reset"]:
         return False
     if server_row["is_renewed"]:
+        return False
+    if is_before_renew_until(server_row, now):
         return False
     if server_row["reset_day"] != now.day:
         return False
@@ -1884,9 +2070,10 @@ def get_smtp_config():
     }
 
 
-def send_email_message(subject, body):
+def send_email_message(subject, body, category="general"):
     smtp = get_smtp_config()
     if not smtp:
+        record_email_history(category, "", subject, "skipped", "SMTP未配置")
         return False
 
     msg = EmailMessage()
@@ -1895,19 +2082,25 @@ def send_email_message(subject, body):
     msg["To"] = smtp["to"]
     msg.set_content(body)
 
-    with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
-        server.starttls()
-        if smtp["user"]:
-            server.login(smtp["user"], smtp["password"])
-        server.send_message(msg)
-    return True
+    try:
+        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
+            server.starttls()
+            if smtp["user"]:
+                server.login(smtp["user"], smtp["password"])
+            server.send_message(msg)
+        record_email_history(category, smtp["to"], subject, "success")
+        return True
+    except Exception as exc:
+        record_email_history(category, smtp.get("to", ""), subject, "failed", str(exc))
+        return False
 
 
 
 
-def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None):
+def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None, category="backup"):
     smtp = get_smtp_config()
     if not smtp:
+        record_email_history(category, (to_email or ""), subject, "skipped", "SMTP未配置")
         return False
 
     msg = EmailMessage()
@@ -1917,12 +2110,17 @@ def send_email_with_attachment(subject, body, attachment_name, attachment_bytes,
     msg.set_content(body)
     msg.add_attachment(attachment_bytes, maintype="application", subtype="json", filename=attachment_name)
 
-    with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
-        server.starttls()
-        if smtp["user"]:
-            server.login(smtp["user"], smtp["password"])
-        server.send_message(msg)
-    return True
+    try:
+        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
+            server.starttls()
+            if smtp["user"]:
+                server.login(smtp["user"], smtp["password"])
+            server.send_message(msg)
+        record_email_history(category, msg["To"], subject, "success")
+        return True
+    except Exception as exc:
+        record_email_history(category, msg["To"], subject, "failed", str(exc))
+        return False
 
 
 def run_scheduled_backup_email(now_dt=None):
@@ -2589,12 +2787,12 @@ def task_worker_loop():
                         (attempt_no, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
                     )
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
-                        conn.execute("UPDATE servers SET is_rented = 0 WHERE id = ?", (row["id"],))
+                        conn.execute("UPDATE servers SET is_rented = 0, is_renewed = 0, renew_until_date = '' WHERE id = ?", (row["id"],))
                     conn.commit()
                 if task["batch_key"]:
                     note = "任务执行完成"
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
-                        note = "任务执行完成；已自动切换为未出租"
+                        note = "任务执行完成；已自动切换为未出租、未续租"
                     upsert_notification_batch_item(task["batch_key"], row, "success", note=note, log_id=task["log_id"])
                     maybe_send_batch_email(task["batch_key"])
                 continue
@@ -2680,6 +2878,19 @@ def check_scheduled_jobs():
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
 
+    # 长期续费：在到期日前一个月的同一天，自动取消“续租中”状态。
+    with closing(get_conn()) as conn:
+        for row in rows:
+            renew_until = _parse_date_text(row["renew_until_date"])
+            if not renew_until:
+                continue
+            one_month_before = _one_month_before(renew_until)
+            if now.date() >= one_month_before and now.date() < renew_until and int(row["is_renewed"] or 0) == 1:
+                conn.execute("UPDATE servers SET is_renewed = 0 WHERE id = ?", (row["id"],))
+                log_system_event("long_renew", f"服务器[{row['name']}] 已到续费日前一月，自动切换为未续租", server_id=row["id"])
+        conn.commit()
+        rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
     due_rows = [row for row in rows if row["auto_reset"] and row["reset_day"] == now.day and int(row["reset_hour"] or 1) == now.hour and int(row["reset_minute"] or 0) == now.minute]
     if not due_rows:
         return
@@ -2687,11 +2898,17 @@ def check_scheduled_jobs():
     ensure_notification_batch(batch_key, scheduled_for)
 
     for row in due_rows:
+        if is_before_renew_until(row, now):
+            upsert_notification_batch_item(batch_key, row, "skipped", note=f"长期续费保护中（续费至{row['renew_until_date']}），已跳过定时重置")
+            log_system_event("scheduled_reset", f"服务器[{row['name']}] 因长期续费保护跳过定时重置", server_id=row["id"], details=row["renew_until_date"])
+            continue
+
         if row["is_renewed"]:
             with closing(get_conn()) as conn:
                 conn.execute("UPDATE servers SET is_renewed = 0 WHERE id = ?", (row["id"],))
                 conn.commit()
             upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置；已自动切换为未续租")
+            log_system_event("scheduled_reset", f"服务器[{row['name']}] 因续租状态跳过定时重置", server_id=row["id"])
             continue
 
         if not should_reset(row):
@@ -2699,6 +2916,7 @@ def check_scheduled_jobs():
             continue
 
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
+        log_system_event("scheduled_reset", f"服务器[{row['name']}] 已触发定时重置任务", server_id=row["id"], details=msg)
         if not ok:
             upsert_notification_batch_item(batch_key, row, "skipped", note=msg, log_id=log_id)
 
@@ -2865,7 +3083,13 @@ def upload_data_zip_for_ssh2():
 @login_required
 def management_page():
     global_cfg = get_global_config()
-    return render_template("management.html", title="面板管理", global_cfg=global_cfg)
+    return render_template(
+        "management.html",
+        title="面板管理",
+        global_cfg=global_cfg,
+        system_events=list_system_events(300),
+        email_history=list_email_history(200),
+    )
 
 
 
@@ -2973,6 +3197,11 @@ def add_scp_account():
         conn.commit()
 
     flash("SCP账号已添加", "success")
+    with closing(get_conn()) as c2:
+        added = c2.execute("SELECT * FROM scp_accounts ORDER BY id DESC LIMIT 1").fetchone()
+    if added:
+        check_scp_account_connection(added)
+        log_system_event("scp_account", f"新增SCP账号: {added['name']}", account_id=added["id"])
     return redirect(url_for("settings_page"))
 
 
@@ -2997,6 +3226,10 @@ def update_scp_account(account_id):
         )
         conn.commit()
 
+    updated = get_scp_account(account_id)
+    if updated:
+        check_scp_account_connection(updated)
+        log_system_event("scp_account", f"更新SCP账号: {updated['name']}", account_id=account_id)
     flash("SCP账号已更新", "success")
     return redirect(url_for("settings_page"))
 
@@ -3009,7 +3242,20 @@ def delete_scp_account(account_id):
         conn.execute("DELETE FROM scp_accounts WHERE id = ?", (account_id,))
         conn.commit()
 
+    log_system_event("scp_account", f"删除SCP账号 id={account_id}", account_id=account_id)
     flash("SCP账号已删除，相关服务器绑定已清空", "success")
+    return redirect(url_for("settings_page"))
+
+
+@app.route("/scp-accounts/<int:account_id>/check", methods=["POST"])
+@login_required
+def check_scp_account(account_id):
+    account = get_scp_account(account_id)
+    if not account:
+        flash("SCP账号不存在", "error")
+        return redirect(url_for("settings_page"))
+    ok, msg = check_scp_account_connection(account)
+    flash(f"SCP账号[{account['name']}] 连接正常" if ok else f"SCP账号[{account['name']}] 连接失败: {msg}", "success" if ok else "error")
     return redirect(url_for("settings_page"))
 
 
@@ -3042,6 +3288,7 @@ def update_global_tasks():
         form.get("data_zip_source", "original"),
         form.get("local_vt_data_path", ""),
         1 if form.get("local_setting_json_enabled") == "on" else 0,
+        1 if form.get("api_failure_notify_enabled") == "on" else 0,
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
@@ -3215,6 +3462,26 @@ def toggle_renew(server_id):
     return redirect(url_for("details_page"))
 
 
+@app.route("/servers/<int:server_id>/renew-until", methods=["POST"])
+@login_required
+def set_renew_until(server_id):
+    date_text = (request.form.get("renew_until_date") or "").strip()
+    renew_until = _parse_date_text(date_text)
+    if date_text and not renew_until:
+        flash("长期续费日期格式错误，请使用 YYYY-MM-DD", "error")
+        return redirect(url_for("details_page"))
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT id, name FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            flash("服务器不存在", "error")
+            return redirect(url_for("details_page"))
+        conn.execute("UPDATE servers SET renew_until_date=? WHERE id=?", (date_text, server_id))
+        conn.commit()
+    log_system_event("long_renew", f"服务器[{row['name']}] 设置长期续费至 {date_text or '空'}", server_id=server_id)
+    flash(f"长期续费日期已更新为 {date_text or '未设置'}", "success")
+    return redirect(url_for("details_page"))
+
+
 @app.route("/servers/<int:server_id>/check-ssh", methods=["POST"])
 @login_required
 def check_ssh_now(server_id):
@@ -3324,6 +3591,7 @@ def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TIMEZONE)
     scheduler.add_job(check_scheduled_jobs, "cron", minute="*")
     scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*")
+    scheduler.add_job(refresh_scp_account_statuses, "cron", minute="*/10")
     scheduler.start()
     return scheduler
 

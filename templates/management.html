@@ -44,4 +44,42 @@
     <button type="submit">修改登录密码</button>
   </form>
 </section>
+
+<section class="panel">
+  <h2>面板整体日志</h2>
+  <p class="hint">记录队列执行、API采样、镜像刷新、SCP账号连通性等事件。</p>
+  <div style="max-height:380px;overflow:auto;">
+    <table class="table-like" style="width:100%;font-size:13px;">
+      <thead><tr><th>时间</th><th>类型</th><th>级别</th><th>消息</th></tr></thead>
+      <tbody>
+      {% for e in system_events %}
+        <tr>
+          <td>{{ e.created_at }}</td><td>{{ e.event_type }}</td><td>{{ e.level }}</td><td>{{ e.message }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4">暂无日志</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>邮件发送历史</h2>
+  <div style="max-height:320px;overflow:auto;">
+    <table class="table-like" style="width:100%;font-size:13px;">
+      <thead><tr><th>时间</th><th>类型</th><th>收件人</th><th>主题</th><th>状态</th><th>错误</th></tr></thead>
+      <tbody>
+      {% for m in email_history %}
+        <tr>
+          <td>{{ m.created_at }}</td><td>{{ m.category }}</td><td>{{ m.recipient }}</td><td>{{ m.subject }}</td><td>{{ m.status }}</td><td>{{ m.error_message }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6">暂无邮件记录</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
 {% endblock %}

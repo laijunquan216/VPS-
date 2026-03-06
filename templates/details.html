@@ -39,7 +39,8 @@
     <div><span>上传流量（本周期）</span><strong>{{ row.traffic_upload_text }}</strong></div>
     <div><span>下载流量（本周期）</span><strong>{{ row.traffic_download_text }}</strong></div>
     <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
-    <div><span>最近采样</span><strong>{{ row.last_traffic_sync_at or '暂无' }}</strong></div>
+    <div><span>最近采样</span><strong>{{ row.last_traffic_sync_at or "暂无" }}</strong></div>
+    <div><span>长期续费至</span><strong>{{ row.renew_until_date or "未设置" }}</strong></div>
   </div>
 
   <div class="server-actions">
@@ -54,6 +55,10 @@
       {% else %}
       <button type="submit">未续租</button>
       {% endif %}
+    </form>
+    <form method="post" action="/servers/{{ row.id }}/renew-until" class="dd-form">
+      <input type="date" name="renew_until_date" value="{{ row.renew_until_date or '' }}" />
+      <button type="submit" class="secondary">{{ ('续费至' ~ row.renew_until_date[5:7]|int ~ '.' ~ row.renew_until_date[8:10]|int) if row.renew_until_date else '长期续费' }}</button>
     </form>
     <form method="post" action="/servers/{{ row.id }}/run">
       <button type="submit">重置-部署PT</button>
