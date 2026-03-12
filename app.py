@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import paramiko
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
 from flask import (
     Flask,
     flash,
@@ -67,8 +68,10 @@ API_IMAGE_REFRESH_LOCK = threading.Lock()
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -1112,10 +1115,13 @@ def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
 
 def get_global_config():
     with closing(get_conn()) as conn:
-        conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         row = conn.execute("SELECT * FROM global_config WHERE id=1").fetchone()
+        if row:
+            return row
+        now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("INSERT OR IGNORE INTO global_config(id, updated_at) VALUES (1, ?)", (now_text,))
         conn.commit()
-        return row
+        return conn.execute("SELECT * FROM global_config WHERE id=1").fetchone()
 
 
 
@@ -1674,15 +1680,18 @@ def sanitize_terminal_text(text):
 
 def log_system_event(event_type, message, level="info", server_id=None, account_id=None, details=""):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
-    with closing(get_conn()) as conn:
-        conn.execute(
-            """
-            INSERT INTO system_events(level, event_type, message, details, server_id, account_id, created_at)
-            VALUES(?,?,?,?,?,?,?)
-            """,
-            (str(level or "info")[:16], str(event_type or "general")[:64], str(message or "")[:500], str(details or "")[:4000], server_id, account_id, now_text),
-        )
-        conn.commit()
+    try:
+        with closing(get_conn()) as conn:
+            conn.execute(
+                """
+                INSERT INTO system_events(level, event_type, message, details, server_id, account_id, created_at)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (str(level or "info")[:16], str(event_type or "general")[:64], str(message or "")[:500], str(details or "")[:4000], server_id, account_id, now_text),
+            )
+            conn.commit()
+    except sqlite3.OperationalError as exc:
+        print(f"[system_events] write skipped due to DB lock: {exc}")
 
 
 def list_system_events(limit=300):
@@ -2886,6 +2895,7 @@ def check_scheduled_jobs():
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
 
     # 长期续费：在到期日前一个月的同一天，自动取消“续租中”状态。
+    long_renew_events = []
     with closing(get_conn()) as conn:
         for row in rows:
             renew_until = _parse_date_text(row["renew_until_date"])
@@ -2894,9 +2904,12 @@ def check_scheduled_jobs():
             one_month_before = _one_month_before(renew_until)
             if now.date() >= one_month_before and now.date() < renew_until and int(row["is_renewed"] or 0) == 1:
                 conn.execute("UPDATE servers SET is_renewed = 0 WHERE id = ?", (row["id"],))
-                log_system_event("long_renew", f"服务器[{row['name']}] 已到续费日前一月，自动切换为未续租", server_id=row["id"])
+                long_renew_events.append((row["id"], row["name"]))
         conn.commit()
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
+    for sid, sname in long_renew_events:
+        log_system_event("long_renew", f"服务器[{sname}] 已到续费日前一月，自动切换为未续租", server_id=sid)
 
     due_rows = [row for row in rows if row["auto_reset"] and row["reset_day"] == now.day and int(row["reset_hour"] or 1) == now.hour and int(row["reset_minute"] or 0) == now.minute]
     if not due_rows:
@@ -3595,9 +3608,9 @@ def run_now(server_id):
 
 
 def start_scheduler():
-    scheduler = BackgroundScheduler(timezone=TIMEZONE)
-    scheduler.add_job(check_scheduled_jobs, "cron", minute="*")
-    scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*")
+    scheduler = BackgroundScheduler(timezone=TIMEZONE, executors={"default": ThreadPoolExecutor(1)})
+    scheduler.add_job(check_scheduled_jobs, "cron", minute="*", max_instances=1, coalesce=True)
+    scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*", max_instances=1, coalesce=True)
     scheduler.start()
     return scheduler
 
