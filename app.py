@@ -11,6 +11,7 @@ import string
 import statistics
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor as FuturesThreadPoolExecutor, as_completed
 from queue import Queue
 from contextlib import closing
 from datetime import datetime, timedelta
@@ -574,7 +575,7 @@ def _scp_rest_extract_token(data):
     return None
 
 
-def _scp_rest_refresh_access_token(account_row):
+def _scp_rest_refresh_access_token(account_row, timeout_seconds=60):
     refresh_token = (account_row["refresh_token"] or "").strip()
     if not refresh_token:
         return None
@@ -593,7 +594,7 @@ def _scp_rest_refresh_access_token(account_row):
         headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
         method="POST",
     )
-    with urlrequest.urlopen(req, timeout=60) as resp:
+    with urlrequest.urlopen(req, timeout=timeout_seconds) as resp:
         data = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
     token = _scp_rest_extract_token(data)
     if not token:
@@ -601,9 +602,9 @@ def _scp_rest_refresh_access_token(account_row):
     return token
 
 
-def scp_rest_login(account_row):
+def scp_rest_login(account_row, timeout_seconds=60):
     try:
-        token = _scp_rest_refresh_access_token(account_row)
+        token = _scp_rest_refresh_access_token(account_row, timeout_seconds=timeout_seconds)
         if not token:
             raise RuntimeError("SCP REST登录失败: 未配置可用的 OIDC Refresh Token")
         account_id = account_row["id"] if isinstance(account_row, sqlite3.Row) else account_row.get("id")
@@ -618,7 +619,7 @@ def scp_rest_login(account_row):
         raise
 
 
-def scp_rest_request(account_row, method, path, token=None, payload=None, endpoint_base=None):
+def scp_rest_request(account_row, method, path, token=None, payload=None, endpoint_base=None, timeout_seconds=60):
     endpoint = (endpoint_base or "").rstrip("/") or _scp_rest_base_endpoint(account_row["api_endpoint"])
     url = f"{endpoint}/{path.lstrip('/')}"
     headers = {"Accept": "application/json"}
@@ -630,7 +631,7 @@ def scp_rest_request(account_row, method, path, token=None, payload=None, endpoi
         headers["Content-Type"] = "application/json"
         data = json.dumps(payload).encode("utf-8")
     req = urlrequest.Request(url, data=data, headers=headers, method=method.upper())
-    with urlrequest.urlopen(req, timeout=60) as resp:
+    with urlrequest.urlopen(req, timeout=timeout_seconds) as resp:
         raw = resp.read().decode("utf-8", errors="ignore")
     return json.loads(raw) if raw else {}
 
@@ -1871,7 +1872,7 @@ def _calc_server_traffic_windows(points, now_dt):
     return out, daily_rows, step_seconds
 
 
-def _fetch_server_network_metrics(server_row, now_dt=None):
+def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
     account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
     scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
     if not account_id or not scp_server_id:
@@ -1881,13 +1882,14 @@ def _fetch_server_network_metrics(server_row, now_dt=None):
     if not account:
         raise RuntimeError("SCP账号不存在")
 
-    endpoint_base, token = scp_rest_login(account)
+    endpoint_base, token = scp_rest_login(account, timeout_seconds=timeout_seconds)
     payload = scp_rest_request(
         account,
         "GET",
         f"servers/{urlparse.quote(scp_server_id)}/metrics/network?hours=744",
         token=token,
         endpoint_base=endpoint_base,
+        timeout_seconds=timeout_seconds,
     )
     points = _normalize_network_metrics_points(payload)
     now_dt = now_dt or datetime.now(TIMEZONE)
@@ -2241,20 +2243,6 @@ def send_email_message(subject, body, category="general"):
 
 
 
-    payload = export_backup_payload()
-    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    ts = now_dt.strftime("%Y%m%d-%H%M%S")
-    ok = send_email_with_attachment(
-        subject=f"[VPS面板] 定期备份文件 {ts}",
-        body=(
-            "这是系统自动发送的数据备份附件。\n"
-            f"发送时间: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"备份周期: 每 {interval_days} 天一次\n"
-        ),
-        attachment_name=f"vps-panel-backup-{ts}.json",
-        attachment_bytes=content,
-        to_email=to_email,
-    )
 
 def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None, category="backup"):
     smtp = get_smtp_config()
@@ -3192,36 +3180,50 @@ def details_page():
 def traffic_page():
     rows = list_servers()
     now_dt = datetime.now(TIMEZONE)
-    report_rows = []
+    report_rows = [dict(row) for row in rows]
+    report_by_id = {item.get("id"): item for item in report_rows}
 
-    for row in rows:
-        item = dict(row)
-        try:
-            windows, daily_rows, step_seconds, sample_count = _fetch_server_network_metrics(row, now_dt=now_dt)
-            item["metrics_error"] = ""
-            item["sample_step_seconds"] = step_seconds
-            item["sample_count"] = sample_count
-            item["windows"] = windows
-            item["daily_rows"] = daily_rows
-            item["today_total_text"] = format_bytes(windows["today"]["total"])
-            item["h6_total_text"] = format_bytes(windows["6h"]["total"])
-            item["h24_total_text"] = format_bytes(windows["24h"]["total"])
-            item["d7_total_text"] = format_bytes(windows["7d"]["total"])
-            item["d31_total_text"] = format_bytes(windows["31d"]["total"])
-            for key in ("today", "6h", "24h", "7d", "31d"):
-                item[f"{key}_rx_text"] = format_bytes(windows[key]["rx"])
-                item[f"{key}_tx_text"] = format_bytes(windows[key]["tx"])
-            for daily in item["daily_rows"]:
-                daily["rx_text"] = format_bytes(daily["rx"])
-                daily["tx_text"] = format_bytes(daily["tx"])
-                daily["total_text"] = format_bytes(daily["total"])
-        except Exception as exc:
-            item["metrics_error"] = str(exc)
-            item["sample_step_seconds"] = 0
-            item["sample_count"] = 0
-            item["windows"] = {}
-            item["daily_rows"] = []
-        report_rows.append(item)
+    for item in report_rows:
+        item["metrics_error"] = "统计排队中"
+        item["sample_step_seconds"] = 0
+        item["sample_count"] = 0
+        item["windows"] = {}
+        item["daily_rows"] = []
+
+    max_workers = min(4, max(1, len(rows)))
+    with FuturesThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(_fetch_server_network_metrics, row, now_dt, 20): row["id"]
+            for row in rows
+        }
+        for future in as_completed(future_map):
+            server_id = future_map[future]
+            item = report_by_id.get(server_id)
+            if not item:
+                continue
+            try:
+                windows, daily_rows, step_seconds, sample_count = future.result()
+                item["metrics_error"] = ""
+                item["sample_step_seconds"] = step_seconds
+                item["sample_count"] = sample_count
+                item["windows"] = windows
+                item["daily_rows"] = daily_rows
+                item["today_total_text"] = format_bytes(windows["today"]["total"])
+                item["h6_total_text"] = format_bytes(windows["6h"]["total"])
+                item["h24_total_text"] = format_bytes(windows["24h"]["total"])
+                item["d7_total_text"] = format_bytes(windows["7d"]["total"])
+                item["d31_total_text"] = format_bytes(windows["31d"]["total"])
+                for key in ("today", "6h", "24h", "7d", "31d"):
+                    item[f"{key}_rx_text"] = format_bytes(windows[key]["rx"])
+                    item[f"{key}_tx_text"] = format_bytes(windows[key]["tx"])
+                for daily in item["daily_rows"]:
+                    daily["rx_text"] = format_bytes(daily["rx"])
+                    daily["tx_text"] = format_bytes(daily["tx"])
+                    daily["total_text"] = format_bytes(daily["total"])
+            except Exception as exc:
+                item["metrics_error"] = str(exc)
+
+    report_rows.sort(key=lambda x: (x.get("name") or "").lower())
 
     return render_template(
         "traffic.html",
