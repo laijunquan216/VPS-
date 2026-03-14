@@ -2122,6 +2122,20 @@ def refresh_scp_account_statuses():
             fail_count += 1
     log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
+
 
 def update_server_ssh_status(server_id, is_online):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
