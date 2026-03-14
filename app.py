@@ -8,6 +8,7 @@ import smtplib
 import socket
 import sqlite3
 import string
+import statistics
 import threading
 import time
 from queue import Queue
@@ -1765,6 +1766,134 @@ def check_scp_account_connection(account):
         return False, msg
 
 
+
+
+def _parse_scp_metric_timestamp(ts_text):
+    if not ts_text:
+        return None
+    text = str(ts_text).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    return dt.astimezone(TIMEZONE)
+
+
+def _normalize_network_metrics_points(payload):
+    if not isinstance(payload, dict):
+        return []
+    points = []
+    for ts_text, metric_map in payload.items():
+        dt_local = _parse_scp_metric_timestamp(ts_text)
+        if not dt_local or not isinstance(metric_map, dict):
+            continue
+        rx_bps = 0.0
+        tx_bps = 0.0
+        for key, value in metric_map.items():
+            try:
+                val = float(value or 0)
+            except Exception:
+                continue
+            upper = str(key).upper()
+            if upper.endswith(" RX"):
+                rx_bps += val
+            elif upper.endswith(" TX"):
+                tx_bps += val
+        points.append({"ts": dt_local, "rx_bps": max(rx_bps, 0.0), "tx_bps": max(tx_bps, 0.0)})
+    points.sort(key=lambda item: item["ts"])
+    return points
+
+
+def _infer_metric_step_seconds(points, default_seconds=600):
+    if len(points) < 2:
+        return default_seconds
+    diffs = []
+    for idx in range(1, len(points)):
+        diff = int((points[idx]["ts"] - points[idx - 1]["ts"]).total_seconds())
+        if diff > 0:
+            diffs.append(diff)
+    if not diffs:
+        return default_seconds
+    try:
+        median_val = int(statistics.median(diffs))
+    except Exception:
+        median_val = default_seconds
+    return max(60, min(median_val, 3600))
+
+
+def _integrate_points(points, start_dt, end_dt, step_seconds):
+    rx = 0.0
+    tx = 0.0
+    for item in points:
+        ts = item["ts"]
+        if ts < start_dt or ts > end_dt:
+            continue
+        rx += item["rx_bps"] * step_seconds
+        tx += item["tx_bps"] * step_seconds
+    return int(max(rx, 0.0)), int(max(tx, 0.0))
+
+
+def _calc_server_traffic_windows(points, now_dt):
+    step_seconds = _infer_metric_step_seconds(points)
+    today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    windows = {
+        "today": (today_start, now_dt),
+        "6h": (now_dt - timedelta(hours=6), now_dt),
+        "24h": (now_dt - timedelta(hours=24), now_dt),
+        "7d": (now_dt - timedelta(days=7), now_dt),
+        "31d": (now_dt - timedelta(days=31), now_dt),
+    }
+    out = {}
+    for key, (start_dt, end_dt) in windows.items():
+        rx, tx = _integrate_points(points, start_dt, end_dt, step_seconds)
+        out[key] = {"rx": rx, "tx": tx, "total": rx + tx}
+
+    daily_rows = []
+    for offset in range(30, -1, -1):
+        day_start = (now_dt - timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = min(day_start + timedelta(days=1), now_dt)
+        if day_end <= day_start:
+            continue
+        rx, tx = _integrate_points(points, day_start, day_end, step_seconds)
+        daily_rows.append({
+            "date": day_start.strftime("%Y-%m-%d"),
+            "rx": rx,
+            "tx": tx,
+            "total": rx + tx,
+        })
+
+    return out, daily_rows, step_seconds
+
+
+def _fetch_server_network_metrics(server_row, now_dt=None):
+    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
+    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
+    if not account_id or not scp_server_id:
+        raise RuntimeError("缺少SCP账号绑定或服务器ID")
+
+    account = get_scp_account(account_id)
+    if not account:
+        raise RuntimeError("SCP账号不存在")
+
+    endpoint_base, token = scp_rest_login(account)
+    payload = scp_rest_request(
+        account,
+        "GET",
+        f"servers/{urlparse.quote(scp_server_id)}/metrics/network?hours=744",
+        token=token,
+        endpoint_base=endpoint_base,
+    )
+    points = _normalize_network_metrics_points(payload)
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    windows, daily_rows, step_seconds = _calc_server_traffic_windows(points, now_dt)
+    return windows, daily_rows, step_seconds, len(points)
+
 def refresh_server_traffic_via_scp(server_row):
     account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
     scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
@@ -2112,6 +2241,20 @@ def send_email_message(subject, body, category="general"):
 
 
 
+    payload = export_backup_payload()
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    ts = now_dt.strftime("%Y%m%d-%H%M%S")
+    ok = send_email_with_attachment(
+        subject=f"[VPS面板] 定期备份文件 {ts}",
+        body=(
+            "这是系统自动发送的数据备份附件。\n"
+            f"发送时间: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"备份周期: 每 {interval_days} 天一次\n"
+        ),
+        attachment_name=f"vps-panel-backup-{ts}.json",
+        attachment_bytes=content,
+        to_email=to_email,
+    )
 
 def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None, category="backup"):
     smtp = get_smtp_config()
@@ -3039,6 +3182,51 @@ def details_page():
         failed=failed,
         never=never,
         latest_api_image_refresh_job=get_latest_api_image_refresh_job(),
+    )
+
+
+
+
+@app.route("/traffic")
+@login_required
+def traffic_page():
+    rows = list_servers()
+    now_dt = datetime.now(TIMEZONE)
+    report_rows = []
+
+    for row in rows:
+        item = dict(row)
+        try:
+            windows, daily_rows, step_seconds, sample_count = _fetch_server_network_metrics(row, now_dt=now_dt)
+            item["metrics_error"] = ""
+            item["sample_step_seconds"] = step_seconds
+            item["sample_count"] = sample_count
+            item["windows"] = windows
+            item["daily_rows"] = daily_rows
+            item["today_total_text"] = format_bytes(windows["today"]["total"])
+            item["h6_total_text"] = format_bytes(windows["6h"]["total"])
+            item["h24_total_text"] = format_bytes(windows["24h"]["total"])
+            item["d7_total_text"] = format_bytes(windows["7d"]["total"])
+            item["d31_total_text"] = format_bytes(windows["31d"]["total"])
+            for key in ("today", "6h", "24h", "7d", "31d"):
+                item[f"{key}_rx_text"] = format_bytes(windows[key]["rx"])
+                item[f"{key}_tx_text"] = format_bytes(windows[key]["tx"])
+            for daily in item["daily_rows"]:
+                daily["rx_text"] = format_bytes(daily["rx"])
+                daily["tx_text"] = format_bytes(daily["tx"])
+                daily["total_text"] = format_bytes(daily["total"])
+        except Exception as exc:
+            item["metrics_error"] = str(exc)
+            item["sample_step_seconds"] = 0
+            item["sample_count"] = 0
+            item["windows"] = {}
+            item["daily_rows"] = []
+        report_rows.append(item)
+
+    return render_template(
+        "traffic.html",
+        rows=report_rows,
+        generated_at=now_dt.strftime("%Y-%m-%d %H:%M:%S"),
     )
 
 

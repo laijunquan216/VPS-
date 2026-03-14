@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+{% set active = 'traffic' %}
+{% set title = '流量统计' %}
+{% block content %}
+<section class="panel">
+  <div class="section-head">
+    <h2>流量统计</h2>
+    <button type="button" onclick="window.location.reload()">刷新统计</button>
+  </div>
+  <p class="hint">统计时间：{{ generated_at }}（北京时间）。通过 SCP API `/api/v1/servers/{serverId}/metrics/network` 获取过去 31 天 10 分钟采样数据，按 bytes/s × 采样间隔积分计算总流量。</p>
+</section>
+
+{% for row in rows %}
+<section class="panel">
+  <h3>{{ row.name }} ({{ row.ip }})</h3>
+  {% if row.metrics_error %}
+    <p class="flash error">统计失败：{{ row.metrics_error }}</p>
+  {% else %}
+    <p class="hint">采样点：{{ row.sample_count }}，推断采样间隔：{{ row.sample_step_seconds }} 秒</p>
+    <div class="traffic-summary-grid">
+      <article>
+        <h4>当日总流量（00:00 到现在）</h4>
+        <p class="traffic-total">{{ row.today_total_text }}</p>
+        <p>上传：{{ row.today_rx_text }} / 下载：{{ row.today_tx_text }}</p>
+      </article>
+      <article>
+        <h4>过去 6 小时</h4>
+        <p class="traffic-total">{{ row.h6_total_text }}</p>
+        <p>上传：{{ row['6h_rx_text'] }} / 下载：{{ row['6h_tx_text'] }}</p>
+      </article>
+      <article>
+        <h4>过去 24 小时</h4>
+        <p class="traffic-total">{{ row.h24_total_text }}</p>
+        <p>上传：{{ row['24h_rx_text'] }} / 下载：{{ row['24h_tx_text'] }}</p>
+      </article>
+      <article>
+        <h4>过去 7 天</h4>
+        <p class="traffic-total">{{ row.d7_total_text }}</p>
+        <p>上传：{{ row['7d_rx_text'] }} / 下载：{{ row['7d_tx_text'] }}</p>
+      </article>
+      <article>
+        <h4>过去 31 天</h4>
+        <p class="traffic-total">{{ row.d31_total_text }}</p>
+        <p>上传：{{ row['31d_rx_text'] }} / 下载：{{ row['31d_tx_text'] }}</p>
+      </article>
+    </div>
+
+    <details class="log-group" open>
+      <summary>过去 31 天每日流量统计（上传 + 下载）</summary>
+      <div class="table-wrap">
+        <table class="table-like traffic-table">
+          <thead>
+            <tr><th>日期</th><th>上传</th><th>下载</th><th>总流量</th></tr>
+          </thead>
+          <tbody>
+            {% for day in row.daily_rows %}
+            <tr>
+              <td>{{ day.date }}</td>
+              <td>{{ day.rx_text }}</td>
+              <td>{{ day.tx_text }}</td>
+              <td><strong>{{ day.total_text }}</strong></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4">无可用采样数据</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  {% endif %}
+</section>
+{% else %}
+<section class="panel"><p>暂无服务器。</p></section>
+{% endfor %}
+{% endblock %}

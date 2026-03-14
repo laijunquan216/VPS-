@@ -120,3 +120,12 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .scp-account-item > summary{cursor:pointer;font-weight:700}
 .scp-account-item[open]{background:#fff}
 .scp-account-item form{margin-top:10px}
+
+.traffic-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:10px 0}
+.traffic-summary-grid article{border:1px solid #e2e8f0;border-radius:10px;padding:10px;background:#f8fafc}
+.traffic-summary-grid h4{margin:0 0 8px 0;font-size:14px}
+.traffic-total{font-size:18px;font-weight:800;margin:0 0 4px 0}
+.table-wrap{overflow:auto}
+.traffic-table th,.traffic-table td{white-space:nowrap}
+
+.table-like{width:100%;border-collapse:collapse}.table-like th,.table-like td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
