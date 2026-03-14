@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% set active = 'rentals' %}
+{% set title = '出租管理' %}
+{% block content %}
+<section class="panel">
+  <div class="section-head">
+    <h2>出租管理</h2>
+  </div>
+  <p class="hint">下月租户状态用于跟踪续租计划：选择“确认续租”会联动服务器详情为已续租；选择“不续租”会联动为未续租。</p>
+
+  <div class="table-wrap">
+    <table class="table-like rental-table">
+      <thead>
+        <tr>
+          <th>服务器名称</th>
+          <th>刷新日期</th>
+          <th>目前租户</th>
+          <th>下月租户</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td>{{ row.refresh_day_text }}</td>
+          <td>{{ row.renter_name or '未填写' }}</td>
+          <td>
+            <div class="rental-next-box">
+              <div class="rental-next-text">{{ row.next_month_tenant_text }}</div>
+              <form method="post" action="{{ url_for('update_rental_next_status', server_id=row.id) }}" class="rental-next-form">
+                <select name="next_rent_status">
+                  <option value="unknown" {% if row.next_rent_status == 'unknown' %}selected{% endif %}>未知</option>
+                  <option value="confirmed" {% if row.next_rent_status == 'confirmed' %}selected{% endif %}>确认续租</option>
+                  <option value="non_renew" {% if row.next_rent_status == 'non_renew' %}selected{% endif %}>不续租</option>
+                </select>
+                <button type="submit">保存</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">暂无服务器数据</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

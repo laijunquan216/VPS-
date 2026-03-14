@@ -109,6 +109,7 @@ def init_db():
                 is_renewed INTEGER NOT NULL DEFAULT 0,
                 is_rented INTEGER NOT NULL DEFAULT 0,
                 renew_until_date TEXT NOT NULL DEFAULT '',
+                next_rent_status TEXT NOT NULL DEFAULT 'unknown',
                 renter_name TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 agent_token TEXT NOT NULL DEFAULT '',
@@ -300,6 +301,7 @@ def init_db():
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "is_rented INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "renew_until_date TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "next_rent_status TEXT NOT NULL DEFAULT 'unknown'")
         ensure_column(conn, "servers", "renter_name TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
@@ -521,6 +523,43 @@ def save_traffic_metrics_cache(server_id, windows, daily_rows, steps, samples):
 def get_server(server_id):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
+
+
+def _normalize_next_rent_status(value):
+    text = str(value or "unknown").strip().lower()
+    if text in {"confirmed", "unknown", "non_renew"}:
+        return text
+    return "unknown"
+
+
+def _format_next_month_tenant(row):
+    renter = str(row["renter_name"] or "").strip()
+    status = _normalize_next_rent_status(row["next_rent_status"])
+    if status == "unknown" and int(row["is_renewed"] or 0) == 1:
+        status = "confirmed"
+    if status == "confirmed":
+        if renter:
+            if "（续费）" in renter:
+                return renter
+            return f"{renter}（续费）"
+        return "已确认续租（待补充租户）"
+    if status == "non_renew":
+        return "不续租"
+    return "未知"
+
+
+def list_rental_management_rows():
+    rows = list_servers()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["next_rent_status"] = _normalize_next_rent_status(item.get("next_rent_status"))
+        if item["next_rent_status"] == "unknown" and int(item.get("is_renewed") or 0) == 1:
+            item["next_rent_status"] = "confirmed"
+        item["next_month_tenant_text"] = _format_next_month_tenant(item)
+        item["refresh_day_text"] = f"{int(item.get('reset_day') or 1)}号"
+        out.append(item)
+    return out
 
 
 def list_scp_accounts():
@@ -1310,7 +1349,7 @@ def list_detail_rows():
         return conn.execute(
             """
             SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
-                   s.auto_reset, s.is_renewed, s.is_rented, s.renew_until_date, s.sort_order,
+                   s.auto_reset, s.is_renewed, s.is_rented, s.renew_until_date, s.next_rent_status, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
                    l.summary, l.status, l.created_at AS latest_run_at
@@ -1415,8 +1454,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -1431,6 +1470,8 @@ def restore_backup_payload(payload):
                     int(server.get("auto_reset", 0)),
                     int(server.get("is_renewed", 0)),
                     int(server.get("is_rented", 0)),
+                    server.get("renew_until_date", ""),
+                    _normalize_next_rent_status(server.get("next_rent_status", "unknown")),
                     (server.get("renter_name", "") or "").strip(),
                     int(server.get("sort_order", 0)),
                     int(server.get("max_retries", 2)),
@@ -2093,6 +2134,20 @@ def refresh_all_traffic_data_via_scp(now_dt=None):
             continue
 
     log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def refresh_scp_account_statuses():
     accounts = list_scp_accounts()
@@ -3442,6 +3497,41 @@ def settings_page():
     )
 
 
+@app.route("/rentals")
+@login_required
+def rentals_page():
+    return render_template("rentals.html", rows=list_rental_management_rows())
+
+
+@app.post("/rentals/<int:server_id>/next-status")
+@login_required
+def update_rental_next_status(server_id):
+    status = _normalize_next_rent_status(request.form.get("next_rent_status"))
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT id, name, renter_name FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            flash("服务器不存在", "error")
+            return redirect(url_for("rentals_page"))
+
+        is_renewed = 1 if status == "confirmed" else 0 if status == "non_renew" else None
+        if is_renewed is None:
+            conn.execute("UPDATE servers SET next_rent_status = ? WHERE id = ?", (status, server_id))
+        else:
+            conn.execute(
+                "UPDATE servers SET next_rent_status = ?, is_renewed = ? WHERE id = ?",
+                (status, is_renewed, server_id),
+            )
+        conn.commit()
+
+    if status == "confirmed":
+        flash(f"[{row['name']}] 下月租户已标记为确认续租，服务器详情已切换为已续租", "success")
+    elif status == "non_renew":
+        flash(f"[{row['name']}] 已标记不续租，服务器详情已切换为未续租", "success")
+    else:
+        flash(f"[{row['name']}] 下月租户状态已设置为未知", "success")
+    return redirect(url_for("rentals_page"))
+
+
 
 
 @app.route("/files/<path:filename>")
@@ -3497,6 +3587,15 @@ def management_page():
 
 
 
+@app.route("/management/backup-email", methods=["POST"])
+@login_required
+def update_backup_email_settings():
+    form = request.form
+    try:
+        interval_days = parse_int_form_field(form, "backup_interval_days", default=7, min_value=1, max_value=365)
+    except ValueError as exc:
+        flash(f"备份邮件配置保存失败: {exc}", "error")
+        return redirect(url_for("management_page"))
 
 @app.route("/management/backup-email", methods=["POST"])
 @login_required
