@@ -144,3 +144,17 @@ systemctl status vps-panel.service --no-pager
 journalctl -u vps-panel.service -n 200 --no-pager
 sudo systemctl restart vps-panel.service
 ```
+
+### 4) 每月重置前自检（推荐）
+
+可在重置前 5 分钟执行下面脚本，提前确认：
+- 本轮应触发服务器清单
+- DB 写锁状态
+- 邮件配置是否齐全
+
+```bash
+cd /opt/vps-panel-src
+python3 scripts/monthly_reset_precheck.py --db /opt/vps-panel/panel.db --target "2026-03-13 01:00"
+```
+
+不传 `--target` 时，默认检查“当前分钟”对应轮次。

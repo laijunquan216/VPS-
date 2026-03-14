@@ -1,0 +1,212 @@
+{% extends 'base.html' %}
+{% set active = 'traffic' %}
+{% set title = '流量统计' %}
+{% block content %}
+<section class="panel">
+  <div class="section-head">
+    <h2>流量统计</h2>
+    <form method="post" action="{{ url_for('refresh_traffic_page_data') }}">
+      <button type="submit">手动更新数据</button>
+    </form>
+  </div>
+  <p class="hint">本页默认只展示缓存结果，点击“手动更新数据”后才会向 SCP API 拉取并刷新。</p>
+  {% if refresh_state.running %}
+    <p class="flash warning">更新进行中（开始于 {{ refresh_state.started_at }}），请稍后刷新页面查看结果。</p>
+  {% elif refresh_state.message %}
+    <p class="hint">{{ refresh_state.message }}{% if refresh_state.finished_at %}（完成于 {{ refresh_state.finished_at }}）{% endif %}</p>
+  {% endif %}
+</section>
+
+{% for row in rows %}
+<section class="panel">
+  <h3>{{ row.name }} ({{ row.ip }})</h3>
+  {% if row.metrics_error %}
+    <p class="flash error">统计失败：{{ row.metrics_error }}</p>
+  {% else %}
+    <p class="hint">缓存时间：{{ row.generated_at }}（北京时间）</p>
+    <p class="hint">
+      采样间隔：当日 {{ row.sample_steps.today or '-' }} 秒 / 6小时 {{ row.sample_steps['6h'] or '-' }} 秒 /
+      24小时 {{ row.sample_steps['24h'] or '-' }} 秒 / 7天 {{ row.sample_steps['7d'] or '-' }} 秒 /
+      31天 {{ row.sample_steps['31d'] or '-' }} 秒；每日统计采用 {{ row.sample_steps.daily_31d or '-' }} 秒。
+    </p>
+    <p class="hint">
+      采样点：当日 {{ row.sample_counts.today or 0 }} / 6小时 {{ row.sample_counts['6h'] or 0 }} /
+      24小时 {{ row.sample_counts['24h'] or 0 }} / 7天 {{ row.sample_counts['7d'] or 0 }} /
+      31天 {{ row.sample_counts['31d'] or 0 }}。
+    </p>
+    <div class="traffic-summary-grid">
+      <article>
+        <h4>当日总流量（00:00 到现在）</h4>
+        <p class="traffic-total">{{ row.today_total_text }}</p>
+        <p>上传：{{ row.today_rx_text }} / 下载：{{ row.today_tx_text }}</p>
+      </article>
+      <article>
+        <h4>过去 6 小时</h4>
+        <p class="traffic-total">{{ row.h6_total_text }}</p>
+        <p>上传：{{ row['6h_rx_text'] }} / 下载：{{ row['6h_tx_text'] }}</p>
+      </article>
+      <article>
+        <h4>过去 24 小时</h4>
+        <p class="traffic-total">{{ row.h24_total_text }}</p>
+        <p>上传：{{ row['24h_rx_text'] }} / 下载：{{ row['24h_tx_text'] }}</p>
+      </article>
+      <article>
+        <h4>过去 7 天</h4>
+        <p class="traffic-total">{{ row.d7_total_text }}</p>
+        <p>上传：{{ row['7d_rx_text'] }} / 下载：{{ row['7d_tx_text'] }}</p>
+      </article>
+      <article>
+        <h4>过去 31 天</h4>
+        <p class="traffic-total">{{ row.d31_total_text }}</p>
+        <p>上传：{{ row['31d_rx_text'] }} / 下载：{{ row['31d_tx_text'] }}</p>
+      </article>
+    </div>
+
+    <details class="log-group">
+      <summary>过去 31 天每日流量统计（上传 + 下载）</summary>
+      <div class="traffic-chart-block">
+        <div class="traffic-chart" data-days='{{ row.daily_rows|tojson }}'>
+          <svg class="traffic-chart-svg" viewBox="0 0 960 300" preserveAspectRatio="none"></svg>
+          <div class="traffic-chart-tooltip" hidden></div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="table-like traffic-table">
+          <thead>
+            <tr><th>日期</th><th>上传</th><th>下载</th><th>总流量</th></tr>
+          </thead>
+          <tbody>
+            {% for day in row.daily_rows %}
+            <tr>
+              <td>{{ day.date }}</td>
+              <td>{{ day.rx_text }}</td>
+              <td>{{ day.tx_text }}</td>
+              <td><strong>{{ day.total_text }}</strong></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4">无可用采样数据</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  {% endif %}
+</section>
+{% else %}
+<section class="panel"><p>暂无服务器。</p></section>
+{% endfor %}
+
+<script>
+(function () {
+  function formatBytes(v) {
+    const value = Number(v || 0);
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let idx = 0;
+    let n = value;
+    while (n >= 1024 && idx < units.length - 1) {
+      n /= 1024;
+      idx += 1;
+    }
+    return `${n.toFixed(n >= 100 || idx === 0 ? 0 : n >= 10 ? 1 : 2)} ${units[idx]}`;
+  }
+
+  document.querySelectorAll('.traffic-chart').forEach((chartEl) => {
+    let rows = [];
+    try {
+      rows = JSON.parse(chartEl.dataset.days || '[]');
+    } catch (e) {
+      rows = [];
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      chartEl.innerHTML = '<p class="hint">暂无折线图数据</p>';
+      return;
+    }
+
+    const svg = chartEl.querySelector('svg');
+    const tooltip = chartEl.querySelector('.traffic-chart-tooltip');
+    const W = 960;
+    const H = 300;
+    const P = { l: 56, r: 16, t: 20, b: 36 };
+    const innerW = W - P.l - P.r;
+    const innerH = H - P.t - P.b;
+    const maxY = Math.max(...rows.map((r) => Math.max(Number(r.rx || 0), Number(r.tx || 0))), 1);
+    const stepX = rows.length <= 1 ? innerW : innerW / (rows.length - 1);
+
+    const xAt = (i) => P.l + i * stepX;
+    const yAt = (v) => P.t + innerH - (Number(v || 0) / maxY) * innerH;
+
+    const mkPath = (getter) => rows.map((r, i) => `${i === 0 ? 'M' : 'L'}${xAt(i)},${yAt(getter(r))}`).join(' ');
+
+    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    bg.setAttribute('x', P.l); bg.setAttribute('y', P.t); bg.setAttribute('width', innerW); bg.setAttribute('height', innerH);
+    bg.setAttribute('fill', '#f8fafc'); bg.setAttribute('stroke', '#e2e8f0');
+    svg.appendChild(bg);
+
+    const mkLine = (d, color) => {
+      const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', color);
+      p.setAttribute('stroke-width', '2.5');
+      svg.appendChild(p);
+    };
+    mkLine(mkPath((r) => r.rx), '#2563eb');
+    mkLine(mkPath((r) => r.tx), '#ea580c');
+
+    const legend = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    legend.setAttribute('x', P.l);
+    legend.setAttribute('y', H - 10);
+    legend.setAttribute('fill', '#334155');
+    legend.setAttribute('font-size', '12');
+    legend.textContent = '蓝色=上传  橙色=下载';
+    svg.appendChild(legend);
+
+    rows.forEach((r, i) => {
+      const x = xAt(i);
+      const yRx = yAt(r.rx);
+      const yTx = yAt(r.tx);
+
+      const addPoint = (y, color, kind) => {
+        const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        c.setAttribute('cx', x);
+        c.setAttribute('cy', y);
+        c.setAttribute('r', '3.2');
+        c.setAttribute('fill', color);
+        c.setAttribute('class', 'traffic-point');
+        c.dataset.date = r.date || '';
+        c.dataset.rx = String(r.rx || 0);
+        c.dataset.tx = String(r.tx || 0);
+        c.dataset.kind = kind;
+
+        c.addEventListener('mouseenter', () => {
+          tooltip.hidden = false;
+          tooltip.innerHTML = `<strong>${c.dataset.date}</strong><br>上传：${formatBytes(c.dataset.rx)}<br>下载：${formatBytes(c.dataset.tx)}`;
+        });
+        c.addEventListener('mousemove', (ev) => {
+          const rect = chartEl.getBoundingClientRect();
+          const pad = 8;
+          const offset = 12;
+          const rawLeft = ev.clientX - rect.left + offset;
+          const rawTop = ev.clientY - rect.top + offset;
+          const maxLeft = Math.max(pad, rect.width - tooltip.offsetWidth - pad);
+          const maxTop = Math.max(pad, rect.height - tooltip.offsetHeight - pad);
+          const left = Math.min(Math.max(rawLeft, pad), maxLeft);
+          const top = Math.min(Math.max(rawTop, pad), maxTop);
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
+        });
+        c.addEventListener('mouseleave', () => {
+          tooltip.hidden = true;
+        });
+
+        svg.appendChild(c);
+      };
+
+      addPoint(yRx, '#2563eb', 'rx');
+      addPoint(yTx, '#ea580c', 'tx');
+    });
+  });
+})();
+</script>
+{% endblock %}
