@@ -3597,23 +3597,6 @@ def update_backup_email_settings():
         flash(f"备份邮件配置保存失败: {exc}", "error")
         return redirect(url_for("management_page"))
 
-@app.route("/management/backup-email", methods=["POST"])
-@login_required
-def update_backup_email_settings():
-    form = request.form
-    try:
-        interval_days = parse_int_form_field(form, "backup_interval_days", default=7, min_value=1, max_value=365)
-    except ValueError as exc:
-        flash(f"备份邮件配置保存失败: {exc}", "error")
-        return redirect(url_for("management_page"))
-
-    update_backup_email_config(
-        1 if form.get("backup_email_enabled") == "on" else 0,
-        form.get("backup_email_to", ""),
-        interval_days,
-    )
-    flash("定期备份邮件配置已更新", "success")
-    return redirect(url_for("management_page"))
 @app.route("/management/change-password", methods=["POST"])
 @login_required
 def change_panel_password():
