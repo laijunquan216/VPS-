@@ -2241,6 +2241,20 @@ def send_email_message(subject, body, category="general"):
 
 
 
+    payload = export_backup_payload()
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    ts = now_dt.strftime("%Y%m%d-%H%M%S")
+    ok = send_email_with_attachment(
+        subject=f"[VPS面板] 定期备份文件 {ts}",
+        body=(
+            "这是系统自动发送的数据备份附件。\n"
+            f"发送时间: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"备份周期: 每 {interval_days} 天一次\n"
+        ),
+        attachment_name=f"vps-panel-backup-{ts}.json",
+        attachment_bytes=content,
+        to_email=to_email,
+    )
 
 def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None, category="backup"):
     smtp = get_smtp_config()
