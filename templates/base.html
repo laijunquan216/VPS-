@@ -12,6 +12,7 @@
     <nav>
       <a class="nav-link {% if active == 'details' %}active{% endif %}" href="{{ url_for('details_page') }}">服务器详情</a>
       <a class="nav-link {% if active == 'settings' %}active{% endif %}" href="{{ url_for('settings_page') }}">服务器设置</a>
+      <a class="nav-link {% if active == 'traffic' %}active{% endif %}" href="{{ url_for('traffic_page') }}">流量统计</a>
       <a class="nav-link {% if active == 'management' %}active{% endif %}" href="{{ url_for('management_page') }}">面板管理</a>
     </nav>
     <form method="post" action="{{ url_for('logout_submit') }}">
