@@ -67,6 +67,15 @@ app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|\([A-Za-z0-9])")
 TASK_QUEUE = Queue()
 API_IMAGE_REFRESH_LOCK = threading.Lock()
+TRAFFIC_REFRESH_LOCK = threading.Lock()
+TRAFFIC_REFRESH_STATE = {
+    "running": False,
+    "started_at": "",
+    "finished_at": "",
+    "ok_count": 0,
+    "fail_count": 0,
+    "message": "",
+}
 
 
 def get_conn():
@@ -274,6 +283,18 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traffic_metrics_cache (
+                server_id INTEGER PRIMARY KEY,
+                generated_at TEXT NOT NULL,
+                windows_json TEXT NOT NULL DEFAULT '{}',
+                daily_rows_json TEXT NOT NULL DEFAULT '[]',
+                steps_json TEXT NOT NULL DEFAULT '{}',
+                samples_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
 
         ensure_column(conn, "servers", "last_reset_at TEXT")
         ensure_column(conn, "servers", "is_renewed INTEGER NOT NULL DEFAULT 0")
@@ -438,6 +459,63 @@ def start_api_image_refresh_background_job():
 def list_servers():
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
+
+def load_traffic_metrics_cache_map():
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM traffic_metrics_cache").fetchall()
+    out = {}
+    for row in rows:
+        try:
+            windows = json.loads(row["windows_json"] or "{}")
+        except Exception:
+            windows = {}
+        try:
+            daily_rows = json.loads(row["daily_rows_json"] or "[]")
+        except Exception:
+            daily_rows = []
+        try:
+            steps = json.loads(row["steps_json"] or "{}")
+        except Exception:
+            steps = {}
+        try:
+            samples = json.loads(row["samples_json"] or "{}")
+        except Exception:
+            samples = {}
+        out[row["server_id"]] = {
+            "generated_at": row["generated_at"],
+            "windows": windows,
+            "daily_rows": daily_rows,
+            "steps": steps,
+            "samples": samples,
+        }
+    return out
+
+
+def save_traffic_metrics_cache(server_id, windows, daily_rows, steps, samples):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            INSERT INTO traffic_metrics_cache(server_id, generated_at, windows_json, daily_rows_json, steps_json, samples_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(server_id) DO UPDATE SET
+                generated_at=excluded.generated_at,
+                windows_json=excluded.windows_json,
+                daily_rows_json=excluded.daily_rows_json,
+                steps_json=excluded.steps_json,
+                samples_json=excluded.samples_json
+            """,
+            (
+                server_id,
+                now_text,
+                json.dumps(windows or {}, ensure_ascii=False),
+                json.dumps(daily_rows or [], ensure_ascii=False),
+                json.dumps(steps or {}, ensure_ascii=False),
+                json.dumps(samples or {}, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
 
 
 def get_server(server_id):
@@ -1840,21 +1918,14 @@ def _integrate_points(points, start_dt, end_dt, step_seconds):
     return int(max(rx, 0.0)), int(max(tx, 0.0))
 
 
-def _calc_server_traffic_windows(points, now_dt):
-    step_seconds = _infer_metric_step_seconds(points)
+def _hours_since_today_start(now_dt):
     today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    windows = {
-        "today": (today_start, now_dt),
-        "6h": (now_dt - timedelta(hours=6), now_dt),
-        "24h": (now_dt - timedelta(hours=24), now_dt),
-        "7d": (now_dt - timedelta(days=7), now_dt),
-        "31d": (now_dt - timedelta(days=31), now_dt),
-    }
-    out = {}
-    for key, (start_dt, end_dt) in windows.items():
-        rx, tx = _integrate_points(points, start_dt, end_dt, step_seconds)
-        out[key] = {"rx": rx, "tx": tx, "total": rx + tx}
+    hours = int((now_dt - today_start).total_seconds() // 3600) + 1
+    return max(1, min(hours, 24))
 
+
+def _calc_daily_rows(points, now_dt):
+    step_seconds = _infer_metric_step_seconds(points)
     daily_rows = []
     for offset in range(30, -1, -1):
         day_start = (now_dt - timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1868,8 +1939,7 @@ def _calc_server_traffic_windows(points, now_dt):
             "tx": tx,
             "total": rx + tx,
         })
-
-    return out, daily_rows, step_seconds
+    return daily_rows, step_seconds
 
 
 def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
@@ -1883,18 +1953,54 @@ def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
         raise RuntimeError("SCP账号不存在")
 
     endpoint_base, token = scp_rest_login(account, timeout_seconds=timeout_seconds)
-    payload = scp_rest_request(
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    hours_map = {
+        "today": _hours_since_today_start(now_dt),
+        "6h": 6,
+        "24h": 24,
+        "7d": 24 * 7,
+        "31d": 24 * 31,
+    }
+
+    windows = {}
+    steps = {}
+    samples = {}
+    metrics_path = f"servers/{urlparse.quote(scp_server_id)}/metrics/network?hours={{hours}}"
+
+    for key in ("today", "6h", "24h", "7d", "31d"):
+        hours = int(hours_map[key])
+        payload = scp_rest_request(
+            account,
+            "GET",
+            metrics_path.format(hours=hours),
+            token=token,
+            endpoint_base=endpoint_base,
+            timeout_seconds=timeout_seconds,
+        )
+        points = _normalize_network_metrics_points(payload)
+        step_seconds = _infer_metric_step_seconds(points)
+        start_dt = now_dt - timedelta(hours=hours)
+        if key == "today":
+            start_dt = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        rx, tx = _integrate_points(points, start_dt, now_dt, step_seconds)
+        windows[key] = {"rx": rx, "tx": tx, "total": rx + tx}
+        steps[key] = step_seconds
+        samples[key] = len(points)
+
+    payload_31d = scp_rest_request(
         account,
         "GET",
-        f"servers/{urlparse.quote(scp_server_id)}/metrics/network?hours=744",
+        metrics_path.format(hours=24 * 31),
         token=token,
         endpoint_base=endpoint_base,
         timeout_seconds=timeout_seconds,
     )
-    points = _normalize_network_metrics_points(payload)
-    now_dt = now_dt or datetime.now(TIMEZONE)
-    windows, daily_rows, step_seconds = _calc_server_traffic_windows(points, now_dt)
-    return windows, daily_rows, step_seconds, len(points)
+    points_31d = _normalize_network_metrics_points(payload_31d)
+    daily_rows, daily_step_seconds = _calc_daily_rows(points_31d, now_dt)
+    steps["daily_31d"] = daily_step_seconds
+    samples["daily_31d"] = len(points_31d)
+
+    return windows, daily_rows, steps, samples
 
 def refresh_server_traffic_via_scp(server_row):
     account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
@@ -1988,6 +2094,19 @@ def refresh_all_traffic_data_via_scp(now_dt=None):
 
     log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
 
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def refresh_scp_account_statuses():
     accounts = list_scp_accounts()
@@ -3179,57 +3298,104 @@ def details_page():
 @login_required
 def traffic_page():
     rows = list_servers()
-    now_dt = datetime.now(TIMEZONE)
-    report_rows = [dict(row) for row in rows]
-    report_by_id = {item.get("id"): item for item in report_rows}
+    cache_map = load_traffic_metrics_cache_map()
+    report_rows = []
 
-    for item in report_rows:
-        item["metrics_error"] = "统计排队中"
-        item["sample_step_seconds"] = 0
-        item["sample_count"] = 0
+    for row in rows:
+        item = dict(row)
+        item["metrics_error"] = ""
         item["windows"] = {}
         item["daily_rows"] = []
+        item["sample_steps"] = {}
+        item["sample_counts"] = {}
+        cached = cache_map.get(item["id"])
+        if cached:
+            item["generated_at"] = cached.get("generated_at") or ""
+            item["windows"] = cached.get("windows") or {}
+            item["daily_rows"] = cached.get("daily_rows") or []
+            item["sample_steps"] = cached.get("steps") or {}
+            item["sample_counts"] = cached.get("samples") or {}
+        else:
+            item["generated_at"] = ""
+            item["metrics_error"] = "暂无缓存数据，请点击上方“手动更新数据”"
 
-    max_workers = min(4, max(1, len(rows)))
-    with FuturesThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map = {
-            pool.submit(_fetch_server_network_metrics, row, now_dt, 20): row["id"]
-            for row in rows
-        }
-        for future in as_completed(future_map):
-            server_id = future_map[future]
-            item = report_by_id.get(server_id)
-            if not item:
-                continue
-            try:
-                windows, daily_rows, step_seconds, sample_count = future.result()
-                item["metrics_error"] = ""
-                item["sample_step_seconds"] = step_seconds
-                item["sample_count"] = sample_count
-                item["windows"] = windows
-                item["daily_rows"] = daily_rows
-                item["today_total_text"] = format_bytes(windows["today"]["total"])
-                item["h6_total_text"] = format_bytes(windows["6h"]["total"])
-                item["h24_total_text"] = format_bytes(windows["24h"]["total"])
-                item["d7_total_text"] = format_bytes(windows["7d"]["total"])
-                item["d31_total_text"] = format_bytes(windows["31d"]["total"])
-                for key in ("today", "6h", "24h", "7d", "31d"):
-                    item[f"{key}_rx_text"] = format_bytes(windows[key]["rx"])
-                    item[f"{key}_tx_text"] = format_bytes(windows[key]["tx"])
-                for daily in item["daily_rows"]:
-                    daily["rx_text"] = format_bytes(daily["rx"])
-                    daily["tx_text"] = format_bytes(daily["tx"])
-                    daily["total_text"] = format_bytes(daily["total"])
-            except Exception as exc:
-                item["metrics_error"] = str(exc)
+        windows = item["windows"]
+        if windows:
+            item["today_total_text"] = format_bytes((windows.get("today") or {}).get("total") or 0)
+            item["h6_total_text"] = format_bytes((windows.get("6h") or {}).get("total") or 0)
+            item["h24_total_text"] = format_bytes((windows.get("24h") or {}).get("total") or 0)
+            item["d7_total_text"] = format_bytes((windows.get("7d") or {}).get("total") or 0)
+            item["d31_total_text"] = format_bytes((windows.get("31d") or {}).get("total") or 0)
+            for key in ("today", "6h", "24h", "7d", "31d"):
+                block = windows.get(key) or {}
+                item[f"{key}_rx_text"] = format_bytes(block.get("rx") or 0)
+                item[f"{key}_tx_text"] = format_bytes(block.get("tx") or 0)
+        for daily in item["daily_rows"]:
+            daily["rx_text"] = format_bytes(daily.get("rx") or 0)
+            daily["tx_text"] = format_bytes(daily.get("tx") or 0)
+            daily["total_text"] = format_bytes(daily.get("total") or 0)
+        report_rows.append(item)
 
-    report_rows.sort(key=lambda x: (x.get("name") or "").lower())
+    with TRAFFIC_REFRESH_LOCK:
+        refresh_state = dict(TRAFFIC_REFRESH_STATE)
 
     return render_template(
         "traffic.html",
         rows=report_rows,
-        generated_at=now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        refresh_state=refresh_state,
     )
+
+
+def refresh_traffic_metrics_cache_job():
+    now_dt = datetime.now(TIMEZONE)
+    ok_count = 0
+    fail_count = 0
+    rows = list_servers()
+
+    max_workers = min(4, max(1, len(rows)))
+    with FuturesThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(_fetch_server_network_metrics, row, now_dt, 20): row
+            for row in rows
+        }
+        for future in as_completed(future_map):
+            row = future_map[future]
+            try:
+                windows, daily_rows, steps, samples = future.result()
+                save_traffic_metrics_cache(row["id"], windows, daily_rows, steps, samples)
+                ok_count += 1
+            except Exception as exc:
+                fail_count += 1
+                log_system_event("traffic_cache_refresh", f"流量缓存刷新失败: {row['name']} ({row['ip']})", level="error", server_id=row["id"], details=str(exc))
+
+    with TRAFFIC_REFRESH_LOCK:
+        TRAFFIC_REFRESH_STATE["running"] = False
+        TRAFFIC_REFRESH_STATE["finished_at"] = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+        TRAFFIC_REFRESH_STATE["ok_count"] = ok_count
+        TRAFFIC_REFRESH_STATE["fail_count"] = fail_count
+        TRAFFIC_REFRESH_STATE["message"] = f"流量缓存更新完成：成功{ok_count}台，失败{fail_count}台"
+
+    log_system_event("traffic_cache_refresh", f"流量缓存更新完成：成功{ok_count}台，失败{fail_count}台")
+
+
+@app.post("/traffic/refresh")
+@login_required
+def refresh_traffic_page_data():
+    with TRAFFIC_REFRESH_LOCK:
+        if TRAFFIC_REFRESH_STATE["running"]:
+            flash("流量数据刷新任务已在执行中，请稍后再看结果", "info")
+            return redirect(url_for("traffic_page"))
+        TRAFFIC_REFRESH_STATE["running"] = True
+        TRAFFIC_REFRESH_STATE["started_at"] = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+        TRAFFIC_REFRESH_STATE["finished_at"] = ""
+        TRAFFIC_REFRESH_STATE["ok_count"] = 0
+        TRAFFIC_REFRESH_STATE["fail_count"] = 0
+        TRAFFIC_REFRESH_STATE["message"] = "流量缓存更新任务已启动"
+
+    thread = threading.Thread(target=refresh_traffic_metrics_cache_job, daemon=True)
+    thread.start()
+    flash("已启动流量缓存更新，请稍后刷新本页查看结果", "success")
+    return redirect(url_for("traffic_page"))
 
 
 @app.route("/settings")

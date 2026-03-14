@@ -5,9 +5,16 @@
 <section class="panel">
   <div class="section-head">
     <h2>流量统计</h2>
-    <button type="button" onclick="window.location.reload()">刷新统计</button>
+    <form method="post" action="{{ url_for('refresh_traffic_page_data') }}">
+      <button type="submit">手动更新数据</button>
+    </form>
   </div>
-  <p class="hint">统计时间：{{ generated_at }}（北京时间）。通过 SCP API `/api/v1/servers/{serverId}/metrics/network` 获取过去 31 天 10 分钟采样数据，按 bytes/s × 采样间隔积分计算总流量。</p>
+  <p class="hint">本页默认只展示缓存结果，点击“手动更新数据”后才会向 SCP API 拉取并刷新。</p>
+  {% if refresh_state.running %}
+    <p class="flash warning">更新进行中（开始于 {{ refresh_state.started_at }}），请稍后刷新页面查看结果。</p>
+  {% elif refresh_state.message %}
+    <p class="hint">{{ refresh_state.message }}{% if refresh_state.finished_at %}（完成于 {{ refresh_state.finished_at }}）{% endif %}</p>
+  {% endif %}
 </section>
 
 {% for row in rows %}
@@ -16,7 +23,17 @@
   {% if row.metrics_error %}
     <p class="flash error">统计失败：{{ row.metrics_error }}</p>
   {% else %}
-    <p class="hint">采样点：{{ row.sample_count }}，推断采样间隔：{{ row.sample_step_seconds }} 秒</p>
+    <p class="hint">缓存时间：{{ row.generated_at }}（北京时间）</p>
+    <p class="hint">
+      采样间隔：当日 {{ row.sample_steps.today or '-' }} 秒 / 6小时 {{ row.sample_steps['6h'] or '-' }} 秒 /
+      24小时 {{ row.sample_steps['24h'] or '-' }} 秒 / 7天 {{ row.sample_steps['7d'] or '-' }} 秒 /
+      31天 {{ row.sample_steps['31d'] or '-' }} 秒；每日统计采用 {{ row.sample_steps.daily_31d or '-' }} 秒。
+    </p>
+    <p class="hint">
+      采样点：当日 {{ row.sample_counts.today or 0 }} / 6小时 {{ row.sample_counts['6h'] or 0 }} /
+      24小时 {{ row.sample_counts['24h'] or 0 }} / 7天 {{ row.sample_counts['7d'] or 0 }} /
+      31天 {{ row.sample_counts['31d'] or 0 }}。
+    </p>
     <div class="traffic-summary-grid">
       <article>
         <h4>当日总流量（00:00 到现在）</h4>
@@ -45,7 +62,7 @@
       </article>
     </div>
 
-    <details class="log-group" open>
+    <details class="log-group">
       <summary>过去 31 天每日流量统计（上传 + 下载）</summary>
       <div class="table-wrap">
         <table class="table-like traffic-table">
