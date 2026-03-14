@@ -185,8 +185,16 @@
         });
         c.addEventListener('mousemove', (ev) => {
           const rect = chartEl.getBoundingClientRect();
-          tooltip.style.left = `${ev.clientX - rect.left + 12}px`;
-          tooltip.style.top = `${ev.clientY - rect.top + 12}px`;
+          const pad = 8;
+          const offset = 12;
+          const rawLeft = ev.clientX - rect.left + offset;
+          const rawTop = ev.clientY - rect.top + offset;
+          const maxLeft = Math.max(pad, rect.width - tooltip.offsetWidth - pad);
+          const maxTop = Math.max(pad, rect.height - tooltip.offsetHeight - pad);
+          const left = Math.min(Math.max(rawLeft, pad), maxLeft);
+          const top = Math.min(Math.max(rawTop, pad), maxTop);
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
         });
         c.addEventListener('mouseleave', () => {
           tooltip.hidden = true;

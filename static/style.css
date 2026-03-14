@@ -128,7 +128,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .table-wrap{overflow:auto}
 .traffic-table th,.traffic-table td{white-space:nowrap}
 .traffic-chart-block{margin:10px 0}
-.traffic-chart{position:relative;border:1px solid #e2e8f0;border-radius:10px;background:#fff;overflow:hidden}
+.traffic-chart{position:relative;border:1px solid #e2e8f0;border-radius:10px;background:#fff;overflow:visible}
 .traffic-chart-svg{display:block;width:100%;height:300px}
 .traffic-point{cursor:pointer}
 .traffic-chart-tooltip{position:absolute;z-index:2;background:rgba(15,23,42,.95);color:#fff;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.4;pointer-events:none;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.25)}
