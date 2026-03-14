@@ -110,6 +110,8 @@ def init_db():
                 is_rented INTEGER NOT NULL DEFAULT 0,
                 renew_until_date TEXT NOT NULL DEFAULT '',
                 next_rent_status TEXT NOT NULL DEFAULT 'unknown',
+                last_month_tenant TEXT NOT NULL DEFAULT '',
+                rental_rollover_key TEXT NOT NULL DEFAULT '',
                 renter_name TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 agent_token TEXT NOT NULL DEFAULT '',
@@ -302,6 +304,8 @@ def init_db():
         ensure_column(conn, "servers", "is_rented INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "renew_until_date TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "next_rent_status TEXT NOT NULL DEFAULT 'unknown'")
+        ensure_column(conn, "servers", "last_month_tenant TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "rental_rollover_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "renter_name TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
@@ -548,6 +552,59 @@ def _format_next_month_tenant(row):
     return "未知"
 
 
+def _rental_cycle_key(now_dt):
+    return f"{now_dt.year:04d}-{now_dt.month:02d}"
+
+
+def apply_monthly_rental_rollover_if_needed(now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    cycle_key = _rental_cycle_key(now_dt)
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            "SELECT id, name, reset_day, is_rented, is_renewed, renew_until_date, renter_name, next_rent_status, rental_rollover_key FROM servers ORDER BY sort_order ASC, id ASC"
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            refresh_day = int(row["reset_day"] or 1)
+            if now_dt.day < refresh_day:
+                continue
+            if str(row["rental_rollover_key"] or "").strip() == cycle_key:
+                continue
+
+            renew_until = _parse_date_text(row["renew_until_date"])
+            if renew_until and now_dt.date() < renew_until and int(row["is_renewed"] or 0) == 1:
+                conn.execute(
+                    "UPDATE servers SET rental_rollover_key = ? WHERE id = ?",
+                    (cycle_key, row["id"]),
+                )
+                changed += 1
+                continue
+
+            current_tenant = str(row["renter_name"] or "").strip()
+            status = _normalize_next_rent_status(row["next_rent_status"])
+            next_current_tenant = ""
+            if int(row["is_rented"] or 0) == 1 and status == "confirmed":
+                next_current_tenant = current_tenant
+
+            conn.execute(
+                """
+                UPDATE servers
+                SET last_month_tenant = ?,
+                    renter_name = ?,
+                    next_rent_status = 'unknown',
+                    is_renewed = 0,
+                    rental_rollover_key = ?
+                WHERE id = ?
+                """,
+                (current_tenant, next_current_tenant, cycle_key, row["id"]),
+            )
+            changed += 1
+
+        if changed:
+            conn.commit()
+            log_system_event("rental_rollover", f"出租管理月度迁移完成：{changed}台")
+
+
 def list_rental_management_rows():
     rows = list_servers()
     out = []
@@ -557,7 +614,12 @@ def list_rental_management_rows():
         if item["next_rent_status"] == "unknown" and int(item.get("is_renewed") or 0) == 1:
             item["next_rent_status"] = "confirmed"
         item["next_month_tenant_text"] = _format_next_month_tenant(item)
+        item["last_month_tenant_text"] = str(item.get("last_month_tenant") or "").strip()
         item["refresh_day_text"] = f"{int(item.get('reset_day') or 1)}号"
+        item["status_card_class"] = {
+            "confirmed": "rental-card-confirmed",
+            "non_renew": "rental-card-non-renew",
+        }.get(item["next_rent_status"], "rental-card-unknown")
         out.append(item)
     return out
 
@@ -1454,8 +1516,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -1472,6 +1534,8 @@ def restore_backup_payload(payload):
                     int(server.get("is_rented", 0)),
                     server.get("renew_until_date", ""),
                     _normalize_next_rent_status(server.get("next_rent_status", "unknown")),
+                    (server.get("last_month_tenant", "") or "").strip(),
+                    (server.get("rental_rollover_key", "") or "").strip(),
                     (server.get("renter_name", "") or "").strip(),
                     int(server.get("sort_order", 0)),
                     int(server.get("max_retries", 2)),
@@ -2134,48 +2198,6 @@ def refresh_all_traffic_data_via_scp(now_dt=None):
             continue
 
     log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
-
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
-
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
-
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def refresh_scp_account_statuses():
     accounts = list_scp_accounts()
@@ -3500,6 +3522,7 @@ def settings_page():
 @app.route("/rentals")
 @login_required
 def rentals_page():
+    apply_monthly_rental_rollover_if_needed()
     return render_template("rentals.html", rows=list_rental_management_rows())
 
 
@@ -3513,14 +3536,11 @@ def update_rental_next_status(server_id):
             flash("服务器不存在", "error")
             return redirect(url_for("rentals_page"))
 
-        is_renewed = 1 if status == "confirmed" else 0 if status == "non_renew" else None
-        if is_renewed is None:
-            conn.execute("UPDATE servers SET next_rent_status = ? WHERE id = ?", (status, server_id))
-        else:
-            conn.execute(
-                "UPDATE servers SET next_rent_status = ?, is_renewed = ? WHERE id = ?",
-                (status, is_renewed, server_id),
-            )
+        is_renewed = 1 if status == "confirmed" else 0
+        conn.execute(
+            "UPDATE servers SET next_rent_status = ?, is_renewed = ? WHERE id = ?",
+            (status, is_renewed, server_id),
+        )
         conn.commit()
 
     if status == "confirmed":
@@ -3528,7 +3548,7 @@ def update_rental_next_status(server_id):
     elif status == "non_renew":
         flash(f"[{row['name']}] 已标记不续租，服务器详情已切换为未续租", "success")
     else:
-        flash(f"[{row['name']}] 下月租户状态已设置为未知", "success")
+        flash(f"[{row['name']}] 下月租户状态已设置为未知，服务器详情已切换为未续租", "success")
     return redirect(url_for("rentals_page"))
 
 
@@ -3587,6 +3607,7 @@ def management_page():
 
 
 
+
 @app.route("/management/backup-email", methods=["POST"])
 @login_required
 def update_backup_email_settings():
@@ -3597,6 +3618,13 @@ def update_backup_email_settings():
         flash(f"备份邮件配置保存失败: {exc}", "error")
         return redirect(url_for("management_page"))
 
+    update_backup_email_config(
+        1 if form.get("backup_email_enabled") == "on" else 0,
+        form.get("backup_email_to", ""),
+        interval_days,
+    )
+    flash("定期备份邮件配置已更新", "success")
+    return redirect(url_for("management_page"))
 @app.route("/management/change-password", methods=["POST"])
 @login_required
 def change_panel_password():

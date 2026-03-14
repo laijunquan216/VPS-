@@ -142,3 +142,16 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-next-text{font-weight:700;color:#0f172a}
 .rental-next-form{display:flex;gap:8px;flex-wrap:wrap}
 .rental-next-form select{min-width:120px}
+.rental-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.rental-card{border:1px solid #e2e8f0;border-radius:12px;padding:12px}
+.rental-card-confirmed{background:#ecfdf3;border-color:#bbf7d0}
+.rental-card-non-renew{background:#fff1f2;border-color:#fecdd3}
+.rental-card-unknown{background:#fefce8;border-color:#fde68a}
+.rental-card-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}
+.rental-card-head h3{margin:0}
+.rental-refresh{color:#475569;font-weight:700;white-space:nowrap}
+.rental-meta-line{display:flex;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:4px 0}
+.rental-meta-label{color:#64748b;flex:0 0 auto}
+.rental-meta-value{font-weight:700;overflow:hidden;text-overflow:ellipsis}
+.rental-next-form-nowrap{flex-wrap:nowrap;align-items:center}
+.rental-next-form-nowrap select{min-width:140px}
