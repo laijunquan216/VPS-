@@ -41,10 +41,12 @@ from flask import (
 )
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+from werkzeug.serving import make_server
 
 DB_PATH = os.environ.get("VPS_PANEL_DB", "panel.db")
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "5000"))
+PUBLIC_STOCK_PORT = int(os.environ.get("PUBLIC_STOCK_PORT", "5001"))
 PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").strip()
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 
@@ -64,6 +66,7 @@ os.makedirs(UPLOAD_DATA_DIR, exist_ok=True)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
+public_app = Flask("public_stock")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|\([A-Za-z0-9])")
 TASK_QUEUE = Queue()
 API_IMAGE_REFRESH_LOCK = threading.Lock()
@@ -116,6 +119,7 @@ def init_db():
                 renter_email TEXT NOT NULL DEFAULT '',
                 delivery_email_sent_at TEXT,
                 renew_notice_sent_keys TEXT NOT NULL DEFAULT '',
+                server_note TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 agent_token TEXT NOT NULL DEFAULT '',
                 period_key TEXT NOT NULL DEFAULT '',
@@ -165,6 +169,8 @@ def init_db():
                 api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0,
                 panel_password_hash TEXT,
                 renew_notice_days TEXT NOT NULL DEFAULT '5,2',
+                stock_page_title TEXT NOT NULL DEFAULT '库存展示',
+                public_stock_port INTEGER NOT NULL DEFAULT 5001,
                 updated_at TEXT
             )
             """
@@ -314,6 +320,7 @@ def init_db():
         ensure_column(conn, "servers", "renter_email TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "delivery_email_sent_at TEXT")
         ensure_column(conn, "servers", "renew_notice_sent_keys TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "server_note TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "period_key TEXT NOT NULL DEFAULT ''")
@@ -345,6 +352,8 @@ def init_db():
         ensure_column(conn, "task_queue", "batch_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
         ensure_column(conn, "global_config", "renew_notice_days TEXT NOT NULL DEFAULT '5,2'")
+        ensure_column(conn, "global_config", "stock_page_title TEXT NOT NULL DEFAULT '库存展示'")
+        ensure_column(conn, "global_config", "public_stock_port INTEGER NOT NULL DEFAULT 5001")
         ensure_column(conn, "global_config", "agent_install_command TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_base_url TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "notify_email_enabled INTEGER NOT NULL DEFAULT 0")
@@ -1468,7 +1477,7 @@ def list_detail_rows():
     with closing(get_conn()) as conn:
         return conn.execute(
             """
-            SELECT s.id, s.name, s.renter_name, s.renter_email, s.delivery_email_sent_at, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
+            SELECT s.id, s.name, s.renter_name, s.renter_email, s.delivery_email_sent_at, s.server_note, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.renew_until_date, s.next_rent_status, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
@@ -1537,8 +1546,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, api_failure_notify_enabled, panel_password_hash, renew_notice_days, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, api_failure_notify_enabled, panel_password_hash, renew_notice_days, stock_page_title, public_stock_port, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1568,6 +1577,8 @@ def restore_backup_payload(payload):
                 int(global_cfg.get("api_failure_notify_enabled", 0) or 0),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
                 normalize_renew_notice_days_text(global_cfg.get("renew_notice_days", "5,2")),
+                (global_cfg.get("stock_page_title", "库存展示") or "库存展示").strip(),
+                int(global_cfg.get("public_stock_port", PUBLIC_STOCK_PORT) or PUBLIC_STOCK_PORT),
                 global_cfg.get("updated_at"),
             ),
         )
@@ -1575,8 +1586,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, renter_email, delivery_email_sent_at, renew_notice_sent_keys, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, renter_email, delivery_email_sent_at, renew_notice_sent_keys, server_note, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -1599,6 +1610,7 @@ def restore_backup_payload(payload):
                     (server.get("renter_email", "") or "").strip(),
                     server.get("delivery_email_sent_at"),
                     (server.get("renew_notice_sent_keys", "") or "").strip(),
+                    (server.get("server_note", "") or "").strip(),
                     int(server.get("sort_order", 0)),
                     int(server.get("max_retries", 2)),
                     str(server.get("retry_backoff_seconds", "60,180")),
@@ -1757,6 +1769,70 @@ def build_effective_reset_datetime(server_row, ref_dt):
         candidate = build_server_reset_datetime(server_row, candidate + timedelta(minutes=1))
         safety += 1
     return candidate
+
+
+def mask_server_ip(ip_text):
+    ip = str(ip_text or "").strip()
+    parts = ip.split(".")
+    if len(parts) == 4 and all(part.isdigit() for part in parts):
+        return f"{parts[0]}.{parts[1]}.*.*"
+    if len(ip) > 4:
+        return ip[:-4] + "****"
+    return "****"
+
+
+def format_reset_datetime_text(dt_obj):
+    return dt_obj.strftime("%Y-%m-%d %H:%M")
+
+
+def build_public_inventory_rows(now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    rows = list_servers()
+    in_stock = []
+    reservable = []
+    for row in rows:
+        item = dict(row)
+        item["ip_masked"] = mask_server_ip(item.get("ip"))
+        item["price_text"] = "60元"
+        item["server_note"] = (item.get("server_note") or "").strip() or "无"
+        next_reset = build_effective_reset_datetime(item, now_dt)
+        item["next_reset_text"] = format_reset_datetime_text(next_reset)
+        item["usable_until_text"] = f"现在租用，可用到 {item['next_reset_text']}（北京时间）"
+
+        if int(item.get("is_rented") or 0) == 0:
+            in_stock.append(item)
+            continue
+
+        if int(item.get("is_renewed") or 0) == 0:
+            start_dt = next_reset
+            end_dt = build_effective_reset_datetime(item, start_dt + timedelta(minutes=1))
+            item["book_window_text"] = f"可预订档期：{format_reset_datetime_text(start_dt)} ~ {format_reset_datetime_text(end_dt)}（北京时间）"
+            reservable.append(item)
+
+    return in_stock, reservable
+
+
+def get_public_stock_settings():
+    cfg = get_global_config()
+    title = (cfg["stock_page_title"] or "库存展示").strip() if cfg else "库存展示"
+    port = int(cfg["public_stock_port"] or PUBLIC_STOCK_PORT) if cfg else PUBLIC_STOCK_PORT
+    return title, port
+
+
+def build_public_stock_base_url(request_obj=None):
+    title, port = get_public_stock_settings()
+    if request_obj:
+        host = (request_obj.host or "").split(":", 1)[0]
+        if host:
+            scheme = request_obj.scheme or "http"
+            return title, f"{scheme}://{host}:{port}"
+    return title, f"http://127.0.0.1:{port}"
+
+
+def get_current_renter_text(server_id):
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT renter_name FROM servers WHERE id = ?", (server_id,)).fetchone()
+    return (row["renter_name"] or "未填写") if row else "未填写"
 
 
 def get_traffic_period_start(reset_day, now_dt):
@@ -1994,6 +2070,21 @@ def list_email_history(limit=200):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM email_history ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
 
+    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def update_scp_account_api_status(account_id, status, error_message=""):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
@@ -2292,19 +2383,6 @@ def refresh_all_traffic_data_via_scp(now_dt=None):
 
     log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
 
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def refresh_scp_account_statuses():
     accounts = list_scp_accounts()
@@ -2748,7 +2826,7 @@ def maybe_send_batch_email(batch_key):
     ]
     for item in items:
         note = f"（{item['note']}）" if item["note"] else ""
-        lines.append(f"- {item['server_name']} ({item['server_ip']}): {item['status']}{note}")
+        lines.append(f"- {item['server_name']} ({item['server_ip']}，目前租赁人: {get_current_renter_text(item['server_id'])}): {item['status']}{note}")
 
     sent = send_email_message(
         f"[VPS面板] {batch_key} 重置批次结果（成功{success_count}/失败{failed_count}/跳过{skipped_count}）",
@@ -3485,6 +3563,24 @@ def check_scheduled_jobs():
     maybe_send_batch_email(batch_key)
 
 
+@public_app.route("/")
+def public_stock_page_root():
+    return public_stock_page()
+
+
+@public_app.route("/inventory")
+def public_stock_page():
+    title, _ = get_public_stock_settings()
+    in_stock_rows, reservable_rows = build_public_inventory_rows()
+    return render_template(
+        "public_inventory.html",
+        title=title,
+        in_stock_rows=in_stock_rows,
+        reservable_rows=reservable_rows,
+        generated_at=datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
 def login_required(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -3830,16 +3926,57 @@ def upload_data_zip_for_ssh2():
 @login_required
 def management_page():
     global_cfg = get_global_config()
+    stock_title, stock_url = build_public_stock_base_url(request)
     return render_template(
         "management.html",
         title="面板管理",
         global_cfg=global_cfg,
+        stock_title=stock_title,
+        stock_url=stock_url,
         system_events=list_system_events(300),
         email_history=list_email_history(200),
     )
 
 
 
+
+@app.route("/management/backup-email", methods=["POST"])
+@login_required
+def update_backup_email_settings():
+    form = request.form
+    try:
+        interval_days = parse_int_form_field(form, "backup_interval_days", default=7, min_value=1, max_value=365)
+    except ValueError as exc:
+        flash(f"备份邮件配置保存失败: {exc}", "error")
+        return redirect(url_for("management_page"))
+
+    update_backup_email_config(
+        1 if form.get("backup_email_enabled") == "on" else 0,
+        form.get("backup_email_to", ""),
+        interval_days,
+    )
+    flash("定期备份邮件配置已更新", "success")
+    return redirect(url_for("management_page"))
+@app.route("/management/public-stock", methods=["POST"])
+@login_required
+def update_public_stock_settings():
+    form = request.form
+    title = (form.get("stock_page_title") or "库存展示").strip() or "库存展示"
+    try:
+        public_port = parse_int_form_field(form, "public_stock_port", default=PUBLIC_STOCK_PORT, min_value=1, max_value=65535)
+    except ValueError as exc:
+        flash(f"库存展示配置保存失败: {exc}", "error")
+        return redirect(url_for("management_page"))
+
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET stock_page_title = ?, public_stock_port = ?, updated_at = ? WHERE id = 1",
+            (title, public_port, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+    flash("库存展示配置已更新（端口修改需重启面板服务生效）", "success")
+    return redirect(url_for("management_page"))
 
 @app.route("/management/backup-email", methods=["POST"])
 @login_required
@@ -4097,8 +4234,8 @@ def add_server():
 
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, renter_email, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, renter_email, server_note, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -4112,6 +4249,7 @@ def add_server():
                 1 if form.get("auto_reset") == "on" else 0,
                 (form.get("renter_name") or "").strip(),
                 (form.get("renter_email") or "").strip(),
+                (form.get("server_note") or "").strip(),
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
@@ -4156,7 +4294,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, renter_email=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, renter_email=?, server_note=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
             WHERE id=?
             """,
             (
@@ -4171,6 +4309,7 @@ def update_server(server_id):
                 1 if form.get("auto_reset") == "on" else 0,
                 (form.get("renter_name") or "").strip(),
                 (form.get("renter_email") or "").strip(),
+                (form.get("server_note") or "").strip(),
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
@@ -4385,6 +4524,23 @@ def run_now(server_id):
     return redirect(url_for("details_page"))
 
 
+def start_public_stock_server():
+    _, public_port = get_public_stock_settings()
+    if public_port == PANEL_PORT:
+        log_system_event("public_stock", f"库存展示端口与管理面板端口冲突: {public_port}", level="error")
+        return None
+    try:
+        server = make_server(PANEL_HOST, public_port, public_app)
+    except Exception as exc:
+        log_system_event("public_stock", f"库存展示服务启动失败: {exc}", level="error")
+        return None
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log_system_event("public_stock", f"库存展示服务已启动: {PANEL_HOST}:{public_port}")
+    return server
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TIMEZONE, executors={"default": ThreadPoolExecutor(1)})
     scheduler.add_job(check_scheduled_jobs, "cron", minute="*", max_instances=1, coalesce=True)
@@ -4397,7 +4553,10 @@ if __name__ == "__main__":
     init_db()
     start_task_worker()
     scheduler = start_scheduler()
+    public_server = start_public_stock_server()
     try:
         app.run(host=PANEL_HOST, port=PANEL_PORT, debug=False)
     finally:
         scheduler.shutdown()
+        if public_server:
+            public_server.shutdown()

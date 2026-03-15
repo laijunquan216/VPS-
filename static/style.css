@@ -172,3 +172,10 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
   .rental-col-name{font-size:20px}
 }
 
+
+
+.public-stock-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.public-stock-card{border:1px solid #dbe4f0;border-radius:12px;padding:12px;background:#f8fbff}
+.public-stock-card h3{margin:0 0 8px 0}
+.public-stock-card p{margin:6px 0;line-height:1.4}
+.public-stock-reserve{background:#fff9ec;border-color:#f4d38a}

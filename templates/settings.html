@@ -170,6 +170,7 @@
     <label>名称<input name="name" required /></label>
     <label>租赁人<input name="renter_name" placeholder="例如 咸鱼：DABA" /></label>
     <label>租赁人邮箱<input name="renter_email" type="email" placeholder="tenant@example.com" /></label>
+    <label class="full">服务器说明<textarea name="server_note" rows="2" placeholder="例如 9929HX / 32G / 1T SSD / 高主频"></textarea></label>
     <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
     <label>IP<input name="ip" required /></label>
     <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
@@ -198,6 +199,7 @@
       <label>名称<input name="name" value="{{ s.name }}" required /></label>
       <label>租赁人<input name="renter_name" value="{{ s.renter_name }}" placeholder="例如 咸鱼：DABA" /></label>
       <label>租赁人邮箱<input name="renter_email" type="email" value="{{ s.renter_email or "" }}" placeholder="tenant@example.com" /></label>
+      <label class="full">服务器说明<textarea name="server_note" rows="2" placeholder="例如 9929HX / 32G / 1T SSD / 高主频">{{ s.server_note or "" }}</textarea></label>
       <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
       <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
       <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
