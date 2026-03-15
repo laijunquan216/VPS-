@@ -566,6 +566,63 @@ def save_traffic_metrics_cache(server_id, windows, daily_rows, steps, samples):
         conn.commit()
 
 
+def load_traffic_metrics_cache_map():
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM traffic_metrics_cache").fetchall()
+    out = {}
+    for row in rows:
+        try:
+            windows = json.loads(row["windows_json"] or "{}")
+        except Exception:
+            windows = {}
+        try:
+            daily_rows = json.loads(row["daily_rows_json"] or "[]")
+        except Exception:
+            daily_rows = []
+        try:
+            steps = json.loads(row["steps_json"] or "{}")
+        except Exception:
+            steps = {}
+        try:
+            samples = json.loads(row["samples_json"] or "{}")
+        except Exception:
+            samples = {}
+        out[row["server_id"]] = {
+            "generated_at": row["generated_at"],
+            "windows": windows,
+            "daily_rows": daily_rows,
+            "steps": steps,
+            "samples": samples,
+        }
+    return out
+
+
+def save_traffic_metrics_cache(server_id, windows, daily_rows, steps, samples):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            INSERT INTO traffic_metrics_cache(server_id, generated_at, windows_json, daily_rows_json, steps_json, samples_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(server_id) DO UPDATE SET
+                generated_at=excluded.generated_at,
+                windows_json=excluded.windows_json,
+                daily_rows_json=excluded.daily_rows_json,
+                steps_json=excluded.steps_json,
+                samples_json=excluded.samples_json
+            """,
+            (
+                server_id,
+                now_text,
+                json.dumps(windows or {}, ensure_ascii=False),
+                json.dumps(daily_rows or [], ensure_ascii=False),
+                json.dumps(steps or {}, ensure_ascii=False),
+                json.dumps(samples or {}, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+
+
 def get_server(server_id):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
@@ -2154,6 +2211,7 @@ def list_email_history(limit=200):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM email_history ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
 
+    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
 
 def update_scp_account_api_status(account_id, status, error_message=""):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
@@ -2164,6 +2222,14 @@ def update_scp_account_api_status(account_id, status, error_message=""):
         )
         conn.commit()
 
+def update_scp_account_api_status(account_id, status, error_message=""):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE scp_accounts SET api_status=?, api_checked_at=?, api_last_error=?, updated_at=? WHERE id=?",
+            ((status or "unknown")[:16], now_text, str(error_message or "")[:500], now_text, account_id),
+        )
+        conn.commit()
 
 def notify_scp_api_failure_if_needed(account, error_message):
     cfg = get_global_config()
@@ -2262,6 +2328,272 @@ def _infer_metric_step_seconds(points, default_seconds=600):
     except Exception:
         median_val = default_seconds
     return max(60, min(median_val, 3600))
+
+
+def _integrate_points(points, start_dt, end_dt, step_seconds):
+    rx = 0.0
+    tx = 0.0
+    for item in points:
+        ts = item["ts"]
+        if ts < start_dt or ts > end_dt:
+            continue
+        rx += item["rx_bps"] * step_seconds
+        tx += item["tx_bps"] * step_seconds
+    return int(max(rx, 0.0)), int(max(tx, 0.0))
+
+
+def _hours_since_today_start(now_dt):
+    today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    hours = int((now_dt - today_start).total_seconds() // 3600) + 1
+    return max(1, min(hours, 24))
+
+
+def _calc_daily_rows(points, now_dt):
+    step_seconds = _infer_metric_step_seconds(points)
+    daily_rows = []
+    for offset in range(30, -1, -1):
+        day_start = (now_dt - timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = min(day_start + timedelta(days=1), now_dt)
+        if day_end <= day_start:
+            continue
+        rx, tx = _integrate_points(points, day_start, day_end, step_seconds)
+        daily_rows.append({
+            "date": day_start.strftime("%Y-%m-%d"),
+            "rx": rx,
+            "tx": tx,
+            "total": rx + tx,
+        })
+    return daily_rows, step_seconds
+
+
+def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
+    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
+    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
+    if not account_id or not scp_server_id:
+        raise RuntimeError("缺少SCP账号绑定或服务器ID")
+
+    account = get_scp_account(account_id)
+    if not account:
+        raise RuntimeError("SCP账号不存在")
+
+    endpoint_base, token = scp_rest_login(account, timeout_seconds=timeout_seconds)
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    hours_map = {
+        "today": _hours_since_today_start(now_dt),
+        "6h": 6,
+        "24h": 24,
+        "7d": 24 * 7,
+        "31d": 24 * 31,
+    }
+
+    windows = {}
+    steps = {}
+    samples = {}
+    metrics_path = f"servers/{urlparse.quote(scp_server_id)}/metrics/network?hours={{hours}}"
+
+    for key in ("today", "6h", "24h", "7d", "31d"):
+        hours = int(hours_map[key])
+        payload = scp_rest_request(
+            account,
+            "GET",
+            metrics_path.format(hours=hours),
+            token=token,
+            endpoint_base=endpoint_base,
+            timeout_seconds=timeout_seconds,
+        )
+        points = _normalize_network_metrics_points(payload)
+        step_seconds = _infer_metric_step_seconds(points)
+        start_dt = now_dt - timedelta(hours=hours)
+        if key == "today":
+            start_dt = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        rx, tx = _integrate_points(points, start_dt, now_dt, step_seconds)
+        windows[key] = {"rx": rx, "tx": tx, "total": rx + tx}
+        steps[key] = step_seconds
+        samples[key] = len(points)
+
+    payload_31d = scp_rest_request(
+        account,
+        "GET",
+        metrics_path.format(hours=24 * 31),
+        token=token,
+        endpoint_base=endpoint_base,
+        timeout_seconds=timeout_seconds,
+    )
+    points_31d = _normalize_network_metrics_points(payload_31d)
+    daily_rows, daily_step_seconds = _calc_daily_rows(points_31d, now_dt)
+    steps["daily_31d"] = daily_step_seconds
+    samples["daily_31d"] = len(points_31d)
+
+    return windows, daily_rows, steps, samples
+
+def refresh_server_traffic_via_scp(server_row):
+    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
+    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
+    if not account_id or not scp_server_id:
+        raise RuntimeError("缺少SCP账号绑定或服务器ID")
+
+    account = get_scp_account(account_id)
+    if not account:
+        raise RuntimeError("SCP账号不存在")
+
+    endpoint_base, token = scp_rest_login(account)
+    payload = scp_rest_request(
+        account,
+        "GET",
+        f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
+        token=token,
+        endpoint_base=endpoint_base,
+    )
+
+    live = payload.get("serverLiveInfo") if isinstance(payload, dict) else {}
+    interfaces = live.get("interfaces") if isinstance(live, dict) else []
+    if not isinstance(interfaces, list):
+        interfaces = []
+
+    rx_monthly_mib = 0.0
+    tx_monthly_mib = 0.0
+    throttled = False
+    for item in interfaces:
+        if not isinstance(item, dict):
+            continue
+        try:
+            rx_monthly_mib += float(item.get("rxMonthlyInMiB") or 0)
+        except Exception:
+            pass
+        try:
+            tx_monthly_mib += float(item.get("txMonthlyInMiB") or 0)
+        except Exception:
+            pass
+        throttled = throttled or bool(item.get("trafficThrottled"))
+
+    upload_bytes = int(max(tx_monthly_mib, 0) * 1024 * 1024)
+    download_bytes = int(max(rx_monthly_mib, 0) * 1024 * 1024)
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            UPDATE servers
+            SET period_key=?, period_upload_bytes=?, period_download_bytes=?,
+                last_traffic_sync_at=?, traffic_throttled=?
+            WHERE id=?
+            """,
+            (
+                datetime.now(TIMEZONE).strftime("%Y-%m"),
+                upload_bytes,
+                download_bytes,
+                now_text,
+                1 if throttled else 0,
+                server_row["id"],
+            ),
+        )
+        conn.commit()
+
+
+def refresh_all_traffic_data_via_scp(now_dt=None):
+    cfg = get_global_config()
+    interval = int(cfg["traffic_sample_interval_minutes"] or 60) if cfg else 60
+    if interval <= 0:
+        return
+
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
+    if minutes_since_midnight % interval != 0:
+        return
+
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
+    ok_count = 0
+    fail_count = 0
+    for row in rows:
+        try:
+            refresh_server_traffic_via_scp(row)
+            ok_count += 1
+            log_system_event("traffic_sampling", f"流量采样成功: {row['name']} ({row['ip']})", server_id=row["id"])
+        except Exception as exc:
+            fail_count += 1
+            log_system_event("traffic_sampling", f"流量采样失败: {row['name']} ({row['ip']})", level="error", server_id=row["id"], details=str(exc))
+            continue
+
+    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+
+
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
+
+
+def update_server_ssh_status(server_id, is_online):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    status = "online" if is_online else "offline"
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET ssh_status = ?, ssh_checked_at = ? WHERE id = ?", (status, now_text, server_id))
+        conn.commit()
+
+
+def check_server_ssh_connectivity(server_row, timeout=8):
+    try:
+        client = connect_ssh(server_row, timeout=timeout)
+        client.close()
+        update_server_ssh_status(server_row["id"], True)
+        return True
+    except Exception:
+        update_server_ssh_status(server_row["id"], False)
+        return False
+
+
+def _parse_date_text(date_text):
+    text = str(date_text or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _one_month_before(date_obj):
+    year, month = date_obj.year, date_obj.month - 1
+    if month <= 0:
+        month = 12
+        year -= 1
+    day = month_day_safe(year, month, date_obj.day)
+    return datetime(year, month, day).date()
+
+
+def is_before_renew_until(server_row, now_dt):
+    renew_until = _parse_date_text(server_row["renew_until_date"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("renew_until_date"))
+    if not renew_until:
+        return False
+    return now_dt.date() < renew_until
+
+
+def should_reset(server_row):
+    now = datetime.now(TIMEZONE)
+    if not server_row["auto_reset"]:
+        return False
+    if server_row["is_renewed"]:
+        return False
+    if is_before_renew_until(server_row, now):
+        return False
+    if server_row["reset_day"] != now.day:
+        return False
+    if now.hour != int(server_row["reset_hour"] or 1):
+        return False
+    if now.minute != int(server_row["reset_minute"] or 0):
+        return False
+    return True
 
 
 def _integrate_points(points, start_dt, end_dt, step_seconds):
@@ -4064,6 +4396,15 @@ def update_public_stock_settings():
     flash("库存展示配置已更新（端口修改需重启面板服务生效）", "success")
     return redirect(url_for("management_page"))
 
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET stock_page_title = ?, public_stock_port = ?, updated_at = ? WHERE id = 1",
+            (title, public_port, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+    flash("库存展示配置已更新（端口修改需重启面板服务生效）", "success")
+    return redirect(url_for("management_page"))
 
 @app.route("/management/change-password", methods=["POST"])
 @login_required
