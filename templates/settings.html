@@ -4,7 +4,7 @@
 {% block content %}
 <section class="panel">
   <h2>服务器设置：全局任务（所有服务器共用）</h2>
-  <form method="post" action="/global-tasks" class="settings-form-stack">
+  <form id="global-task-form" method="post" action="/global-tasks" class="settings-form-stack">
     <section class="settings-block">
       <h3>重置任务设置</h3>
       <div class="grid-form">
@@ -21,27 +21,12 @@
     </section>
 
     <section class="settings-block">
-      <h3>Agent设置</h3>
-      <div class="grid-form">
-        <label>面板公网地址（Agent上报地址）
-          <input name="panel_base_url" placeholder="例如 https://panel.example.com" value="{{ global_cfg.panel_base_url or panel_base_url_default }}" />
-        </label>
-        <label class="full">重装后 Agent 安装命令（可选）
-          <textarea name="agent_install_command" rows="3" placeholder="例如 curl -fsSL https://example.com/install-agent.sh | bash -s -- --id xxx --key yyy">{{ global_cfg.agent_install_command }}</textarea>
-          <p class="hint">重装后会先自动安装内置上报 Agent（上传到本面板），这里可选填额外命令。若使用反向代理，请填写可被目标服务器访问的域名地址。支持变量：{ip}、{name}、{ssh_user}</p>
-        </label>
-      </div>
-    </section>
-
-    <section class="settings-block">
-      <h3>流量统计设置</h3>
+      <h3>流量统计设置（SCP API）</h3>
       <div class="grid-form traffic-grid">
-        <div class="traffic-source-box">
-          <label class="full">流量统计来源（二选一）</label>
-          <label class="inline"><input type="radio" name="traffic_data_source" value="agent" {% if (global_cfg.traffic_data_source or 'agent') == 'agent' %}checked{% endif %}/> Agent 上报</label>
-          <label class="inline"><input type="radio" name="traffic_data_source" value="ssh" {% if (global_cfg.traffic_data_source or 'agent') == 'ssh' %}checked{% endif %}/> SSH 定时采集（每 5 分钟）</label>
-        </div>
-        <label>SSH连通性检测间隔（分钟，0为关闭）<input name="ssh_check_interval_minutes" type="number" min="0" max="1440" value="{{ global_cfg.ssh_check_interval_minutes or 120 }}" /></label>
+        <label>当月流量数据采样间隔（分钟）
+          <input name="traffic_sample_interval_minutes" type="number" min="1" max="1440" value="{{ global_cfg.traffic_sample_interval_minutes or 60 }}" />
+        </label>
+        <p class="hint">例如填写 60，则每 60 分钟依次通过 SCP API 采集各服务器当月上传/下载流量及是否限速状态。</p>
       </div>
     </section>
 
@@ -50,22 +35,61 @@
       <div class="grid-form">
         <label class="full">邮件通知（服务器重置成功/失败）</label>
         <label class="inline"><input name="notify_email_enabled" type="checkbox" {% if global_cfg.notify_email_enabled %}checked{% endif %}/> 启用邮件通知</label>
+        <label class="inline"><input name="api_failure_notify_enabled" type="checkbox" {% if global_cfg.api_failure_notify_enabled %}checked{% endif %}/> 启用SCP账号API失败邮件提醒</label>
         <label>SMTP Host<input name="smtp_host" placeholder="smtp.example.com" value="{{ global_cfg.smtp_host }}" /></label>
         <label>SMTP Port<input name="smtp_port" type="number" value="{{ global_cfg.smtp_port or 587 }}" /></label>
         <label>SMTP User<input name="smtp_user" value="{{ global_cfg.smtp_user }}" /></label>
         <label>SMTP Password<input type="password" name="smtp_password" value="{{ global_cfg.smtp_password }}" /></label>
         <label>发件人邮箱<input name="smtp_from" placeholder="panel@example.com" value="{{ global_cfg.smtp_from }}" /></label>
         <label>收件人邮箱<input name="notify_email_to" placeholder="you@example.com" value="{{ global_cfg.notify_email_to }}" /></label>
+        <label>续费提醒天数<input name="renew_notice_days" placeholder="5,2" value="{{ global_cfg.renew_notice_days or '5,2' }}" /></label>
+      </div>
+      <div class="button-row" style="margin-top:8px;">
+        <button type="submit" formaction="/notify/test" formmethod="post" class="secondary">邮箱测试</button>
       </div>
     </section>
+  </form>
 
-    <div class="button-row">
-      <button type="submit">保存全局任务</button>
+  <section class="settings-block" style="margin-top:12px;">
+    <h3>VT数据压缩包托管（自动填充SSH任务2）</h3>
+    <label class="inline"><input name="data_zip_enabled" type="checkbox" form="global-task-form" {% if global_cfg.data_zip_enabled %}checked{% endif %}/> 启用压缩包来源选择（开启后按下方来源覆盖SSH任务2中的 -d 链接）</label>
+    <div class="grid-form">
+      <label class="full">压缩包来源</label>
+      <label class="inline"><input type="radio" name="data_zip_source" value="original" form="global-task-form" {% if (global_cfg.data_zip_source or 'original') == 'original' %}checked{% endif %}/> 使用SSH任务2代码里的原始直链</label>
+      <label class="inline"><input type="radio" name="data_zip_source" value="uploaded" form="global-task-form" {% if global_cfg.data_zip_source == 'uploaded' %}checked{% endif %}/> 使用手动上传的压缩包</label>
+      <label class="inline"><input type="radio" name="data_zip_source" value="local_pack" form="global-task-form" {% if global_cfg.data_zip_source == 'local_pack' %}checked{% endif %}/> 使用本机VT自动打包压缩包</label>
     </div>
-  </form>
-  <form method="post" action="/notify/test" class="inline-form">
-    <button type="submit">邮箱测试</button>
-  </form>
+
+    <form method="post" action="{{ url_for('upload_data_zip_for_ssh2') }}" enctype="multipart/form-data" class="grid-form" style="margin-top:10px;">
+      <label class="full">上传 data.zip
+        <input type="file" name="data_zip_file" accept=".zip,application/zip" required />
+      </label>
+      <button type="submit">上传压缩包</button>
+    </form>
+    <p class="hint">手动上传压缩包直链：{{ global_cfg.data_zip_url or '暂无' }}</p>
+
+    <form method="post" action="{{ url_for('package_local_vt_data_for_ssh2') }}" class="grid-form" style="margin-top:10px;">
+      <label class="full">本机VT数据目录
+        <input name="local_vt_data_path" placeholder="例如 /root/vertex/data/" value="{{ global_cfg.local_vt_data_path or '' }}" required />
+      </label>
+      <button type="submit">打包指定VT数据</button>
+    </form>
+
+    <form method="post" action="{{ url_for('upload_local_setting_json_for_packaging') }}" enctype="multipart/form-data" class="grid-form" style="margin-top:10px;">
+      <label class="full">上传替换用 setting.json（仅用于打包，不修改本机原文件）
+        <input type="file" name="local_setting_json_file" accept="application/json,.json" required />
+      </label>
+      <button type="submit">上传 setting.json</button>
+    </form>
+    <label class="inline" style="margin-top:8px;"><input name="local_setting_json_enabled" type="checkbox" form="global-task-form" {% if global_cfg.local_setting_json_enabled %}checked{% endif %}/> 是否替换 setting.json 文件（仅替换压缩包内 data/setting.json）</label>
+
+    <p class="hint">本机打包压缩包直链：{{ global_cfg.local_vt_data_zip_url or '暂无' }}</p>
+    <p class="hint">替换用 setting.json 文件：{{ global_cfg.local_setting_json_path or '暂无' }}</p>
+    <p class="hint">说明：开启上方开关后，按“压缩包来源”注入SSH任务2；关闭开关时，始终使用SSH任务2原始代码。</p>
+  </section>
+  <div class="button-row">
+    <button type="submit" form="global-task-form">保存全局任务</button>
+  </div>
 </section>
 
 <section class="panel">
@@ -74,6 +98,37 @@
     <label>账号别名<input name="name" placeholder="例如 netcup-A" required /></label>
     <label>SCP账号<input name="username" required /></label>
     <label class="full">OIDC Refresh Token（必填）<input name="refresh_token" placeholder="离线refresh_token，用于换取Bearer access_token" required /></label>
+    <details class="full" style="margin-top:4px;">
+      <summary style="cursor:pointer;">获取教程</summary>
+      <div class="hint" style="margin-top:8px;line-height:1.5;">
+        <p><strong>一、生成离线 Refresh Token（官方 Device Code 流程）</strong></p>
+        <pre>curl -X POST 'https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect/auth/device' \
+  -d "client_id=scp" \
+  -d 'scope=offline_access openid' | jq</pre>
+        <p>返回里会有 <code>device_code</code>、<code>verification_uri_complete</code>。</p>
+        <p>浏览器打开 <code>verification_uri_complete</code> 登录并授权（profile/offline_access/roles/email）。</p>
+
+        <p><strong>二、用 device_code 换 access_token / refresh_token</strong></p>
+        <pre>curl -X POST 'https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect/token' \
+  -d 'grant_type=urn:ietf:params:oauth:grant-type:device_code' \
+  -d 'device_code=&lt;device-code&gt;' \
+  -d 'client_id=scp' | jq</pre>
+        <p>响应中的 <code>refresh_token</code> 就是要填到面板里的 OIDC Refresh Token。</p>
+
+        <p><strong>三、后续刷新 access_token（常规API调用）</strong></p>
+        <pre>curl 'https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect/token' \
+  -d 'client_id=scp' \
+  -d 'refresh_token=&lt;refresh_token&gt;' \
+  -d 'grant_type=refresh_token' | jq</pre>
+        <p>离线 refresh token 只要 30 天内至少使用一次即可长期有效。</p>
+
+        <p><strong>四、如需吊销 refresh token</strong></p>
+        <pre>curl 'https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect/revoke' \
+  -d 'client_id=scp' \
+  -d "token=&lt;refresh-token&gt;" \
+  -d "token_type_hint=refresh_token" | jq</pre>
+      </div>
+    </details>
     <label class="full">API Endpoint<input name="api_endpoint" value="https://www.servercontrolpanel.de/scp-core/api/v1" /></label>
     <button type="submit">添加SCP账号</button>
   </form>
@@ -81,7 +136,7 @@
   <div class="scp-account-list">
     {% for a in scp_accounts %}
       <details class="scp-account-item">
-        <summary>{{ loop.index }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }} [OIDC]</summary>
+        <summary>{{ loop.index }} {{ a.name }} ({{ a.username }}) - {{ a.api_endpoint }} [OIDC] | API状态: {{ a.api_status or "unknown" }} {% if a.api_checked_at %}({{ a.api_checked_at }}){% endif %}</summary>
         <form method="post" action="/scp-accounts/{{ a.id }}/update" class="grid-form">
           <label>账号别名<input name="name" value="{{ a.name }}" required /></label>
           <label>SCP账号<input name="username" value="{{ a.username }}" required /></label>
@@ -92,10 +147,14 @@
           </div>
         </form>
         <div class="button-row">
+          <form method="post" action="/scp-accounts/{{ a.id }}/check">
+            <button type="submit">检测API</button>
+          </form>
           <form method="post" action="/scp-accounts/{{ a.id }}/delete" onsubmit="return confirm('确认删除该SCP账号?')">
             <button class="danger" type="submit">删除</button>
           </form>
         </div>
+        {% if a.api_last_error %}<p class="hint" style="color:#b91c1c;">最近错误：{{ a.api_last_error }}</p>{% endif %}
       </details>
     {% endfor %}
   </div>
@@ -106,11 +165,42 @@
 
 
 <section class="panel">
+  <h2>服务器分组设置</h2>
+  <form method="post" action="/server-groups" class="grid-form">
+    <label>分组名称<input name="name" required placeholder="例如 RS1000 G9.5" /></label>
+    <label>分组排序<input name="sort_order" type="number" value="0" /></label>
+    <label class="full">分组统一说明<textarea name="description" rows="2" placeholder="此分组服务器配置说明，会显示在库存页"></textarea></label>
+    <button type="submit">新增分组</button>
+  </form>
+
+  {% for g in server_groups %}
+  <details>
+    <summary>#{{ g.id }} {{ g.name }}（排序 {{ g.sort_order }}）</summary>
+    <form method="post" action="/server-groups/{{ g.id }}/update" class="grid-form">
+      <label>分组名称<input name="name" value="{{ g.name }}" required /></label>
+      <label>分组排序<input name="sort_order" type="number" value="{{ g.sort_order }}" required /></label>
+      <label class="full">分组统一说明<textarea name="description" rows="2">{{ g.description }}</textarea></label>
+      <div class="button-row">
+        <button type="submit">保存分组</button>
+      </div>
+    </form>
+    <form method="post" action="/server-groups/{{ g.id }}/delete" onsubmit="return confirm('确认删除分组? 删除后该分组服务器将变成未分组')">
+      <button class="danger" type="submit">删除分组</button>
+    </form>
+  </details>
+  {% else %}
+  <p>暂无分组，服务器会显示为“未分组”。</p>
+  {% endfor %}
+</section>
+
+<section class="panel">
   <h2>服务器设置：新增服务器</h2>
   <form method="post" action="/servers" class="grid-form">
     <label>名称<input name="name" required /></label>
     <label>租赁人<input name="renter_name" placeholder="例如 咸鱼：DABA" /></label>
-    <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
+    <label>租赁人邮箱<input name="renter_email" type="email" placeholder="tenant@example.com" /></label>
+    <label>服务器分组<select name="server_group_id"><option value="0">未分组</option>{% for g in server_groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select></label>
+        <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
     <label>IP<input name="ip" required /></label>
     <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
     <label>SSH用户<input name="ssh_user" value="root" required /></label>
@@ -137,7 +227,9 @@
     <form method="post" action="/servers/{{ s.id }}/update" class="grid-form">
       <label>名称<input name="name" value="{{ s.name }}" required /></label>
       <label>租赁人<input name="renter_name" value="{{ s.renter_name }}" placeholder="例如 咸鱼：DABA" /></label>
-      <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
+      <label>租赁人邮箱<input name="renter_email" type="email" value="{{ s.renter_email or "" }}" placeholder="tenant@example.com" /></label>
+      <label>服务器分组<select name="server_group_id"><option value="0" {% if not s.server_group_id %}selected{% endif %}>未分组</option>{% for g in server_groups %}<option value="{{ g.id }}" {% if s.server_group_id == g.id %}selected{% endif %}>{{ g.name }}</option>{% endfor %}</select></label>
+            <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
       <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
       <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
       <label>SSH用户<input name="ssh_user" value="{{ s.ssh_user }}" required /></label>
