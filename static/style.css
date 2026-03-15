@@ -1,6 +1,10 @@
 :root{--bg:#f3f5f9;--card:#fff;--text:#1f2937;--muted:#6b7280;--primary:#1f6fff;--ok:#0f9d58;--bad:#d93025;}
 *{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:var(--bg);color:var(--text)}
-.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:0;z-index:9;flex-wrap:wrap}
+body{overflow-x:hidden}
+.server-card,.panel{max-width:100%}
+.dd-form select{max-width:100%}
+
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:relative;z-index:1;flex-wrap:wrap}
 .brand{font-size:34px;font-weight:800;line-height:1.05}.brand span{color:var(--primary)}
 nav{display:flex;gap:10px;flex-wrap:wrap}.nav-link{padding:10px 14px;border-radius:10px;text-decoration:none;color:#334155;background:#f1f5f9}.nav-link.active{background:var(--primary);color:#fff}
 .container{max-width:1400px;margin:24px auto;padding:0 16px}
@@ -13,7 +17,7 @@ nav{display:flex;gap:10px;flex-wrap:wrap}.nav-link{padding:10px 14px;border-radi
 .grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
 .grid-form label{display:flex;flex-direction:column;gap:5px;font-size:14px}
 .grid-form .full{grid-column:1/-1}.inline{flex-direction:row!important;align-items:center;gap:8px!important}
-input,textarea,button{border:1px solid #d1d5db;border-radius:10px;padding:10px;font-size:15px}
+input,textarea,select,button{border:1px solid #d1d5db;border-radius:10px;padding:10px;font-size:15px;max-width:100%}
 textarea{min-height:60px}button{background:var(--primary);color:#fff;border:none;cursor:pointer}.danger{background:#b42318}
 .button-row{display:flex;gap:10px;margin-top:10px}
 .inline-form{margin-top:10px}
@@ -22,14 +26,15 @@ textarea{min-height:60px}button{background:var(--primary);color:#fff;border:none
 .table{width:100%;border-collapse:collapse}.table th,.table td{padding:12px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
 .badge{padding:4px 10px;border-radius:999px;background:#eef2f7;color:#475569;font-weight:700}.badge.ok{background:#dcfce7;color:#166534}.badge.bad{background:#fee2e2;color:#991b1b}.badge.running{background:#dbeafe;color:#1d4ed8}.badge.queued{background:#fef3c7;color:#92400e}.badge.retrying{background:#ede9fe;color:#5b21b6}
 .badge.rent{border:1px solid transparent}.badge.rent-on{background:#fee2e2;color:#991b1b;border-color:#fecaca}.badge.rent-off{background:#dcfce7;color:#166534;border-color:#bbf7d0}
-pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px}
 .flash-wrap{margin-bottom:10px}.flash{padding:10px;border-radius:8px}.flash.success{background:#dcfce7;color:#166534}
 .log-card{margin-bottom:10px}.log-card.failed h3{color:#991b1b}.log-card.success h3{color:#166534}
 
 .server-columns{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .server-column h3{margin:4px 0 10px}
-.server-list{display:grid;gap:14px}
-.server-card{border:1px solid #e5e7eb;border-radius:14px;padding:14px}
+.server-list{display:grid;gap:14px;min-width:0}
+.server-column{min-width:0}
+.server-card{border:1px solid #e5e7eb;border-radius:14px;padding:14px;width:100%;min-width:0}
 .server-card.not-rented{background:#f0fdf4;border-color:#bbf7d0}
 .server-card.rented{background:#fff1f2;border-color:#fecdd3}
 .server-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:10px}
@@ -50,6 +55,10 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
 .dd-form select{min-width:140px}
 .renter-inline-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .renter-inline-form input{min-width:220px}
+
+.renter-inline-form input[type="email"]{min-width:260px}
+.rental-notice-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin:10px 0 12px}
+.rental-notice-form label{display:flex;flex-direction:column;gap:6px;font-weight:600;color:#334155;min-width:320px}
 .hidden{display:none !important}
 .rent-btn{font-weight:700}
 .rent-btn-on{background:#ef4444;color:#fff}
@@ -79,10 +88,12 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
   .brand{font-size:28px}
 }
 @media (max-width:680px){
-  .topbar{padding:12px}
+  .topbar{padding:12px;align-items:flex-start}
   .brand{font-size:20px}
   nav{width:100%}
   .nav-link{flex:1;text-align:center;padding:8px 10px}
+  .topbar form{width:100%}
+  .topbar .ghost-btn{display:block;width:100%;max-width:180px}
   .ghost-btn{padding:8px 10px}
   .container{margin:12px auto;padding:0 10px}
   .stats-grid{grid-template-columns:1fr 1fr;gap:10px}
@@ -90,8 +101,11 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
   .stat-card h3{font-size:34px}
   .server-meta{grid-template-columns:1fr}
   .server-columns{grid-template-columns:1fr}
-  .server-actions{display:grid;grid-template-columns:1fr 1fr}
+  .server-actions{display:grid;grid-template-columns:1fr}
   .server-actions form,.server-actions .copy-btn{width:100%}
+  .dd-form{display:grid;grid-template-columns:1fr;gap:8px}
+  .dd-form select{min-width:0;width:100%}
+  .renter-inline-form{display:grid;grid-template-columns:1fr;gap:8px}
   .renter-inline-form input{min-width:0;width:100%}
   .server-actions button{width:100%}
 }
@@ -110,3 +124,49 @@ pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:10px;border-ra
 .scp-account-item > summary{cursor:pointer;font-weight:700}
 .scp-account-item[open]{background:#fff}
 .scp-account-item form{margin-top:10px}
+
+.traffic-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:10px 0}
+.traffic-summary-grid article{border:1px solid #e2e8f0;border-radius:10px;padding:10px;background:#f8fafc}
+.traffic-summary-grid h4{margin:0 0 8px 0;font-size:14px}
+.traffic-total{font-size:18px;font-weight:800;margin:0 0 4px 0}
+.table-wrap{overflow:auto}
+.traffic-table th,.traffic-table td{white-space:nowrap}
+.traffic-chart-block{margin:10px 0}
+.traffic-chart{position:relative;border:1px solid #e2e8f0;border-radius:10px;background:#fff;overflow:visible}
+.traffic-chart-svg{display:block;width:100%;height:300px}
+.traffic-point{cursor:pointer}
+.traffic-chart-tooltip{position:absolute;z-index:2;background:rgba(15,23,42,.95);color:#fff;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.4;pointer-events:none;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.25)}
+
+.table-like{width:100%;border-collapse:collapse}.table-like th,.table-like td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
+.rental-table th:nth-child(1){min-width:180px}
+.rental-table th:nth-child(2){min-width:110px}
+.rental-table th:nth-child(3){min-width:220px}
+.rental-table th:nth-child(4){min-width:300px}
+.rental-next-box{display:flex;flex-direction:column;gap:8px}
+.rental-next-text{font-weight:700;color:#0f172a}
+.rental-next-form{display:flex;gap:8px;flex-wrap:wrap}
+.rental-next-form select{min-width:120px}
+.rental-cards{display:flex;flex-direction:column;gap:10px}
+.rental-cards-stacked{margin-top:10px}
+.rental-table-header,.rental-row{display:grid;grid-template-columns:1.1fr .8fr 1fr 1fr 1.1fr 1fr;align-items:center;gap:12px}
+.rental-table-header{font-weight:800;color:#1f2937;padding:8px 12px;border-bottom:1px solid #cbd5e1}
+.rental-card{border:1px solid #d1d5db;border-radius:10px;padding:10px 12px}
+.rental-row{min-height:64px}
+.rental-col{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rental-col-name{font-size:28px;font-weight:900;color:#0f172a}
+.rental-col-action{overflow:visible}
+.rental-card-confirmed{background:#c9f2dd;border-color:#74d69f}
+.rental-card-non-renew{background:#ffd9de;border-color:#f08aa0}
+.rental-card-unknown{background:#f7f0bf;border-color:#dfc347}
+.rental-next-form-nowrap{flex-wrap:nowrap;align-items:center;justify-content:flex-start}
+.rental-next-form-nowrap select{min-width:140px}
+
+@media (max-width: 1100px){
+  .rental-table-header{display:none}
+  .rental-row{grid-template-columns:1fr;gap:6px}
+  .rental-col{white-space:normal}
+  .rental-col::before{content:attr(data-label) '：';color:#475569;font-weight:700;margin-right:6px}
+  .rental-col-name::before{content:attr(data-label) '：';font-size:14px}
+  .rental-col-name{font-size:20px}
+}
+
