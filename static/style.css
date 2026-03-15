@@ -55,6 +55,10 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .dd-form select{min-width:140px}
 .renter-inline-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .renter-inline-form input{min-width:220px}
+
+.renter-inline-form input[type="email"]{min-width:260px}
+.rental-notice-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin:10px 0 12px}
+.rental-notice-form label{display:flex;flex-direction:column;gap:6px;font-weight:600;color:#334155;min-width:320px}
 .hidden{display:none !important}
 .rent-btn{font-weight:700}
 .rent-btn-on{background:#ef4444;color:#fff}

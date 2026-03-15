@@ -8,6 +8,13 @@
   </div>
   <p class="hint">下月租户状态用于跟踪续租计划：选择“确认续租”会联动服务器详情为续租中；选择“未知/不续租”会联动为未续租。</p>
 
+  <form method="post" action="{{ url_for('update_renew_notice_days') }}" class="rental-notice-form">
+    <label>服务器重置前X天自动发送续费通知（逗号分隔，如 5,2）
+      <input name="renew_notice_days" value="{{ global_cfg.renew_notice_days or '5,2' }}" placeholder="5,2" />
+    </label>
+    <button type="submit">保存提醒设置</button>
+  </form>
+
   <div class="rental-table-header">
     <span>名称</span>
     <span>刷新日期</span>

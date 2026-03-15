@@ -113,6 +113,9 @@ def init_db():
                 last_month_tenant TEXT NOT NULL DEFAULT '',
                 rental_rollover_key TEXT NOT NULL DEFAULT '',
                 renter_name TEXT NOT NULL DEFAULT '',
+                renter_email TEXT NOT NULL DEFAULT '',
+                delivery_email_sent_at TEXT,
+                renew_notice_sent_keys TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 agent_token TEXT NOT NULL DEFAULT '',
                 period_key TEXT NOT NULL DEFAULT '',
@@ -161,6 +164,7 @@ def init_db():
                 local_setting_json_enabled INTEGER NOT NULL DEFAULT 0,
                 api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0,
                 panel_password_hash TEXT,
+                renew_notice_days TEXT NOT NULL DEFAULT '5,2',
                 updated_at TEXT
             )
             """
@@ -307,6 +311,9 @@ def init_db():
         ensure_column(conn, "servers", "last_month_tenant TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "rental_rollover_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "renter_name TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "renter_email TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "delivery_email_sent_at TEXT")
+        ensure_column(conn, "servers", "renew_notice_sent_keys TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "period_key TEXT NOT NULL DEFAULT ''")
@@ -337,6 +344,7 @@ def init_db():
         ensure_column(conn, "task_queue", "trigger_type TEXT NOT NULL DEFAULT 'manual'")
         ensure_column(conn, "task_queue", "batch_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_password_hash TEXT")
+        ensure_column(conn, "global_config", "renew_notice_days TEXT NOT NULL DEFAULT '5,2'")
         ensure_column(conn, "global_config", "agent_install_command TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "panel_base_url TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "notify_email_enabled INTEGER NOT NULL DEFAULT 0")
@@ -536,6 +544,35 @@ def _normalize_next_rent_status(value):
     return "unknown"
 
 
+def normalize_renew_notice_days_text(value):
+    raw = str(value or "").replace("，", ",")
+    days = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token or not token.isdigit():
+            continue
+        day = int(token)
+        if day <= 0 or day > 120:
+            continue
+        if day not in days:
+            days.append(day)
+    if not days:
+        days = [5, 2]
+    return ",".join(str(day) for day in days)
+
+
+def parse_renew_notice_days(value):
+    return [int(item) for item in normalize_renew_notice_days_text(value).split(",") if item.isdigit()]
+
+
+def _parse_notice_key_set(raw_text):
+    return {item.strip() for item in str(raw_text or "").split("|") if item.strip()}
+
+
+def _compose_notice_key(target_reset_dt, days_before):
+    return f"{target_reset_dt.strftime('%Y-%m-%d %H:%M')}#{int(days_before)}"
+
+
 def _format_next_month_tenant(row):
     renter = str(row["renter_name"] or "").strip()
     status = _normalize_next_rent_status(row["next_rent_status"])
@@ -561,7 +598,7 @@ def apply_monthly_rental_rollover_if_needed(now_dt=None):
     cycle_key = _rental_cycle_key(now_dt)
     with closing(get_conn()) as conn:
         rows = conn.execute(
-            "SELECT id, name, reset_day, is_rented, is_renewed, renew_until_date, renter_name, next_rent_status, rental_rollover_key FROM servers ORDER BY sort_order ASC, id ASC"
+            "SELECT id, name, reset_day, is_rented, is_renewed, renew_until_date, renter_name, renter_email, next_rent_status, rental_rollover_key, delivery_email_sent_at, renew_notice_sent_keys FROM servers ORDER BY sort_order ASC, id ASC"
         ).fetchall()
         changed = 0
         for row in rows:
@@ -574,38 +611,49 @@ def apply_monthly_rental_rollover_if_needed(now_dt=None):
             renew_until = _parse_date_text(row["renew_until_date"])
             if renew_until and now_dt.date() < renew_until:
                 current_tenant = str(row["renter_name"] or "").strip()
+                current_email = str(row["renter_email"] or "").strip()
                 next_current_tenant = current_tenant if int(row["is_rented"] or 0) == 1 else ""
+                next_current_email = current_email if int(row["is_rented"] or 0) == 1 else ""
                 conn.execute(
                     """
                     UPDATE servers
                     SET last_month_tenant = ?,
                         renter_name = ?,
+                        renter_email = ?,
                         next_rent_status = 'unknown',
+                        delivery_email_sent_at = CASE WHEN ? <> '' THEN delivery_email_sent_at ELSE NULL END,
+                        renew_notice_sent_keys = CASE WHEN ? <> '' THEN renew_notice_sent_keys ELSE '' END,
                         rental_rollover_key = ?
                     WHERE id = ?
                     """,
-                    (current_tenant, next_current_tenant, cycle_key, row["id"]),
+                    (current_tenant, next_current_tenant, next_current_email, next_current_email, next_current_email, cycle_key, row["id"]),
                 )
                 changed += 1
                 continue
 
             current_tenant = str(row["renter_name"] or "").strip()
+            current_email = str(row["renter_email"] or "").strip()
             status = _normalize_next_rent_status(row["next_rent_status"])
             next_current_tenant = ""
+            next_current_email = ""
             if int(row["is_rented"] or 0) == 1 and status == "confirmed":
                 next_current_tenant = current_tenant
+                next_current_email = current_email
 
             conn.execute(
                 """
                 UPDATE servers
                 SET last_month_tenant = ?,
                     renter_name = ?,
+                    renter_email = ?,
                     next_rent_status = 'unknown',
                     is_renewed = 0,
+                    delivery_email_sent_at = CASE WHEN ? <> '' THEN delivery_email_sent_at ELSE NULL END,
+                    renew_notice_sent_keys = CASE WHEN ? <> '' THEN renew_notice_sent_keys ELSE '' END,
                     rental_rollover_key = ?
                 WHERE id = ?
                 """,
-                (current_tenant, next_current_tenant, cycle_key, row["id"]),
+                (current_tenant, next_current_tenant, next_current_email, next_current_email, next_current_email, cycle_key, row["id"]),
             )
             changed += 1
 
@@ -1332,12 +1380,12 @@ def update_backup_email_config(enabled, backup_email_to, interval_days):
             ),
         )
         conn.commit()
-def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path, local_setting_json_enabled, api_failure_notify_enabled):
+def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path, local_setting_json_enabled, api_failure_notify_enabled, renew_notice_days):
     with closing(get_conn()) as conn:
         conn.execute(
             """
             UPDATE global_config
-            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, local_setting_json_enabled=?, api_failure_notify_enabled=?, updated_at=?
+            SET reset_command=?, ssh_command_2=?, ssh_command_3=?, agent_install_command=?, panel_base_url=?, notify_email_enabled=?, smtp_host=?, smtp_port=?, smtp_user=?, smtp_password=?, smtp_from=?, notify_email_to=?, traffic_sample_interval_minutes=?, data_zip_enabled=?, data_zip_source=?, local_vt_data_path=?, local_setting_json_enabled=?, api_failure_notify_enabled=?, renew_notice_days=?, updated_at=?
             WHERE id=1
             """,
             (
@@ -1359,6 +1407,7 @@ def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_inst
                 (local_vt_data_path or "").strip(),
                 int(local_setting_json_enabled),
                 int(api_failure_notify_enabled),
+                normalize_renew_notice_days_text(renew_notice_days),
                 datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -1419,7 +1468,7 @@ def list_detail_rows():
     with closing(get_conn()) as conn:
         return conn.execute(
             """
-            SELECT s.id, s.name, s.renter_name, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
+            SELECT s.id, s.name, s.renter_name, s.renter_email, s.delivery_email_sent_at, s.ip, s.ssh_password, s.reset_day, s.reset_hour, s.reset_minute,
                    s.auto_reset, s.is_renewed, s.is_rented, s.renew_until_date, s.next_rent_status, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
@@ -1488,8 +1537,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, api_failure_notify_enabled, panel_password_hash, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, api_failure_notify_enabled, panel_password_hash, renew_notice_days, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1518,6 +1567,7 @@ def restore_backup_payload(payload):
                 int(global_cfg.get("local_setting_json_enabled", 0) or 0),
                 int(global_cfg.get("api_failure_notify_enabled", 0) or 0),
                 global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
+                normalize_renew_notice_days_text(global_cfg.get("renew_notice_days", "5,2")),
                 global_cfg.get("updated_at"),
             ),
         )
@@ -1525,8 +1575,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, renter_email, delivery_email_sent_at, renew_notice_sent_keys, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -1546,6 +1596,9 @@ def restore_backup_payload(payload):
                     (server.get("last_month_tenant", "") or "").strip(),
                     (server.get("rental_rollover_key", "") or "").strip(),
                     (server.get("renter_name", "") or "").strip(),
+                    (server.get("renter_email", "") or "").strip(),
+                    server.get("delivery_email_sent_at"),
+                    (server.get("renew_notice_sent_keys", "") or "").strip(),
                     int(server.get("sort_order", 0)),
                     int(server.get("max_retries", 2)),
                     str(server.get("retry_backoff_seconds", "60,180")),
@@ -1673,6 +1726,24 @@ def month_day_safe(year, month, day):
     import calendar
 
     return min(day, calendar.monthrange(year, month)[1])
+
+
+def build_server_reset_datetime(server_row, ref_dt):
+    reset_day = int(server_row["reset_day"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_day") or 1)
+    reset_hour = int(server_row["reset_hour"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_hour") or 1)
+    reset_minute = int(server_row["reset_minute"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_minute") or 0)
+
+    current_day = month_day_safe(ref_dt.year, ref_dt.month, reset_day)
+    current_target = ref_dt.replace(day=current_day, hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
+    if current_target > ref_dt:
+        return current_target
+
+    if ref_dt.month == 12:
+        next_year, next_month = ref_dt.year + 1, 1
+    else:
+        next_year, next_month = ref_dt.year, ref_dt.month + 1
+    next_day = month_day_safe(next_year, next_month, reset_day)
+    return ref_dt.replace(year=next_year, month=next_month, day=next_day, hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
 
 
 def get_traffic_period_start(reset_day, now_dt):
@@ -2208,47 +2279,6 @@ def refresh_all_traffic_data_via_scp(now_dt=None):
 
     log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
 
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
-
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
-
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def refresh_scp_account_statuses():
     accounts = list_scp_accounts()
@@ -2503,6 +2533,43 @@ def send_email_message(subject, body, category="general"):
         return False
 
 
+def send_email_to_recipient(subject, body, to_email, category="tenant_notice"):
+    recipient = str(to_email or "").strip()
+    if not recipient:
+        record_email_history(category, "", subject, "skipped", "收件人为空", body)
+        return False
+
+    cfg = get_global_config()
+    if not int(cfg["notify_email_enabled"] or 0):
+        record_email_history(category, recipient, subject, "skipped", "邮件通知未启用", body)
+        return False
+
+    smtp_host = (cfg["smtp_host"] or "").strip()
+    smtp_user = (cfg["smtp_user"] or "").strip()
+    smtp_password = cfg["smtp_password"] or ""
+    smtp_from = (cfg["smtp_from"] or "").strip()
+    smtp_port = int(cfg["smtp_port"] or 587)
+    if not (smtp_host and smtp_from):
+        record_email_history(category, recipient, subject, "skipped", "SMTP未配置", body)
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp_from
+    msg["To"] = recipient
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            server.starttls()
+            if smtp_user:
+                server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        record_email_history(category, recipient, subject, "success", "", body)
+        return True
+    except Exception as exc:
+        record_email_history(category, recipient, subject, "failed", str(exc), body)
+        return False
 
 
 def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None, category="backup"):
@@ -3196,7 +3263,7 @@ def task_worker_loop():
                     )
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
                         conn.execute(
-                            "UPDATE servers SET is_rented = 0, is_renewed = 0, renew_until_date = '', renter_name = '' WHERE id = ?",
+                            "UPDATE servers SET is_rented = 0, is_renewed = 0, renew_until_date = '', renter_name = '', renter_email = '', delivery_email_sent_at = NULL, renew_notice_sent_keys = '' WHERE id = ?",
                             (row["id"],),
                         )
                     conn.commit()
@@ -3280,9 +3347,61 @@ def run_for_server(server_id, trigger_type="manual", batch_key=""):
     return True, "任务已加入队列，将按顺序依次执行", log_id
 
 
+def run_scheduled_renew_notice_email(now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    cfg = get_global_config()
+    notice_days = parse_renew_notice_days(cfg["renew_notice_days"] if cfg else "")
+    if not notice_days:
+        return
+
+    rows = list_servers()
+    for row in rows:
+        if not int(row["auto_reset"] or 0):
+            continue
+        if int(row["is_renewed"] or 0) == 1:
+            continue
+        if is_before_renew_until(row, now_dt):
+            continue
+
+        recipient = (row["renter_email"] or "").strip()
+        if not recipient:
+            continue
+
+        reset_dt = build_server_reset_datetime(row, now_dt)
+        if now_dt.hour != int(row["reset_hour"] or 1) or now_dt.minute != int(row["reset_minute"] or 0):
+            continue
+
+        days_left = (reset_dt.date() - now_dt.date()).days
+        if days_left not in notice_days:
+            continue
+
+        sent_keys = _parse_notice_key_set(row["renew_notice_sent_keys"])
+        notice_key = _compose_notice_key(reset_dt, days_left)
+        if notice_key in sent_keys:
+            continue
+
+        subject = f"[VPS续费提醒] {row['name']} 将于 {reset_dt.strftime('%m-%d %H:%M')} 重置"
+        body = (
+            f"客户您好，您于闲鱼或论坛租赁的 {row['name']} 服务器，即将于 {reset_dt.strftime('%Y-%m-%d %H:%M')}（北京时间）重置，"
+            "届时服务器将清空，请及时备份相关数据，如需续租，请提前在闲鱼下单，否则可能会预定给其他用户。感谢您的配合。"
+        )
+        ok = send_email_to_recipient(subject, body, recipient, category="renew_notice")
+        if not ok:
+            log_system_event("renew_notice", f"服务器[{row['name']}] 续费提醒邮件发送失败", level="error", server_id=row["id"], details=recipient)
+            continue
+
+        sent_keys.add(notice_key)
+        sent_text = "|".join(sorted(sent_keys))
+        with closing(get_conn()) as conn:
+            conn.execute("UPDATE servers SET renew_notice_sent_keys = ? WHERE id = ?", (sent_text, row["id"]))
+            conn.commit()
+        log_system_event("renew_notice", f"服务器[{row['name']}] 已发送重置前{days_left}天续费提醒邮件", server_id=row["id"], details=recipient)
+
+
 def check_scheduled_jobs():
     now = datetime.now(TIMEZONE)
     run_scheduled_backup_email(now)
+    run_scheduled_renew_notice_email(now)
     batch_key = now.strftime("%Y-%m-%d %H:%M")
     scheduled_for = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -3563,8 +3682,24 @@ def settings_page():
 @login_required
 def rentals_page():
     apply_monthly_rental_rollover_if_needed()
-    return render_template("rentals.html", rows=list_rental_management_rows())
+    global_cfg = get_global_config()
+    return render_template("rentals.html", rows=list_rental_management_rows(), global_cfg=global_cfg)
 
+
+
+
+@app.post("/rentals/renew-notice-days")
+@login_required
+def update_renew_notice_days():
+    days_text = normalize_renew_notice_days_text(request.form.get("renew_notice_days"))
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET renew_notice_days = ?, updated_at = ? WHERE id = 1",
+            (days_text, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+    flash(f"续费提醒天数已更新：{days_text}", "success")
+    return redirect(url_for("rentals_page"))
 
 @app.post("/rentals/<int:server_id>/next-status")
 @login_required
@@ -3843,6 +3978,7 @@ def update_global_tasks():
         form.get("local_vt_data_path", ""),
         1 if form.get("local_setting_json_enabled") == "on" else 0,
         1 if form.get("api_failure_notify_enabled") == "on" else 0,
+        form.get("renew_notice_days", ""),
     )
     flash("全局任务配置已更新", "success")
     return redirect(url_for("settings_page"))
@@ -3903,8 +4039,8 @@ def add_server():
 
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, renter_email, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -3917,6 +4053,7 @@ def add_server():
                 reset_minute,
                 1 if form.get("auto_reset") == "on" else 0,
                 (form.get("renter_name") or "").strip(),
+                (form.get("renter_email") or "").strip(),
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
@@ -3961,7 +4098,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, renter_email=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
             WHERE id=?
             """,
             (
@@ -3975,6 +4112,7 @@ def update_server(server_id):
                 reset_minute,
                 1 if form.get("auto_reset") == "on" else 0,
                 (form.get("renter_name") or "").strip(),
+                (form.get("renter_email") or "").strip(),
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
@@ -4053,16 +4191,66 @@ def check_ssh_now(server_id):
 @login_required
 def update_renter(server_id):
     renter_name = (request.form.get("renter_name") or "").strip()
+    renter_email = (request.form.get("renter_email") or "").strip()
     with closing(get_conn()) as conn:
         row = conn.execute("SELECT id FROM servers WHERE id = ?", (server_id,)).fetchone()
         if not row:
             flash("服务器不存在", "error")
             return redirect(url_for("details_page"))
-        conn.execute("UPDATE servers SET renter_name = ? WHERE id = ?", (renter_name, server_id))
+        conn.execute(
+            "UPDATE servers SET renter_name = ?, renter_email = ?, delivery_email_sent_at = NULL WHERE id = ?",
+            (renter_name, renter_email, server_id),
+        )
         conn.commit()
-    flash("租赁人已更新" if renter_name else "已清空租赁人", "success")
+    flash("租赁人信息已更新" if (renter_name or renter_email) else "已清空租赁人信息", "success")
     return redirect(url_for("details_page"))
 
+
+
+
+@app.route("/servers/<int:server_id>/send-delivery-email", methods=["POST"])
+@login_required
+def send_delivery_email(server_id):
+    row = get_server(server_id)
+    if not row:
+        flash("服务器不存在", "error")
+        return redirect(url_for("details_page"))
+
+    renter_email = (row["renter_email"] or "").strip()
+    if not renter_email:
+        flash("请先填写租赁人邮箱", "error")
+        return redirect(url_for("details_page"))
+
+    reset_time_text = f"{int(row['reset_day'] or 1)}日 {int(row['reset_hour'] or 1):02d}:{int(row['reset_minute'] or 0):02d}（北京时间）"
+    latest = ""
+    with closing(get_conn()) as conn:
+        latest_log = conn.execute(
+            "SELECT summary FROM job_logs WHERE server_id = ? ORDER BY id DESC LIMIT 1",
+            (server_id,),
+        ).fetchone()
+        latest = (latest_log["summary"] if latest_log else "") or "暂无输出详情"
+
+    subject = f"[服务器发货] {row['name']}"
+    body = (
+        f"{row['name']}，{reset_time_text}重置，需要续租请提前下单。\n"
+        f"IP address: {row['ip']}\n"
+        f"SSH Port: {row['ssh_port']}\n"
+        f"SSH User: {row['ssh_user']}\n"
+        f"Root Password: {row['ssh_password']}\n\n"
+        f"输出详情：\n{latest}"
+    )
+
+    ok = send_email_to_recipient(subject, body, renter_email, category="delivery")
+    if not ok:
+        flash("邮件发货失败，请检查SMTP配置和收件人邮箱", "error")
+        return redirect(url_for("details_page"))
+
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET delivery_email_sent_at = ? WHERE id = ?", (now_text, server_id))
+        conn.commit()
+    flash(f"[{row['name']}] 发货邮件已发送到 {renter_email}", "success")
+    return redirect(url_for("details_page"))
 
 @app.route("/servers/<int:server_id>/toggle-rent", methods=["POST"])
 @login_required
@@ -4073,7 +4261,13 @@ def toggle_rent(server_id):
             flash("服务器不存在", "error")
             return redirect(url_for("details_page"))
         next_state = 0 if row["is_rented"] else 1
-        conn.execute("UPDATE servers SET is_rented = ? WHERE id = ?", (next_state, server_id))
+        if next_state:
+            conn.execute("UPDATE servers SET is_rented = ? WHERE id = ?", (next_state, server_id))
+        else:
+            conn.execute(
+                "UPDATE servers SET is_rented = 0, renter_name = '', renter_email = '', delivery_email_sent_at = NULL, renew_notice_sent_keys = '' WHERE id = ?",
+                (server_id,),
+            )
         conn.commit()
     flash("已标记为已出租" if next_state else "已标记为未出租", "success")
     return redirect(url_for("details_page"))

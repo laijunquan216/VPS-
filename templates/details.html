@@ -9,7 +9,9 @@
       <h3>{{ row.name }}</h3>
       <form method="post" action="/servers/{{ row.id }}/renter" class="renter-inline-form" data-row-id="{{ row.id }}">
         <button type="button" class="renter-badge" data-role="display" onclick="startEditRenter({{ row.id }})">{{ row.renter_name or '未填写租赁人' }}</button>
+        {% if row.renter_email %}<span class="badge" data-role="display-email">{{ row.renter_email }}</span>{% endif %}
         <input type="text" name="renter_name" value="{{ row.renter_name }}" placeholder="租赁人（例如 咸鱼：DABA）" data-role="input" class="hidden" />
+        <input type="email" name="renter_email" value="{{ row.renter_email or '' }}" placeholder="租赁人邮箱（用于发货/续费提醒）" data-role="email-input" class="hidden" />
         <button type="submit" class="secondary hidden" data-role="save">保存</button>
       </form>
     </div>
@@ -25,6 +27,7 @@
       {% elif row.status == 'queued' %}<span class="badge queued">排队中</span>
       {% elif row.status == 'retrying' %}<span class="badge retrying">重试中</span>
       {% else %}<span class="badge">未执行</span>{% endif %}
+      {% if row.delivery_email_sent_at %}<span class="badge ok">已发货</span>{% endif %}
       <span class="badge {% if row.traffic_throttled %}bad{% else %}ok{% endif %}">
         {{ '限速' if row.traffic_throttled else '不限速' }}
       </span>
@@ -41,6 +44,7 @@
     <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
     <div><span>最近采样</span><strong>{{ row.last_traffic_sync_at or "暂无" }}</strong></div>
     <div><span>长期续费至</span><strong>{{ row.renew_until_date or "未设置" }}</strong></div>
+    <div><span>租赁人邮箱</span><strong>{{ row.renter_email or "未填写" }}</strong></div>
   </div>
 
   <div class="server-actions">
@@ -59,6 +63,9 @@
     <form method="post" action="/servers/{{ row.id }}/renew-until" class="dd-form">
       <input type="date" name="renew_until_date" value="{{ row.renew_until_date or '' }}" />
       <button type="submit" class="secondary">{{ ('续费至' ~ row.renew_until_date[5:7]|int ~ '.' ~ row.renew_until_date[8:10]|int) if row.renew_until_date else '长期续费' }}</button>
+    </form>
+    <form method="post" action="/servers/{{ row.id }}/send-delivery-email">
+      <button type="submit" class="secondary">邮件发货</button>
     </form>
     <form method="post" action="/servers/{{ row.id }}/run">
       <button type="submit">重置-部署PT</button>
@@ -153,9 +160,13 @@ function startEditRenter(rowId) {
   if (!form) return;
   const display = form.querySelector('[data-role="display"]');
   const input = form.querySelector('[data-role="input"]');
+  const emailInput = form.querySelector('[data-role="email-input"]');
+  const displayEmail = form.querySelector('[data-role="display-email"]');
   const save = form.querySelector('[data-role="save"]');
   display.classList.add('hidden');
+  if (displayEmail) displayEmail.classList.add('hidden');
   input.classList.remove('hidden');
+  if (emailInput) emailInput.classList.remove('hidden');
   save.classList.remove('hidden');
   input.focus();
   input.select();
