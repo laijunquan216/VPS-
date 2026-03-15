@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <section class="panel">
+      <h1>{{ title }}</h1>
+      <p class="hint">面向所有客户展示库存信息。更新时间：{{ generated_at }}</p>
+    </section>
+
+    <section class="panel">
+      <h2>现货服务器</h2>
+      <div class="public-stock-grid">
+        {% for row in in_stock_rows %}
+        <article class="public-stock-card">
+          <h3>{{ row.name }}</h3>
+          <p><strong>IP：</strong>{{ row.ip_masked }}</p>
+          <p><strong>重置日：</strong>每月{{ row.reset_day }}日 {{ "%02d"|format(row.reset_hour or 1) }}:{{ "%02d"|format(row.reset_minute or 0) }}</p>
+          <p><strong>可用说明：</strong>{{ row.usable_until_text }}</p>
+          <p><strong>服务器说明：</strong>{{ row.server_note }}</p>
+          <p><strong>价格：</strong>{{ row.price_text }}</p>
+        </article>
+        {% else %}
+        <p>暂无现货服务器</p>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>可预订服务器</h2>
+      <div class="public-stock-grid">
+        {% for row in reservable_rows %}
+        <article class="public-stock-card public-stock-reserve">
+          <h3>{{ row.name }}</h3>
+          <p><strong>IP：</strong>{{ row.ip_masked }}</p>
+          <p><strong>重置日：</strong>每月{{ row.reset_day }}日 {{ "%02d"|format(row.reset_hour or 1) }}:{{ "%02d"|format(row.reset_minute or 0) }}</p>
+          <p><strong>可用时间：</strong>{{ row.book_window_text }}</p>
+          <p><strong>服务器说明：</strong>{{ row.server_note }}</p>
+          <p><strong>价格：</strong>{{ row.price_text }}</p>
+        </article>
+        {% else %}
+        <p>暂无可预订服务器</p>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -13,6 +13,33 @@
     </label>
     <button type="submit" onclick="return confirm('恢复会覆盖当前所有数据，确认继续？')">恢复备份</button>
   </form>
+
+  <hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb;" />
+  <h3>定期备份邮件</h3>
+  <form method="post" action="{{ url_for('update_backup_email_settings') }}" class="grid-form">
+    <label class="inline"><input name="backup_email_enabled" type="checkbox" {% if global_cfg and global_cfg.backup_email_enabled %}checked{% endif %}/> 启用定期备份邮件</label>
+    <label>接收邮箱
+      <input name="backup_email_to" placeholder="默认使用邮件设置中的收件人" value="{{ global_cfg.backup_email_to if global_cfg else '' }}" />
+    </label>
+    <label>发送间隔（天）
+      <input name="backup_interval_days" type="number" min="1" max="365" value="{{ (global_cfg.backup_interval_days if global_cfg else 7) or 7 }}" required />
+    </label>
+    <button type="submit">保存定期备份配置</button>
+  </form>
+  <p class="hint">启用后系统会按天数周期自动生成 JSON 备份并以附件发送到指定邮箱（需先配置SMTP）。</p>
+
+  <hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb;" />
+  <h3>公开库存页面（独立端口）</h3>
+  <form method="post" action="{{ url_for('update_public_stock_settings') }}" class="grid-form">
+    <label>页面顶部名称
+      <input name="stock_page_title" value="{{ global_cfg.stock_page_title if global_cfg else '库存展示' }}" />
+    </label>
+    <label>公开库存端口
+      <input name="public_stock_port" type="number" min="1" max="65535" value="{{ (global_cfg.public_stock_port if global_cfg else 5001) or 5001 }}" required />
+    </label>
+    <button type="submit">保存库存页面配置</button>
+  </form>
+  <p class="hint">当前库存页面地址：<a href="{{ stock_url }}" target="_blank" rel="noopener">{{ stock_url }}</a>（端口修改后需要重启服务）</p>
 </section>
 
 <section class="panel">
@@ -30,4 +57,50 @@
     <button type="submit">修改登录密码</button>
   </form>
 </section>
+
+<section class="panel">
+  <h2>面板整体日志</h2>
+  <p class="hint">记录队列执行、API采样、镜像刷新、SCP账号连通性等事件。</p>
+  <div style="max-height:380px;overflow:auto;">
+    <table class="table-like" style="width:100%;font-size:13px;">
+      <thead><tr><th>时间</th><th>类型</th><th>级别</th><th>消息</th></tr></thead>
+      <tbody>
+      {% for e in system_events %}
+        <tr>
+          <td>{{ e.created_at }}</td><td>{{ e.event_type }}</td><td>{{ e.level }}</td><td>{{ e.message }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4">暂无日志</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>邮件发送历史</h2>
+  <div style="max-height:320px;overflow:auto;">
+    <table class="table-like" style="width:100%;font-size:13px;">
+      <thead><tr><th>时间</th><th>类型</th><th>收件人</th><th>主题</th><th>状态</th><th>错误</th></tr></thead>
+      <tbody>
+      {% for m in email_history %}
+        <tr>
+          <td>{{ m.created_at }}</td><td>{{ m.category }}</td><td>{{ m.recipient }}</td><td>{{ m.subject }}</td><td>{{ m.status }}</td><td>{{ m.error_message }}</td>
+        </tr>
+        <tr>
+          <td colspan="6" style="background:#f8fafc;">
+            <details>
+              <summary style="cursor:pointer;">查看邮件全文</summary>
+              <pre style="white-space:pre-wrap;margin-top:8px;">{{ m.body_text or '无正文记录' }}</pre>
+            </details>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6">暂无邮件记录</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
 {% endblock %}
