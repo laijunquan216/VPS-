@@ -572,10 +572,19 @@ def apply_monthly_rental_rollover_if_needed(now_dt=None):
                 continue
 
             renew_until = _parse_date_text(row["renew_until_date"])
-            if renew_until and now_dt.date() < renew_until and int(row["is_renewed"] or 0) == 1:
+            if renew_until and now_dt.date() < renew_until:
+                current_tenant = str(row["renter_name"] or "").strip()
+                next_current_tenant = current_tenant if int(row["is_rented"] or 0) == 1 else ""
                 conn.execute(
-                    "UPDATE servers SET rental_rollover_key = ? WHERE id = ?",
-                    (cycle_key, row["id"]),
+                    """
+                    UPDATE servers
+                    SET last_month_tenant = ?,
+                        renter_name = ?,
+                        next_rent_status = 'unknown',
+                        rental_rollover_key = ?
+                    WHERE id = ?
+                    """,
+                    (current_tenant, next_current_tenant, cycle_key, row["id"]),
                 )
                 changed += 1
                 continue
@@ -2227,6 +2236,20 @@ def refresh_scp_account_statuses():
             fail_count += 1
     log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
+
 
 def update_server_ssh_status(server_id, is_online):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
@@ -3158,7 +3181,10 @@ def task_worker_loop():
                         (attempt_no, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
                     )
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
-                        conn.execute("UPDATE servers SET is_rented = 0, is_renewed = 0, renew_until_date = '' WHERE id = ?", (row["id"],))
+                        conn.execute(
+                            "UPDATE servers SET is_rented = 0, is_renewed = 0, renew_until_date = '', renter_name = '' WHERE id = ?",
+                            (row["id"],),
+                        )
                     conn.commit()
                 if task["batch_key"]:
                     note = "任务执行完成"
