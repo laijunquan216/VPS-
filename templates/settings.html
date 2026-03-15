@@ -165,13 +165,42 @@
 
 
 <section class="panel">
+  <h2>服务器分组设置</h2>
+  <form method="post" action="/server-groups" class="grid-form">
+    <label>分组名称<input name="name" required placeholder="例如 RS1000 G9.5" /></label>
+    <label>分组排序<input name="sort_order" type="number" value="0" /></label>
+    <label class="full">分组统一说明<textarea name="description" rows="2" placeholder="此分组服务器配置说明，会显示在库存页"></textarea></label>
+    <button type="submit">新增分组</button>
+  </form>
+
+  {% for g in server_groups %}
+  <details>
+    <summary>#{{ g.id }} {{ g.name }}（排序 {{ g.sort_order }}）</summary>
+    <form method="post" action="/server-groups/{{ g.id }}/update" class="grid-form">
+      <label>分组名称<input name="name" value="{{ g.name }}" required /></label>
+      <label>分组排序<input name="sort_order" type="number" value="{{ g.sort_order }}" required /></label>
+      <label class="full">分组统一说明<textarea name="description" rows="2">{{ g.description }}</textarea></label>
+      <div class="button-row">
+        <button type="submit">保存分组</button>
+      </div>
+    </form>
+    <form method="post" action="/server-groups/{{ g.id }}/delete" onsubmit="return confirm('确认删除分组? 删除后该分组服务器将变成未分组')">
+      <button class="danger" type="submit">删除分组</button>
+    </form>
+  </details>
+  {% else %}
+  <p>暂无分组，服务器会显示为“未分组”。</p>
+  {% endfor %}
+</section>
+
+<section class="panel">
   <h2>服务器设置：新增服务器</h2>
   <form method="post" action="/servers" class="grid-form">
     <label>名称<input name="name" required /></label>
     <label>租赁人<input name="renter_name" placeholder="例如 咸鱼：DABA" /></label>
     <label>租赁人邮箱<input name="renter_email" type="email" placeholder="tenant@example.com" /></label>
-    <label class="full">服务器说明<textarea name="server_note" rows="2" placeholder="例如 9929HX / 32G / 1T SSD / 高主频"></textarea></label>
-    <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
+    <label>服务器分组<select name="server_group_id"><option value="0">未分组</option>{% for g in server_groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select></label>
+        <label>排序序号<input name="sort_order" type="number" min="0" placeholder="留空自动排最后" /></label>
     <label>IP<input name="ip" required /></label>
     <label>SSH端口<input name="ssh_port" type="number" value="22" required /></label>
     <label>SSH用户<input name="ssh_user" value="root" required /></label>
@@ -199,8 +228,8 @@
       <label>名称<input name="name" value="{{ s.name }}" required /></label>
       <label>租赁人<input name="renter_name" value="{{ s.renter_name }}" placeholder="例如 咸鱼：DABA" /></label>
       <label>租赁人邮箱<input name="renter_email" type="email" value="{{ s.renter_email or "" }}" placeholder="tenant@example.com" /></label>
-      <label class="full">服务器说明<textarea name="server_note" rows="2" placeholder="例如 9929HX / 32G / 1T SSD / 高主频">{{ s.server_note or "" }}</textarea></label>
-      <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
+      <label>服务器分组<select name="server_group_id"><option value="0" {% if not s.server_group_id %}selected{% endif %}>未分组</option>{% for g in server_groups %}<option value="{{ g.id }}" {% if s.server_group_id == g.id %}selected{% endif %}>{{ g.name }}</option>{% endfor %}</select></label>
+            <label>排序序号<input name="sort_order" type="number" min="0" value="{{ s.sort_order }}" required /></label>
       <label>IP<input name="ip" value="{{ s.ip }}" required /></label>
       <label>SSH端口<input name="ssh_port" type="number" value="{{ s.ssh_port }}" required /></label>
       <label>SSH用户<input name="ssh_user" value="{{ s.ssh_user }}" required /></label>

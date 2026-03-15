@@ -179,3 +179,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .public-stock-card h3{margin:0 0 8px 0}
 .public-stock-card p{margin:6px 0;line-height:1.4}
 .public-stock-reserve{background:#fff9ec;border-color:#f4d38a}
+
+
+.public-stock-group-card{display:flex;flex-direction:column;gap:8px}
+.public-stock-group-card .button-link{align-self:flex-start}

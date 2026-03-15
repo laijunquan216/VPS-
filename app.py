@@ -140,6 +140,18 @@ def init_db():
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS server_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS global_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 reset_command TEXT NOT NULL DEFAULT '',
@@ -321,6 +333,7 @@ def init_db():
         ensure_column(conn, "servers", "delivery_email_sent_at TEXT")
         ensure_column(conn, "servers", "renew_notice_sent_keys TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "server_note TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "server_group_id INTEGER")
         ensure_column(conn, "servers", "sort_order INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "agent_token TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "period_key TEXT NOT NULL DEFAULT ''")
@@ -481,7 +494,76 @@ def start_api_image_refresh_background_job():
 
 def list_servers():
     with closing(get_conn()) as conn:
-        return conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+        return conn.execute(
+            """
+            SELECT s.*, g.name AS group_name, g.description AS group_description, g.sort_order AS group_sort_order
+            FROM servers s
+            LEFT JOIN server_groups g ON g.id = s.server_group_id
+            ORDER BY s.sort_order ASC, s.id ASC
+            """
+        ).fetchall()
+
+
+def list_server_groups():
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM server_groups ORDER BY sort_order ASC, id ASC").fetchall()
+
+
+def load_traffic_metrics_cache_map():
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM traffic_metrics_cache").fetchall()
+    out = {}
+    for row in rows:
+        try:
+            windows = json.loads(row["windows_json"] or "{}")
+        except Exception:
+            windows = {}
+        try:
+            daily_rows = json.loads(row["daily_rows_json"] or "[]")
+        except Exception:
+            daily_rows = []
+        try:
+            steps = json.loads(row["steps_json"] or "{}")
+        except Exception:
+            steps = {}
+        try:
+            samples = json.loads(row["samples_json"] or "{}")
+        except Exception:
+            samples = {}
+        out[row["server_id"]] = {
+            "generated_at": row["generated_at"],
+            "windows": windows,
+            "daily_rows": daily_rows,
+            "steps": steps,
+            "samples": samples,
+        }
+    return out
+
+
+def save_traffic_metrics_cache(server_id, windows, daily_rows, steps, samples):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            INSERT INTO traffic_metrics_cache(server_id, generated_at, windows_json, daily_rows_json, steps_json, samples_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(server_id) DO UPDATE SET
+                generated_at=excluded.generated_at,
+                windows_json=excluded.windows_json,
+                daily_rows_json=excluded.daily_rows_json,
+                steps_json=excluded.steps_json,
+                samples_json=excluded.samples_json
+            """,
+            (
+                server_id,
+                now_text,
+                json.dumps(windows or {}, ensure_ascii=False),
+                json.dumps(daily_rows or [], ensure_ascii=False),
+                json.dumps(steps or {}, ensure_ascii=False),
+                json.dumps(samples or {}, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
 
 
 def load_traffic_metrics_cache_map():
@@ -1503,6 +1585,7 @@ def export_backup_payload():
         notification_batch_items = [dict(row) for row in conn.execute("SELECT * FROM notification_batch_items ORDER BY id").fetchall()]
         global_cfg = conn.execute("SELECT * FROM global_config WHERE id = 1").fetchone()
         scp_accounts = [dict(row) for row in conn.execute("SELECT * FROM scp_accounts ORDER BY id").fetchall()]
+        server_groups = [dict(row) for row in conn.execute("SELECT * FROM server_groups ORDER BY sort_order ASC, id ASC").fetchall()]
 
     payload = {
         "meta": {
@@ -1516,6 +1599,7 @@ def export_backup_payload():
         "notification_batches": notification_batches,
         "notification_batch_items": notification_batch_items,
         "scp_accounts": scp_accounts,
+        "server_groups": server_groups,
     }
     return payload
 
@@ -1531,8 +1615,9 @@ def restore_backup_payload(payload):
     notification_batch_items = payload.get("notification_batch_items", [])
     global_cfg = payload.get("global_config")
     scp_accounts = payload.get("scp_accounts", [])
+    server_groups = payload.get("server_groups", [])
 
-    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict) or not isinstance(queued_tasks, list) or not isinstance(notification_batches, list) or not isinstance(notification_batch_items, list) or not isinstance(scp_accounts, list):
+    if not isinstance(servers, list) or not isinstance(logs, list) or not isinstance(global_cfg, dict) or not isinstance(queued_tasks, list) or not isinstance(notification_batches, list) or not isinstance(notification_batch_items, list) or not isinstance(scp_accounts, list) or not isinstance(server_groups, list):
         raise ValueError("备份文件缺少必要字段")
 
     with closing(get_conn()) as conn:
@@ -1543,6 +1628,7 @@ def restore_backup_payload(payload):
         conn.execute("DELETE FROM notification_batch_items")
         conn.execute("DELETE FROM notification_batches")
         conn.execute("DELETE FROM scp_accounts")
+        conn.execute("DELETE FROM server_groups")
 
         conn.execute(
             """
@@ -1586,8 +1672,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, renter_email, delivery_email_sent_at, renew_notice_sent_keys, server_note, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, renter_email, delivery_email_sent_at, renew_notice_sent_keys, server_note, server_group_id, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -1611,6 +1697,7 @@ def restore_backup_payload(payload):
                     server.get("delivery_email_sent_at"),
                     (server.get("renew_notice_sent_keys", "") or "").strip(),
                     (server.get("server_note", "") or "").strip(),
+                    server.get("server_group_id"),
                     int(server.get("sort_order", 0)),
                     int(server.get("max_retries", 2)),
                     str(server.get("retry_backoff_seconds", "60,180")),
@@ -1643,6 +1730,21 @@ def restore_backup_payload(payload):
                     account.get("api_endpoint") or "https://www.servercontrolpanel.de/scp-core/api/v1",
                     account.get("created_at") or now_text,
                     account.get("updated_at") or now_text,
+                ),
+            )
+
+
+        for group in server_groups:
+            now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "INSERT INTO server_groups(id, name, description, sort_order, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    group.get("id"),
+                    (group.get("name") or "").strip(),
+                    (group.get("description") or "").strip(),
+                    int(group.get("sort_order", 0) or 0),
+                    group.get("created_at") or now_text,
+                    group.get("updated_at") or now_text,
                 ),
             )
 
@@ -1772,7 +1874,7 @@ def build_effective_reset_datetime(server_row, ref_dt):
 
 
 def mask_server_ip(ip_text):
-    ip = str(ip_text or "").strip()
+    ip = (ip_text or "").strip()
     parts = ip.split(".")
     if len(parts) == 4 and all(part.isdigit() for part in parts):
         return f"{parts[0]}.{parts[1]}.*.*"
@@ -1785,7 +1887,7 @@ def format_reset_datetime_text(dt_obj):
     return dt_obj.strftime("%Y-%m-%d %H:%M")
 
 
-def build_public_inventory_rows(now_dt=None):
+def _build_public_inventory_server_rows(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     rows = list_servers()
     in_stock = []
@@ -1794,7 +1896,9 @@ def build_public_inventory_rows(now_dt=None):
         item = dict(row)
         item["ip_masked"] = mask_server_ip(item.get("ip"))
         item["price_text"] = "60元"
-        item["server_note"] = (item.get("server_note") or "").strip() or "无"
+        item["group_id"] = int(item.get("server_group_id") or 0)
+        item["group_name"] = (item.get("group_name") or "未分组").strip() or "未分组"
+        item["group_description"] = (item.get("group_description") or "").strip() or "无"
         next_reset = build_effective_reset_datetime(item, now_dt)
         item["next_reset_text"] = format_reset_datetime_text(next_reset)
         item["usable_until_text"] = f"现在租用，可用到 {item['next_reset_text']}（北京时间）"
@@ -1810,6 +1914,43 @@ def build_public_inventory_rows(now_dt=None):
             reservable.append(item)
 
     return in_stock, reservable
+
+
+def _group_public_inventory_rows(rows):
+    grouped = {}
+    for item in rows:
+        gid = int(item.get("group_id") or 0)
+        if gid not in grouped:
+            grouped[gid] = {
+                "group_id": gid,
+                "group_name": item.get("group_name") or "未分组",
+                "group_description": item.get("group_description") or "无",
+                "count": 0,
+            }
+        grouped[gid]["count"] += 1
+    return sorted(grouped.values(), key=lambda x: (0 if x["group_id"] == 0 else 1, x["group_name"]))
+
+
+def build_public_inventory_group_cards(now_dt=None):
+    in_stock_rows, reservable_rows = _build_public_inventory_server_rows(now_dt)
+    return _group_public_inventory_rows(in_stock_rows), _group_public_inventory_rows(reservable_rows)
+
+
+def build_public_inventory_group_detail(section, group_id, now_dt=None):
+    in_stock_rows, reservable_rows = _build_public_inventory_server_rows(now_dt)
+    section_rows = in_stock_rows if section == "in_stock" else reservable_rows
+    filtered = [r for r in section_rows if int(r.get("group_id") or 0) == int(group_id or 0)]
+    if filtered:
+        group_name = filtered[0].get("group_name") or "未分组"
+        group_description = filtered[0].get("group_description") or "无"
+    else:
+        group_name = "未分组" if int(group_id or 0) == 0 else f"分组#{group_id}"
+        group_description = "无"
+    return {
+        "group_id": int(group_id or 0),
+        "group_name": group_name,
+        "group_description": group_description,
+    }, filtered
 
 
 def get_public_stock_settings():
@@ -2072,20 +2213,6 @@ def list_email_history(limit=200):
 
     log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
 
-def refresh_scp_account_statuses():
-    accounts = list_scp_accounts()
-    if not accounts:
-        return
-    ok_count = 0
-    fail_count = 0
-    for account in accounts:
-        ok, msg = check_scp_account_connection(account)
-        if ok:
-            ok_count += 1
-        else:
-            fail_count += 1
-    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
-
 def update_scp_account_api_status(account_id, status, error_message=""):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     with closing(get_conn()) as conn:
@@ -2095,6 +2222,14 @@ def update_scp_account_api_status(account_id, status, error_message=""):
         )
         conn.commit()
 
+def update_scp_account_api_status(account_id, status, error_message=""):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE scp_accounts SET api_status=?, api_checked_at=?, api_last_error=?, updated_at=? WHERE id=?",
+            ((status or "unknown")[:16], now_text, str(error_message or "")[:500], now_text, account_id),
+        )
+        conn.commit()
 
 def notify_scp_api_failure_if_needed(account, error_message):
     cfg = get_global_config()
@@ -2193,6 +2328,272 @@ def _infer_metric_step_seconds(points, default_seconds=600):
     except Exception:
         median_val = default_seconds
     return max(60, min(median_val, 3600))
+
+
+def _integrate_points(points, start_dt, end_dt, step_seconds):
+    rx = 0.0
+    tx = 0.0
+    for item in points:
+        ts = item["ts"]
+        if ts < start_dt or ts > end_dt:
+            continue
+        rx += item["rx_bps"] * step_seconds
+        tx += item["tx_bps"] * step_seconds
+    return int(max(rx, 0.0)), int(max(tx, 0.0))
+
+
+def _hours_since_today_start(now_dt):
+    today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    hours = int((now_dt - today_start).total_seconds() // 3600) + 1
+    return max(1, min(hours, 24))
+
+
+def _calc_daily_rows(points, now_dt):
+    step_seconds = _infer_metric_step_seconds(points)
+    daily_rows = []
+    for offset in range(30, -1, -1):
+        day_start = (now_dt - timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = min(day_start + timedelta(days=1), now_dt)
+        if day_end <= day_start:
+            continue
+        rx, tx = _integrate_points(points, day_start, day_end, step_seconds)
+        daily_rows.append({
+            "date": day_start.strftime("%Y-%m-%d"),
+            "rx": rx,
+            "tx": tx,
+            "total": rx + tx,
+        })
+    return daily_rows, step_seconds
+
+
+def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
+    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
+    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
+    if not account_id or not scp_server_id:
+        raise RuntimeError("缺少SCP账号绑定或服务器ID")
+
+    account = get_scp_account(account_id)
+    if not account:
+        raise RuntimeError("SCP账号不存在")
+
+    endpoint_base, token = scp_rest_login(account, timeout_seconds=timeout_seconds)
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    hours_map = {
+        "today": _hours_since_today_start(now_dt),
+        "6h": 6,
+        "24h": 24,
+        "7d": 24 * 7,
+        "31d": 24 * 31,
+    }
+
+    windows = {}
+    steps = {}
+    samples = {}
+    metrics_path = f"servers/{urlparse.quote(scp_server_id)}/metrics/network?hours={{hours}}"
+
+    for key in ("today", "6h", "24h", "7d", "31d"):
+        hours = int(hours_map[key])
+        payload = scp_rest_request(
+            account,
+            "GET",
+            metrics_path.format(hours=hours),
+            token=token,
+            endpoint_base=endpoint_base,
+            timeout_seconds=timeout_seconds,
+        )
+        points = _normalize_network_metrics_points(payload)
+        step_seconds = _infer_metric_step_seconds(points)
+        start_dt = now_dt - timedelta(hours=hours)
+        if key == "today":
+            start_dt = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        rx, tx = _integrate_points(points, start_dt, now_dt, step_seconds)
+        windows[key] = {"rx": rx, "tx": tx, "total": rx + tx}
+        steps[key] = step_seconds
+        samples[key] = len(points)
+
+    payload_31d = scp_rest_request(
+        account,
+        "GET",
+        metrics_path.format(hours=24 * 31),
+        token=token,
+        endpoint_base=endpoint_base,
+        timeout_seconds=timeout_seconds,
+    )
+    points_31d = _normalize_network_metrics_points(payload_31d)
+    daily_rows, daily_step_seconds = _calc_daily_rows(points_31d, now_dt)
+    steps["daily_31d"] = daily_step_seconds
+    samples["daily_31d"] = len(points_31d)
+
+    return windows, daily_rows, steps, samples
+
+def refresh_server_traffic_via_scp(server_row):
+    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
+    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
+    if not account_id or not scp_server_id:
+        raise RuntimeError("缺少SCP账号绑定或服务器ID")
+
+    account = get_scp_account(account_id)
+    if not account:
+        raise RuntimeError("SCP账号不存在")
+
+    endpoint_base, token = scp_rest_login(account)
+    payload = scp_rest_request(
+        account,
+        "GET",
+        f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
+        token=token,
+        endpoint_base=endpoint_base,
+    )
+
+    live = payload.get("serverLiveInfo") if isinstance(payload, dict) else {}
+    interfaces = live.get("interfaces") if isinstance(live, dict) else []
+    if not isinstance(interfaces, list):
+        interfaces = []
+
+    rx_monthly_mib = 0.0
+    tx_monthly_mib = 0.0
+    throttled = False
+    for item in interfaces:
+        if not isinstance(item, dict):
+            continue
+        try:
+            rx_monthly_mib += float(item.get("rxMonthlyInMiB") or 0)
+        except Exception:
+            pass
+        try:
+            tx_monthly_mib += float(item.get("txMonthlyInMiB") or 0)
+        except Exception:
+            pass
+        throttled = throttled or bool(item.get("trafficThrottled"))
+
+    upload_bytes = int(max(tx_monthly_mib, 0) * 1024 * 1024)
+    download_bytes = int(max(rx_monthly_mib, 0) * 1024 * 1024)
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            UPDATE servers
+            SET period_key=?, period_upload_bytes=?, period_download_bytes=?,
+                last_traffic_sync_at=?, traffic_throttled=?
+            WHERE id=?
+            """,
+            (
+                datetime.now(TIMEZONE).strftime("%Y-%m"),
+                upload_bytes,
+                download_bytes,
+                now_text,
+                1 if throttled else 0,
+                server_row["id"],
+            ),
+        )
+        conn.commit()
+
+
+def refresh_all_traffic_data_via_scp(now_dt=None):
+    cfg = get_global_config()
+    interval = int(cfg["traffic_sample_interval_minutes"] or 60) if cfg else 60
+    if interval <= 0:
+        return
+
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
+    if minutes_since_midnight % interval != 0:
+        return
+
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
+
+    ok_count = 0
+    fail_count = 0
+    for row in rows:
+        try:
+            refresh_server_traffic_via_scp(row)
+            ok_count += 1
+            log_system_event("traffic_sampling", f"流量采样成功: {row['name']} ({row['ip']})", server_id=row["id"])
+        except Exception as exc:
+            fail_count += 1
+            log_system_event("traffic_sampling", f"流量采样失败: {row['name']} ({row['ip']})", level="error", server_id=row["id"], details=str(exc))
+            continue
+
+    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+
+
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
+
+
+def update_server_ssh_status(server_id, is_online):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    status = "online" if is_online else "offline"
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET ssh_status = ?, ssh_checked_at = ? WHERE id = ?", (status, now_text, server_id))
+        conn.commit()
+
+
+def check_server_ssh_connectivity(server_row, timeout=8):
+    try:
+        client = connect_ssh(server_row, timeout=timeout)
+        client.close()
+        update_server_ssh_status(server_row["id"], True)
+        return True
+    except Exception:
+        update_server_ssh_status(server_row["id"], False)
+        return False
+
+
+def _parse_date_text(date_text):
+    text = str(date_text or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _one_month_before(date_obj):
+    year, month = date_obj.year, date_obj.month - 1
+    if month <= 0:
+        month = 12
+        year -= 1
+    day = month_day_safe(year, month, date_obj.day)
+    return datetime(year, month, day).date()
+
+
+def is_before_renew_until(server_row, now_dt):
+    renew_until = _parse_date_text(server_row["renew_until_date"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("renew_until_date"))
+    if not renew_until:
+        return False
+    return now_dt.date() < renew_until
+
+
+def should_reset(server_row):
+    now = datetime.now(TIMEZONE)
+    if not server_row["auto_reset"]:
+        return False
+    if server_row["is_renewed"]:
+        return False
+    if is_before_renew_until(server_row, now):
+        return False
+    if server_row["reset_day"] != now.day:
+        return False
+    if now.hour != int(server_row["reset_hour"] or 1):
+        return False
+    if now.minute != int(server_row["reset_minute"] or 0):
+        return False
+    return True
 
 
 def _integrate_points(points, start_dt, end_dt, step_seconds):
@@ -3571,12 +3972,28 @@ def public_stock_page_root():
 @public_app.route("/inventory")
 def public_stock_page():
     title, _ = get_public_stock_settings()
-    in_stock_rows, reservable_rows = build_public_inventory_rows()
+    in_stock_groups, reservable_groups = build_public_inventory_group_cards()
     return render_template(
         "public_inventory.html",
         title=title,
-        in_stock_rows=in_stock_rows,
-        reservable_rows=reservable_rows,
+        in_stock_groups=in_stock_groups,
+        reservable_groups=reservable_groups,
+        generated_at=datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
+@public_app.route("/inventory/group/<section>/<int:group_id>")
+def public_stock_group_page(section, group_id):
+    if section not in {"in_stock", "reservable"}:
+        return redirect(url_for("public_stock_page"))
+    title, _ = get_public_stock_settings()
+    group, rows = build_public_inventory_group_detail(section, group_id)
+    return render_template(
+        "public_inventory.html",
+        title=title,
+        group_detail=group,
+        group_rows=rows,
+        section=section,
         generated_at=datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
     )
 
@@ -3799,6 +4216,7 @@ def settings_page():
         panel_base_url_default=panel_base_url_default,
         has_running_logs=has_running_logs(),
         scp_accounts=list_scp_accounts(),
+        server_groups=list_server_groups(),
     )
 
 
@@ -3967,6 +4385,16 @@ def update_public_stock_settings():
     except ValueError as exc:
         flash(f"库存展示配置保存失败: {exc}", "error")
         return redirect(url_for("management_page"))
+
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET stock_page_title = ?, public_stock_port = ?, updated_at = ? WHERE id = 1",
+            (title, public_port, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+    flash("库存展示配置已更新（端口修改需重启面板服务生效）", "success")
+    return redirect(url_for("management_page"))
 
     with closing(get_conn()) as conn:
         conn.execute(
@@ -4188,6 +4616,68 @@ def get_next_sort_order(conn):
     return int(row["max_order"]) + 1
 
 
+@app.route("/server-groups", methods=["POST"])
+@login_required
+def add_server_group():
+    form = request.form
+    name = (form.get("name") or "").strip()
+    description = (form.get("description") or "").strip()
+    if not name:
+        flash("分组名称不能为空", "error")
+        return redirect(url_for("settings_page"))
+    sort_order_text = (form.get("sort_order") or "").strip()
+    try:
+        sort_order = int(sort_order_text) if sort_order_text else 0
+    except ValueError:
+        flash("分组排序必须是整数", "error")
+        return redirect(url_for("settings_page"))
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "INSERT INTO server_groups(name, description, sort_order, created_at, updated_at) VALUES(?,?,?,?,?)",
+            (name, description, sort_order, now_text, now_text),
+        )
+        conn.commit()
+    flash("服务器分组已添加", "success")
+    return redirect(url_for("settings_page"))
+
+
+@app.route("/server-groups/<int:group_id>/update", methods=["POST"])
+@login_required
+def update_server_group(group_id):
+    form = request.form
+    name = (form.get("name") or "").strip()
+    description = (form.get("description") or "").strip()
+    if not name:
+        flash("分组名称不能为空", "error")
+        return redirect(url_for("settings_page"))
+    try:
+        sort_order = parse_int_form_field(form, "sort_order", default=0)
+    except ValueError as exc:
+        flash(f"分组更新失败: {exc}", "error")
+        return redirect(url_for("settings_page"))
+
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE server_groups SET name=?, description=?, sort_order=?, updated_at=? WHERE id=?",
+            (name, description, sort_order, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), group_id),
+        )
+        conn.commit()
+    flash("服务器分组已更新", "success")
+    return redirect(url_for("settings_page"))
+
+
+@app.route("/server-groups/<int:group_id>/delete", methods=["POST"])
+@login_required
+def delete_server_group(group_id):
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET server_group_id = NULL WHERE server_group_id = ?", (group_id,))
+        conn.execute("DELETE FROM server_groups WHERE id = ?", (group_id,))
+        conn.commit()
+    flash("服务器分组已删除，原分组服务器已变为未分组", "success")
+    return redirect(url_for("settings_page"))
+
+
 @app.route("/servers", methods=["POST"])
 @login_required
 def add_server():
@@ -4200,6 +4690,7 @@ def add_server():
         max_retries = parse_int_form_field(form, "max_retries", default=DEFAULT_MAX_RETRIES, min_value=1, max_value=10)
         scp_account_id_raw = (form.get("scp_account_id") or "").strip()
         scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
+        server_group_id = parse_int_form_field(form, "server_group_id", default=0, min_value=0)
         reinstall_mode = (form.get("reinstall_mode") or "ssh").strip().lower()
         if reinstall_mode not in ("ssh", "scp_api"):
             raise ValueError("重置方式仅支持 ssh 或 scp_api")
@@ -4217,7 +4708,7 @@ def add_server():
 
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, renter_email, server_note, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, renter_email, server_group_id, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
             VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
@@ -4232,7 +4723,7 @@ def add_server():
                 1 if form.get("auto_reset") == "on" else 0,
                 (form.get("renter_name") or "").strip(),
                 (form.get("renter_email") or "").strip(),
-                (form.get("server_note") or "").strip(),
+                server_group_id or None,
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
@@ -4266,6 +4757,7 @@ def update_server(server_id):
         max_retries = parse_int_form_field(form, "max_retries", default=DEFAULT_MAX_RETRIES, min_value=1, max_value=10)
         scp_account_id_raw = (form.get("scp_account_id") or "").strip()
         scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
+        server_group_id = parse_int_form_field(form, "server_group_id", default=0, min_value=0)
         reinstall_mode = (form.get("reinstall_mode") or "ssh").strip().lower()
         if reinstall_mode not in ("ssh", "scp_api"):
             raise ValueError("重置方式仅支持 ssh 或 scp_api")
@@ -4277,7 +4769,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, renter_email=?, server_note=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, renter_email=?, server_group_id=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
             WHERE id=?
             """,
             (
@@ -4292,7 +4784,7 @@ def update_server(server_id):
                 1 if form.get("auto_reset") == "on" else 0,
                 (form.get("renter_name") or "").strip(),
                 (form.get("renter_email") or "").strip(),
-                (form.get("server_note") or "").strip(),
+                server_group_id or None,
                 sort_order,
                 max_retries,
                 normalize_backoff_plan_text(form.get("retry_backoff_seconds") or DEFAULT_RETRY_BACKOFF_SECONDS),
