@@ -2070,6 +2070,21 @@ def list_email_history(limit=200):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM email_history ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
 
+    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def update_scp_account_api_status(account_id, status, error_message=""):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
@@ -3963,7 +3978,23 @@ def update_public_stock_settings():
     flash("库存展示配置已更新（端口修改需重启面板服务生效）", "success")
     return redirect(url_for("management_page"))
 
+@app.route("/management/backup-email", methods=["POST"])
+@login_required
+def update_backup_email_settings():
+    form = request.form
+    try:
+        interval_days = parse_int_form_field(form, "backup_interval_days", default=7, min_value=1, max_value=365)
+    except ValueError as exc:
+        flash(f"备份邮件配置保存失败: {exc}", "error")
+        return redirect(url_for("management_page"))
 
+    update_backup_email_config(
+        1 if form.get("backup_email_enabled") == "on" else 0,
+        form.get("backup_email_to", ""),
+        interval_days,
+    )
+    flash("定期备份邮件配置已更新", "success")
+    return redirect(url_for("management_page"))
 @app.route("/management/change-password", methods=["POST"])
 @login_required
 def change_panel_password():
