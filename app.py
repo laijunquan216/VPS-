@@ -3724,10 +3724,6 @@ def send_manual_renew_notice_email(server_id):
         return redirect(url_for("rentals_page"))
 
     now_dt = datetime.now(TIMEZONE)
-    if int(row["is_renewed"] or 0) == 1 or is_before_renew_until(row, now_dt):
-        flash(f"[{row['name']}] 当前受续租/长期续费保护，无需发送续费提醒", "error")
-        return redirect(url_for("rentals_page"))
-
     reset_dt = build_server_reset_datetime(row, now_dt)
     subject, body = compose_renew_notice_message(row, reset_dt)
     ok = send_email_to_recipient(subject, body, recipient, category="renew_notice_manual")

@@ -148,19 +148,20 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-next-form select{min-width:120px}
 .rental-cards{display:flex;flex-direction:column;gap:10px}
 .rental-cards-stacked{margin-top:10px}
-.rental-table-header,.rental-row{display:grid;grid-template-columns:1.1fr .8fr 1fr 1fr 1.1fr 1fr;align-items:center;gap:12px}
+.rental-table-header,.rental-row{display:grid;grid-template-columns:1.2fr .55fr .85fr .95fr 1fr 1.45fr;align-items:center;gap:8px}
 .rental-table-header{font-weight:800;color:#1f2937;padding:8px 12px;border-bottom:1px solid #cbd5e1}
 .rental-card{border:1px solid #d1d5db;border-radius:10px;padding:10px 12px}
 .rental-row{min-height:64px}
 .rental-col{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rental-col-name{font-size:28px;font-weight:900;color:#0f172a}
-.rental-col-action{overflow:visible;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rental-col-action{overflow:visible;display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:nowrap}
 .rental-renew-mail-form{margin:0}
+.rental-col-action button{padding:8px 10px}
 .rental-card-confirmed{background:#c9f2dd;border-color:#74d69f}
 .rental-card-non-renew{background:#ffd9de;border-color:#f08aa0}
 .rental-card-unknown{background:#f7f0bf;border-color:#dfc347}
 .rental-next-form-nowrap{flex-wrap:nowrap;align-items:center;justify-content:flex-start}
-.rental-next-form-nowrap select{min-width:140px}
+.rental-next-form-nowrap select{min-width:120px}
 
 @media (max-width: 1100px){
   .rental-table-header{display:none}
