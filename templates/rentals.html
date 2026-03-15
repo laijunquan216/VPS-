@@ -41,6 +41,9 @@
           </select>
           <button type="submit">保存</button>
         </form>
+        <form method="post" action="{{ url_for('send_manual_renew_notice_email', server_id=row.id) }}" class="rental-renew-mail-form">
+          <button type="submit" class="secondary">续费邮件</button>
+        </form>
       </div>
     </article>
     {% else %}

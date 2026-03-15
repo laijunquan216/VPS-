@@ -154,7 +154,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-row{min-height:64px}
 .rental-col{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rental-col-name{font-size:28px;font-weight:900;color:#0f172a}
-.rental-col-action{overflow:visible}
+.rental-col-action{overflow:visible;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rental-renew-mail-form{margin:0}
 .rental-card-confirmed{background:#c9f2dd;border-color:#74d69f}
 .rental-card-non-renew{background:#ffd9de;border-color:#f08aa0}
 .rental-card-unknown{background:#f7f0bf;border-color:#dfc347}

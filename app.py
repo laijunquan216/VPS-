@@ -3347,6 +3347,15 @@ def run_for_server(server_id, trigger_type="manual", batch_key=""):
     return True, "任务已加入队列，将按顺序依次执行", log_id
 
 
+def compose_renew_notice_message(row, reset_dt):
+    subject = f"[VPS续费提醒] {row['name']} 将于 {reset_dt.strftime('%m-%d %H:%M')} 重置"
+    body = (
+        f"客户您好，您于闲鱼或论坛租赁的 {row['name']} 服务器，即将于 {reset_dt.strftime('%Y-%m-%d %H:%M')}（北京时间）重置，"
+        "届时服务器将清空，请及时备份相关数据，如需续租，请提前在闲鱼下单，否则可能会预定给其他用户。感谢您的配合。"
+    )
+    return subject, body
+
+
 def run_scheduled_renew_notice_email(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     cfg = get_global_config()
@@ -3380,11 +3389,7 @@ def run_scheduled_renew_notice_email(now_dt=None):
         if notice_key in sent_keys:
             continue
 
-        subject = f"[VPS续费提醒] {row['name']} 将于 {reset_dt.strftime('%m-%d %H:%M')} 重置"
-        body = (
-            f"客户您好，您于闲鱼或论坛租赁的 {row['name']} 服务器，即将于 {reset_dt.strftime('%Y-%m-%d %H:%M')}（北京时间）重置，"
-            "届时服务器将清空，请及时备份相关数据，如需续租，请提前在闲鱼下单，否则可能会预定给其他用户。感谢您的配合。"
-        )
+        subject, body = compose_renew_notice_message(row, reset_dt)
         ok = send_email_to_recipient(subject, body, recipient, category="renew_notice")
         if not ok:
             log_system_event("renew_notice", f"服务器[{row['name']}] 续费提醒邮件发送失败", level="error", server_id=row["id"], details=recipient)
@@ -3700,6 +3705,40 @@ def update_renew_notice_days():
         conn.commit()
     flash(f"续费提醒天数已更新：{days_text}", "success")
     return redirect(url_for("rentals_page"))
+
+@app.post("/rentals/<int:server_id>/send-renew-email")
+@login_required
+def send_manual_renew_notice_email(server_id):
+    row = get_server(server_id)
+    if not row:
+        flash("服务器不存在", "error")
+        return redirect(url_for("rentals_page"))
+
+    recipient = (row["renter_email"] or "").strip()
+    if not recipient:
+        flash(f"[{row['name']}] 未填写租赁人邮箱", "error")
+        return redirect(url_for("rentals_page"))
+
+    if not int(row["auto_reset"] or 0):
+        flash(f"[{row['name']}] 未开启自动重置，未发送续费提醒", "error")
+        return redirect(url_for("rentals_page"))
+
+    now_dt = datetime.now(TIMEZONE)
+    if int(row["is_renewed"] or 0) == 1 or is_before_renew_until(row, now_dt):
+        flash(f"[{row['name']}] 当前受续租/长期续费保护，无需发送续费提醒", "error")
+        return redirect(url_for("rentals_page"))
+
+    reset_dt = build_server_reset_datetime(row, now_dt)
+    subject, body = compose_renew_notice_message(row, reset_dt)
+    ok = send_email_to_recipient(subject, body, recipient, category="renew_notice_manual")
+    if not ok:
+        flash(f"[{row['name']}] 续费邮件发送失败", "error")
+        return redirect(url_for("rentals_page"))
+
+    log_system_event("renew_notice", f"服务器[{row['name']}] 已手动发送续费提醒邮件", server_id=row["id"], details=recipient)
+    flash(f"[{row['name']}] 已手动发送续费邮件", "success")
+    return redirect(url_for("rentals_page"))
+
 
 @app.post("/rentals/<int:server_id>/next-status")
 @login_required
@@ -4221,7 +4260,6 @@ def send_delivery_email(server_id):
         flash("请先填写租赁人邮箱", "error")
         return redirect(url_for("details_page"))
 
-    reset_time_text = f"{int(row['reset_day'] or 1)}日 {int(row['reset_hour'] or 1):02d}:{int(row['reset_minute'] or 0):02d}（北京时间）"
     latest = ""
     with closing(get_conn()) as conn:
         latest_log = conn.execute(
@@ -4231,14 +4269,7 @@ def send_delivery_email(server_id):
         latest = (latest_log["summary"] if latest_log else "") or "暂无输出详情"
 
     subject = f"[服务器发货] {row['name']}"
-    body = (
-        f"{row['name']}，{reset_time_text}重置，需要续租请提前下单。\n"
-        f"IP address: {row['ip']}\n"
-        f"SSH Port: {row['ssh_port']}\n"
-        f"SSH User: {row['ssh_user']}\n"
-        f"Root Password: {row['ssh_password']}\n\n"
-        f"输出详情：\n{latest}"
-    )
+    body = latest
 
     ok = send_email_to_recipient(subject, body, renter_email, category="delivery")
     if not ok:
