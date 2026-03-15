@@ -1746,6 +1746,19 @@ def build_server_reset_datetime(server_row, ref_dt):
     return ref_dt.replace(year=next_year, month=next_month, day=next_day, hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
 
 
+def build_effective_reset_datetime(server_row, ref_dt):
+    candidate = build_server_reset_datetime(server_row, ref_dt)
+    renew_until = _parse_date_text(server_row["renew_until_date"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("renew_until_date"))
+    if not renew_until:
+        return candidate
+
+    safety = 0
+    while candidate.date() < renew_until and safety < 36:
+        candidate = build_server_reset_datetime(server_row, candidate + timedelta(minutes=1))
+        safety += 1
+    return candidate
+
+
 def get_traffic_period_start(reset_day, now_dt):
     day_this_month = month_day_safe(now_dt.year, now_dt.month, reset_day)
     this_start = now_dt.replace(day=day_this_month, hour=1, minute=0, second=0, microsecond=0)
@@ -2279,6 +2292,19 @@ def refresh_all_traffic_data_via_scp(now_dt=None):
 
     log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
 
+def refresh_scp_account_statuses():
+    accounts = list_scp_accounts()
+    if not accounts:
+        return
+    ok_count = 0
+    fail_count = 0
+    for account in accounts:
+        ok, msg = check_scp_account_connection(account)
+        if ok:
+            ok_count += 1
+        else:
+            fail_count += 1
+    log_system_event("scp_api_check_summary", f"SCP账号连通性巡检完成：正常{ok_count}个，失败{fail_count}个")
 
 def refresh_scp_account_statuses():
     accounts = list_scp_accounts()
@@ -3369,14 +3395,11 @@ def run_scheduled_renew_notice_email(now_dt=None):
             continue
         if int(row["is_renewed"] or 0) == 1:
             continue
-        if is_before_renew_until(row, now_dt):
-            continue
-
         recipient = (row["renter_email"] or "").strip()
         if not recipient:
             continue
 
-        reset_dt = build_server_reset_datetime(row, now_dt)
+        reset_dt = build_effective_reset_datetime(row, now_dt)
         if now_dt.hour != int(row["reset_hour"] or 1) or now_dt.minute != int(row["reset_minute"] or 0):
             continue
 
@@ -3724,7 +3747,7 @@ def send_manual_renew_notice_email(server_id):
         return redirect(url_for("rentals_page"))
 
     now_dt = datetime.now(TIMEZONE)
-    reset_dt = build_server_reset_datetime(row, now_dt)
+    reset_dt = build_effective_reset_datetime(row, now_dt)
     subject, body = compose_renew_notice_message(row, reset_dt)
     ok = send_email_to_recipient(subject, body, recipient, category="renew_notice_manual")
     if not ok:
@@ -3732,7 +3755,7 @@ def send_manual_renew_notice_email(server_id):
         return redirect(url_for("rentals_page"))
 
     log_system_event("renew_notice", f"服务器[{row['name']}] 已手动发送续费提醒邮件", server_id=row["id"], details=recipient)
-    flash(f"[{row['name']}] 已手动发送续费邮件", "success")
+    flash(f"[{row['name']}] 已手动发送续费邮件（按预计重置时间 {reset_dt.strftime('%Y-%m-%d %H:%M')}）", "success")
     return redirect(url_for("rentals_page"))
 
 
