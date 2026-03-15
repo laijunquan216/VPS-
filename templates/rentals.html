@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% set active = 'rentals' %}
+{% set title = '出租管理' %}
+{% block content %}
+<section class="panel">
+  <div class="section-head">
+    <h2>出租管理</h2>
+  </div>
+  <p class="hint">下月租户状态用于跟踪续租计划：选择“确认续租”会联动服务器详情为续租中；选择“未知/不续租”会联动为未续租。</p>
+
+  <div class="rental-cards">
+    {% for row in rows %}
+    <article class="rental-card {{ row.status_card_class }}">
+      <div class="rental-card-head">
+        <h3>{{ row.name }}</h3>
+        <span class="rental-refresh">刷新日期：{{ row.refresh_day_text }}</span>
+      </div>
+
+      <div class="rental-meta-line"><span class="rental-meta-label">上月租户：</span><span class="rental-meta-value">{{ row.last_month_tenant_text or '—' }}</span></div>
+      <div class="rental-meta-line"><span class="rental-meta-label">目前租户：</span><span class="rental-meta-value">{{ row.renter_name or '—' }}</span></div>
+      <div class="rental-meta-line"><span class="rental-meta-label">下月租户：</span><span class="rental-meta-value">{{ row.next_month_tenant_text }}</span></div>
+
+      <form method="post" action="{{ url_for('update_rental_next_status', server_id=row.id) }}" class="rental-next-form rental-next-form-nowrap">
+        <select name="next_rent_status">
+          <option value="unknown" {% if row.next_rent_status == 'unknown' %}selected{% endif %}>未知</option>
+          <option value="confirmed" {% if row.next_rent_status == 'confirmed' %}selected{% endif %}>确认续租</option>
+          <option value="non_renew" {% if row.next_rent_status == 'non_renew' %}selected{% endif %}>不续租</option>
+        </select>
+        <button type="submit">保存</button>
+      </form>
+    </article>
+    {% else %}
+    <div class="panel">暂无服务器数据</div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
