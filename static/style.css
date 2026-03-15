@@ -142,16 +142,27 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-next-text{font-weight:700;color:#0f172a}
 .rental-next-form{display:flex;gap:8px;flex-wrap:wrap}
 .rental-next-form select{min-width:120px}
-.rental-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
-.rental-card{border:1px solid #e2e8f0;border-radius:12px;padding:12px}
-.rental-card-confirmed{background:#ecfdf3;border-color:#bbf7d0}
-.rental-card-non-renew{background:#fff1f2;border-color:#fecdd3}
-.rental-card-unknown{background:#fefce8;border-color:#fde68a}
-.rental-card-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}
-.rental-card-head h3{margin:0}
-.rental-refresh{color:#475569;font-weight:700;white-space:nowrap}
-.rental-meta-line{display:flex;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:4px 0}
-.rental-meta-label{color:#64748b;flex:0 0 auto}
-.rental-meta-value{font-weight:700;overflow:hidden;text-overflow:ellipsis}
-.rental-next-form-nowrap{flex-wrap:nowrap;align-items:center}
+.rental-cards{display:flex;flex-direction:column;gap:10px}
+.rental-cards-stacked{margin-top:10px}
+.rental-table-header,.rental-row{display:grid;grid-template-columns:1.1fr .8fr 1fr 1fr 1.1fr 1fr;align-items:center;gap:12px}
+.rental-table-header{font-weight:800;color:#1f2937;padding:8px 12px;border-bottom:1px solid #cbd5e1}
+.rental-card{border:1px solid #d1d5db;border-radius:10px;padding:10px 12px}
+.rental-row{min-height:64px}
+.rental-col{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rental-col-name{font-size:28px;font-weight:900;color:#0f172a}
+.rental-col-action{overflow:visible}
+.rental-card-confirmed{background:#c9f2dd;border-color:#74d69f}
+.rental-card-non-renew{background:#ffd9de;border-color:#f08aa0}
+.rental-card-unknown{background:#f7f0bf;border-color:#dfc347}
+.rental-next-form-nowrap{flex-wrap:nowrap;align-items:center;justify-content:flex-start}
 .rental-next-form-nowrap select{min-width:140px}
+
+@media (max-width: 1100px){
+  .rental-table-header{display:none}
+  .rental-row{grid-template-columns:1fr;gap:6px}
+  .rental-col{white-space:normal}
+  .rental-col::before{content:attr(data-label) '：';color:#475569;font-weight:700;margin-right:6px}
+  .rental-col-name::before{content:attr(data-label) '：';font-size:14px}
+  .rental-col-name{font-size:20px}
+}
+
