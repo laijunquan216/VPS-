@@ -1887,6 +1887,17 @@ def format_reset_datetime_text(dt_obj):
     return dt_obj.strftime("%Y-%m-%d %H:%M")
 
 
+def format_public_stock_day_label(target_dt, now_dt):
+    now_date = now_dt.date()
+    target_date = target_dt.date()
+    day_text = f"{target_dt.month}月{target_dt.day}号"
+    if target_date == now_date:
+        return f"今天-{day_text}"
+    if target_date == now_date + timedelta(days=1):
+        return f"明天-{day_text}"
+    return day_text
+
+
 def _build_public_inventory_server_rows(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     rows = list_servers()
@@ -1907,7 +1918,7 @@ def _build_public_inventory_server_rows(now_dt=None):
             in_stock.append(item)
             continue
 
-        if int(item.get("is_renewed") or 0) == 0:
+        if int(item.get("is_renewed") or 0) == 0 and not is_before_renew_until(item, now_dt):
             start_dt = next_reset
             end_dt = build_effective_reset_datetime(item, start_dt + timedelta(minutes=1))
             item["book_window_text"] = f"可预订档期：{format_reset_datetime_text(start_dt)} ~ {format_reset_datetime_text(end_dt)}（北京时间）"
@@ -1916,7 +1927,7 @@ def _build_public_inventory_server_rows(now_dt=None):
     return in_stock, reservable
 
 
-def _group_public_inventory_rows(rows):
+def _group_public_inventory_rows(rows, now_dt, section):
     grouped = {}
     for item in rows:
         gid = int(item.get("group_id") or 0)
@@ -1926,14 +1937,41 @@ def _group_public_inventory_rows(rows):
                 "group_name": item.get("group_name") or "未分组",
                 "group_description": item.get("group_description") or "无",
                 "count": 0,
+                "time_buckets": {},
             }
         grouped[gid]["count"] += 1
-    return sorted(grouped.values(), key=lambda x: (0 if x["group_id"] == 0 else 1, x["group_name"]))
+
+        next_reset_dt = build_effective_reset_datetime(item, now_dt)
+        bucket_key = next_reset_dt.strftime("%Y-%m-%d")
+        bucket = grouped[gid]["time_buckets"].setdefault(
+            bucket_key,
+            {
+                "sort_ts": next_reset_dt,
+                "day_label": format_public_stock_day_label(next_reset_dt, now_dt),
+                "count": 0,
+                "start_label": f"{next_reset_dt.month}月{next_reset_dt.day}号",
+                "end_label": "",
+            },
+        )
+        bucket["count"] += 1
+
+        if section == "reservable" and not bucket["end_label"]:
+            end_dt = build_effective_reset_datetime(item, next_reset_dt + timedelta(minutes=1))
+            bucket["end_label"] = f"{end_dt.month}月{end_dt.day}号"
+
+    result = sorted(grouped.values(), key=lambda x: (0 if x["group_id"] == 0 else 1, x["group_name"]))
+    for group in result:
+        bucket_list = sorted(group.pop("time_buckets").values(), key=lambda x: x["sort_ts"])
+        for bucket in bucket_list:
+            bucket["sort_ts"] = bucket["sort_ts"].strftime("%Y-%m-%d %H:%M")
+        group["timeline"] = bucket_list
+    return result
 
 
 def build_public_inventory_group_cards(now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
     in_stock_rows, reservable_rows = _build_public_inventory_server_rows(now_dt)
-    return _group_public_inventory_rows(in_stock_rows), _group_public_inventory_rows(reservable_rows)
+    return _group_public_inventory_rows(in_stock_rows, now_dt, "in_stock"), _group_public_inventory_rows(reservable_rows, now_dt, "reservable")
 
 
 def build_public_inventory_group_detail(section, group_id, now_dt=None):
@@ -3984,18 +4022,7 @@ def public_stock_page():
 
 @public_app.route("/inventory/group/<section>/<int:group_id>")
 def public_stock_group_page(section, group_id):
-    if section not in {"in_stock", "reservable"}:
-        return redirect(url_for("public_stock_page"))
-    title, _ = get_public_stock_settings()
-    group, rows = build_public_inventory_group_detail(section, group_id)
-    return render_template(
-        "public_inventory.html",
-        title=title,
-        group_detail=group,
-        group_rows=rows,
-        section=section,
-        generated_at=datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
-    )
+    return redirect(url_for("public_stock_page"))
 
 
 def login_required(func):
