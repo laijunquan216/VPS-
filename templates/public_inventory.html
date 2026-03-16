@@ -13,32 +13,6 @@
       <p class="hint">面向所有客户展示库存信息。更新时间：{{ generated_at }}</p>
     </section>
 
-    {% if group_detail is defined %}
-    <section class="panel">
-      <div class="button-row" style="justify-content:space-between;align-items:center;">
-        <h2 style="margin:0;">{{ group_detail.group_name }}（{{ '现货服务器' if section == 'in_stock' else '可预订服务器' }}）</h2>
-        <a class="button-link" href="{{ url_for('public_stock_page') }}">返回分组列表</a>
-      </div>
-      <p><strong>分组说明：</strong>{{ group_detail.group_description }}</p>
-      <div class="public-stock-grid">
-        {% for row in group_rows %}
-        <article class="public-stock-card{% if section == 'reservable' %} public-stock-reserve{% endif %}">
-          <h3>{{ row.name }}</h3>
-          <p><strong>IP：</strong>{{ row.ip_masked }}</p>
-          <p><strong>重置日：</strong>每月{{ row.reset_day }}日 {{ "%02d"|format(row.reset_hour or 1) }}:{{ "%02d"|format(row.reset_minute or 0) }}</p>
-          {% if section == 'in_stock' %}
-          <p><strong>可用说明：</strong>{{ row.usable_until_text }}</p>
-          {% else %}
-          <p><strong>可用时间：</strong>{{ row.book_window_text }}</p>
-          {% endif %}
-          <p><strong>价格：</strong>{{ row.price_text }}</p>
-        </article>
-        {% else %}
-        <p>当前分组暂无服务器。</p>
-        {% endfor %}
-      </div>
-    </section>
-    {% else %}
     <section class="panel">
       <h2>现货服务器</h2>
       <div class="public-stock-grid">
@@ -46,8 +20,11 @@
         <article class="public-stock-card public-stock-group-card">
           <h3>{{ g.group_name }}</h3>
           <p><strong>服务器说明：</strong>{{ g.group_description }}</p>
-          <p><strong>库存：</strong>{{ g.count }} 台</p>
-          <a class="button-link" href="{{ url_for('public_stock_group_page', section='in_stock', group_id=g.group_id) }}">查看服务器详情</a>
+          {% for bucket in g.timeline %}
+          <p><strong>现货：</strong>{{ bucket.day_label }}，库存{{ bucket.count }}台</p>
+          {% else %}
+          <p>暂无可用现货</p>
+          {% endfor %}
         </article>
         {% else %}
         <p>暂无现货服务器</p>
@@ -62,15 +39,17 @@
         <article class="public-stock-card public-stock-reserve public-stock-group-card">
           <h3>{{ g.group_name }}</h3>
           <p><strong>服务器说明：</strong>{{ g.group_description }}</p>
-          <p><strong>库存：</strong>{{ g.count }} 台</p>
-          <a class="button-link" href="{{ url_for('public_stock_group_page', section='reservable', group_id=g.group_id) }}">查看服务器详情</a>
+          {% for bucket in g.timeline %}
+          <p><strong>可预订：</strong>{{ bucket.start_label }}-{{ bucket.end_label }}，库存{{ bucket.count }}台</p>
+          {% else %}
+          <p>暂无可预订库存</p>
+          {% endfor %}
         </article>
         {% else %}
         <p>暂无可预订服务器</p>
         {% endfor %}
       </div>
     </section>
-    {% endif %}
   </main>
 </body>
 </html>
