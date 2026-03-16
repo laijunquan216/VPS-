@@ -19,7 +19,7 @@
         {% for g in in_stock_groups %}
         <article class="public-stock-card public-stock-group-card">
           <h3>{{ g.group_name }}</h3>
-          <p><strong>服务器说明：</strong>{{ g.group_description }}</p>
+          <p><strong>服务器说明：</strong>{{ g.group_description_html }}</p>
           {% for bucket in g.timeline %}
           <p><strong>现货：</strong>{{ bucket.day_label }}，库存{{ bucket.count }}台</p>
           {% else %}
@@ -38,7 +38,7 @@
         {% for g in reservable_groups %}
         <article class="public-stock-card public-stock-reserve public-stock-group-card">
           <h3>{{ g.group_name }}</h3>
-          <p><strong>服务器说明：</strong>{{ g.group_description }}</p>
+          <p><strong>服务器说明：</strong>{{ g.group_description_html }}</p>
           {% for bucket in g.timeline %}
           <p><strong>可预订：</strong>{{ bucket.start_label }}-{{ bucket.end_label }}，库存{{ bucket.count }}台</p>
           {% else %}

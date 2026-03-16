@@ -40,6 +40,7 @@ from flask import (
     url_for,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
+from markupsafe import Markup, escape
 from werkzeug.utils import secure_filename
 from werkzeug.serving import make_server
 
@@ -1887,6 +1888,20 @@ def format_reset_datetime_text(dt_obj):
     return dt_obj.strftime("%Y-%m-%d %H:%M")
 
 
+
+
+def render_public_description_markdown(text):
+    raw_text = (text or "").strip()
+    if not raw_text:
+        return Markup("无")
+
+    safe_text = str(escape(raw_text))
+    safe_text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe_text)
+    safe_text = re.sub(r"__(.+?)__", r"<strong>\1</strong>", safe_text)
+    safe_text = re.sub(r"==(.+?)==", r"<span class=\"md-red\">\1</span>", safe_text)
+    safe_text = safe_text.replace("\n", "<br>")
+    return Markup(safe_text)
+
 def format_public_stock_day_label(target_dt, now_dt, section="in_stock"):
     day_text = f"{target_dt.month}月{target_dt.day}号"
     if section == "in_stock":
@@ -1939,6 +1954,7 @@ def _group_public_inventory_rows(rows, now_dt, section):
                 "group_id": gid,
                 "group_name": item.get("group_name") or "未分组",
                 "group_description": item.get("group_description") or "无",
+                "group_description_html": render_public_description_markdown(item.get("group_description") or "无"),
                 "count": 0,
                 "time_buckets": {},
             }
