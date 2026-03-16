@@ -1887,10 +1887,13 @@ def format_reset_datetime_text(dt_obj):
     return dt_obj.strftime("%Y-%m-%d %H:%M")
 
 
-def format_public_stock_day_label(target_dt, now_dt):
+def format_public_stock_day_label(target_dt, now_dt, section="in_stock"):
+    day_text = f"{target_dt.month}月{target_dt.day}号"
+    if section == "in_stock":
+        return f"今天-{day_text}"
+
     now_date = now_dt.date()
     target_date = target_dt.date()
-    day_text = f"{target_dt.month}月{target_dt.day}号"
     if target_date == now_date:
         return f"今天-{day_text}"
     if target_date == now_date + timedelta(days=1):
@@ -1947,7 +1950,7 @@ def _group_public_inventory_rows(rows, now_dt, section):
             bucket_key,
             {
                 "sort_ts": next_reset_dt,
-                "day_label": format_public_stock_day_label(next_reset_dt, now_dt),
+                "day_label": format_public_stock_day_label(next_reset_dt, now_dt, section),
                 "count": 0,
                 "start_label": f"{next_reset_dt.month}月{next_reset_dt.day}号",
                 "end_label": "",

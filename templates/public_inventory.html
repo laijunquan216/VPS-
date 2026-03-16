@@ -21,7 +21,7 @@
           <h3>{{ g.group_name }}</h3>
           <p><strong>服务器说明：</strong>{{ g.group_description }}</p>
           {% for bucket in g.timeline %}
-          <p><strong>现货：</strong>{{ bucket.day_label }}，{{ bucket.count }}台</p>
+          <p><strong>现货：</strong>{{ bucket.day_label }}，库存{{ bucket.count }}台</p>
           {% else %}
           <p>暂无可用现货</p>
           {% endfor %}
