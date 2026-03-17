@@ -170,6 +170,7 @@
     <label>分组名称<input name="name" required placeholder="例如 RS1000 G9.5" /></label>
     <label>分组排序<input name="sort_order" type="number" value="0" /></label>
     <label class="full">分组统一说明<textarea name="description" rows="2" placeholder="此分组服务器配置说明，会显示在库存页"></textarea></label>
+    <p class="hint">支持简易 Markdown：<code>**加粗**</code>、<code>==标红==</code>，换行会保留。</p>
     <button type="submit">新增分组</button>
   </form>
 
@@ -180,6 +181,7 @@
       <label>分组名称<input name="name" value="{{ g.name }}" required /></label>
       <label>分组排序<input name="sort_order" type="number" value="{{ g.sort_order }}" required /></label>
       <label class="full">分组统一说明<textarea name="description" rows="2">{{ g.description }}</textarea></label>
+      <p class="hint">支持简易 Markdown：<code>**加粗**</code>、<code>==标红==</code>，换行会保留。</p>
       <div class="button-row">
         <button type="submit">保存分组</button>
       </div>
