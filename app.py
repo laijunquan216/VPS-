@@ -3943,6 +3943,15 @@ def run_scheduled_renew_notice_email(now_dt=None):
         if days_left not in notice_days:
             continue
 
+        if _normalize_next_rent_status(row["next_rent_status"]) == "non_renew":
+            log_system_event(
+                "renew_notice",
+                f"服务器[{row['name']}] 已标记不续租，跳过重置前{days_left}天续费提醒",
+                server_id=row["id"],
+                details=recipient,
+            )
+            continue
+
         sent_keys = _parse_notice_key_set(row["renew_notice_sent_keys"])
         notice_key = _compose_notice_key(reset_dt, days_left)
         if notice_key in sent_keys:
