@@ -40,6 +40,7 @@ from flask import (
     url_for,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
+from markupsafe import Markup, escape
 from werkzeug.utils import secure_filename
 from werkzeug.serving import make_server
 
@@ -1887,6 +1888,34 @@ def format_reset_datetime_text(dt_obj):
     return dt_obj.strftime("%Y-%m-%d %H:%M")
 
 
+
+
+def render_public_description_markdown(text):
+    raw_text = (text or "").strip()
+    if not raw_text:
+        return Markup("无")
+
+    safe_text = str(escape(raw_text))
+    safe_text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe_text)
+    safe_text = re.sub(r"__(.+?)__", r"<strong>\1</strong>", safe_text)
+    safe_text = re.sub(r"==(.+?)==", r"<span class=\"md-red\">\1</span>", safe_text)
+    safe_text = safe_text.replace("\n", "<br>")
+    return Markup(safe_text)
+
+def format_public_stock_day_label(target_dt, now_dt, section="in_stock"):
+    day_text = f"{target_dt.month}月{target_dt.day}号"
+    if section == "in_stock":
+        return f"今天-{day_text}"
+
+    now_date = now_dt.date()
+    target_date = target_dt.date()
+    if target_date == now_date:
+        return f"今天-{day_text}"
+    if target_date == now_date + timedelta(days=1):
+        return f"明天-{day_text}"
+    return day_text
+
+
 def _build_public_inventory_server_rows(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     rows = list_servers()
@@ -1907,7 +1936,7 @@ def _build_public_inventory_server_rows(now_dt=None):
             in_stock.append(item)
             continue
 
-        if int(item.get("is_renewed") or 0) == 0:
+        if int(item.get("is_renewed") or 0) == 0 and not is_before_renew_until(item, now_dt):
             start_dt = next_reset
             end_dt = build_effective_reset_datetime(item, start_dt + timedelta(minutes=1))
             item["book_window_text"] = f"可预订档期：{format_reset_datetime_text(start_dt)} ~ {format_reset_datetime_text(end_dt)}（北京时间）"
@@ -1916,7 +1945,7 @@ def _build_public_inventory_server_rows(now_dt=None):
     return in_stock, reservable
 
 
-def _group_public_inventory_rows(rows):
+def _group_public_inventory_rows(rows, now_dt, section):
     grouped = {}
     for item in rows:
         gid = int(item.get("group_id") or 0)
@@ -1925,15 +1954,43 @@ def _group_public_inventory_rows(rows):
                 "group_id": gid,
                 "group_name": item.get("group_name") or "未分组",
                 "group_description": item.get("group_description") or "无",
+                "group_description_html": render_public_description_markdown(item.get("group_description") or "无"),
                 "count": 0,
+                "time_buckets": {},
             }
         grouped[gid]["count"] += 1
-    return sorted(grouped.values(), key=lambda x: (0 if x["group_id"] == 0 else 1, x["group_name"]))
+
+        next_reset_dt = build_effective_reset_datetime(item, now_dt)
+        bucket_key = next_reset_dt.strftime("%Y-%m-%d")
+        bucket = grouped[gid]["time_buckets"].setdefault(
+            bucket_key,
+            {
+                "sort_ts": next_reset_dt,
+                "day_label": format_public_stock_day_label(next_reset_dt, now_dt, section),
+                "count": 0,
+                "start_label": f"{next_reset_dt.month}月{next_reset_dt.day}号",
+                "end_label": "",
+            },
+        )
+        bucket["count"] += 1
+
+        if section == "reservable" and not bucket["end_label"]:
+            end_dt = build_effective_reset_datetime(item, next_reset_dt + timedelta(minutes=1))
+            bucket["end_label"] = f"{end_dt.month}月{end_dt.day}号"
+
+    result = sorted(grouped.values(), key=lambda x: (0 if x["group_id"] == 0 else 1, x["group_name"]))
+    for group in result:
+        bucket_list = sorted(group.pop("time_buckets").values(), key=lambda x: x["sort_ts"])
+        for bucket in bucket_list:
+            bucket["sort_ts"] = bucket["sort_ts"].strftime("%Y-%m-%d %H:%M")
+        group["timeline"] = bucket_list
+    return result
 
 
 def build_public_inventory_group_cards(now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
     in_stock_rows, reservable_rows = _build_public_inventory_server_rows(now_dt)
-    return _group_public_inventory_rows(in_stock_rows), _group_public_inventory_rows(reservable_rows)
+    return _group_public_inventory_rows(in_stock_rows, now_dt, "in_stock"), _group_public_inventory_rows(reservable_rows, now_dt, "reservable")
 
 
 def build_public_inventory_group_detail(section, group_id, now_dt=None):
@@ -3861,6 +3918,22 @@ def compose_renew_notice_message(row, reset_dt):
     return subject, body
 
 
+def compose_missing_renter_email_notice(row, reset_dt, days_left):
+    renter_name = (row["renter_name"] or "").strip() or "未填写"
+    reset_clock = f"每月{int(row['reset_day'] or 1)}日 {int(row['reset_hour'] or 1):02d}:{int(row['reset_minute'] or 0):02d}"
+    subject = f"[VPS面板] 续费提醒未发送（缺少租赁人邮箱）- {row['name']}"
+    body = (
+        "以下服务器本应发送自动续费提醒，但因未填写租赁人邮箱而跳过。请尽快联系客户确认是否续租。\n\n"
+        f"服务器名称：{row['name']}\n"
+        f"刷新日：{reset_clock}\n"
+        f"本次预计重置时间：{reset_dt.strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
+        f"触发提醒档位：重置前{days_left}天\n"
+        f"租赁人：{renter_name}\n"
+        "建议操作：尽快询问客户是否续租，并补充租赁人邮箱或将状态调整为不续租。"
+    )
+    return subject, body
+
+
 def run_scheduled_renew_notice_email(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     cfg = get_global_config()
@@ -3874,9 +3947,6 @@ def run_scheduled_renew_notice_email(now_dt=None):
             continue
         if int(row["is_renewed"] or 0) == 1:
             continue
-        recipient = (row["renter_email"] or "").strip()
-        if not recipient:
-            continue
 
         reset_dt = build_effective_reset_datetime(row, now_dt)
         if now_dt.hour != int(row["reset_hour"] or 1) or now_dt.minute != int(row["reset_minute"] or 0):
@@ -3886,8 +3956,47 @@ def run_scheduled_renew_notice_email(now_dt=None):
         if days_left not in notice_days:
             continue
 
+        recipient = (row["renter_email"] or "").strip()
+        if _normalize_next_rent_status(row["next_rent_status"]) == "non_renew":
+            log_system_event(
+                "renew_notice",
+                f"服务器[{row['name']}] 已标记不续租，跳过重置前{days_left}天续费提醒",
+                server_id=row["id"],
+                details=recipient,
+            )
+            continue
+
         sent_keys = _parse_notice_key_set(row["renew_notice_sent_keys"])
         notice_key = _compose_notice_key(reset_dt, days_left)
+        missing_recipient_key = f"{notice_key}#missing_recipient"
+
+        if not recipient:
+            if missing_recipient_key in sent_keys:
+                continue
+            subject, body = compose_missing_renter_email_notice(row, reset_dt, days_left)
+            ok = send_email_message(subject, body, category="renew_notice_missing_recipient")
+            if not ok:
+                log_system_event(
+                    "renew_notice",
+                    f"服务器[{row['name']}] 缺少租赁人邮箱，给管理员的提醒邮件发送失败",
+                    level="error",
+                    server_id=row["id"],
+                )
+                continue
+
+            sent_keys.add(missing_recipient_key)
+            sent_text = "|".join(sorted(sent_keys))
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE servers SET renew_notice_sent_keys = ? WHERE id = ?", (sent_text, row["id"]))
+                conn.commit()
+            log_system_event(
+                "renew_notice",
+                f"服务器[{row['name']}] 缺少租赁人邮箱，已通知管理员跟进续租",
+                level="warning",
+                server_id=row["id"],
+            )
+            continue
+
         if notice_key in sent_keys:
             continue
 
@@ -3984,18 +4093,7 @@ def public_stock_page():
 
 @public_app.route("/inventory/group/<section>/<int:group_id>")
 def public_stock_group_page(section, group_id):
-    if section not in {"in_stock", "reservable"}:
-        return redirect(url_for("public_stock_page"))
-    title, _ = get_public_stock_settings()
-    group, rows = build_public_inventory_group_detail(section, group_id)
-    return render_template(
-        "public_inventory.html",
-        title=title,
-        group_detail=group,
-        group_rows=rows,
-        section=section,
-        generated_at=datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
-    )
+    return redirect(url_for("public_stock_page"))
 
 
 def login_required(func):

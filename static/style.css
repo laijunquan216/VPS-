@@ -183,3 +183,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 
 .public-stock-group-card{display:flex;flex-direction:column;gap:8px}
 .public-stock-group-card .button-link{align-self:flex-start}
+
+
+.md-red {
+  color: #d93025;
+  font-weight: 700;
+}
