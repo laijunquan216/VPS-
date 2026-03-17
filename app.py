@@ -3918,6 +3918,22 @@ def compose_renew_notice_message(row, reset_dt):
     return subject, body
 
 
+def compose_missing_renter_email_notice(row, reset_dt, days_left):
+    renter_name = (row["renter_name"] or "").strip() or "未填写"
+    reset_clock = f"每月{int(row['reset_day'] or 1)}日 {int(row['reset_hour'] or 1):02d}:{int(row['reset_minute'] or 0):02d}"
+    subject = f"[VPS面板] 续费提醒未发送（缺少租赁人邮箱）- {row['name']}"
+    body = (
+        "以下服务器本应发送自动续费提醒，但因未填写租赁人邮箱而跳过。请尽快联系客户确认是否续租。\n\n"
+        f"服务器名称：{row['name']}\n"
+        f"刷新日：{reset_clock}\n"
+        f"本次预计重置时间：{reset_dt.strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
+        f"触发提醒档位：重置前{days_left}天\n"
+        f"租赁人：{renter_name}\n"
+        "建议操作：尽快询问客户是否续租，并补充租赁人邮箱或将状态调整为不续租。"
+    )
+    return subject, body
+
+
 def run_scheduled_renew_notice_email(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     cfg = get_global_config()
@@ -3931,9 +3947,6 @@ def run_scheduled_renew_notice_email(now_dt=None):
             continue
         if int(row["is_renewed"] or 0) == 1:
             continue
-        recipient = (row["renter_email"] or "").strip()
-        if not recipient:
-            continue
 
         reset_dt = build_effective_reset_datetime(row, now_dt)
         if now_dt.hour != int(row["reset_hour"] or 1) or now_dt.minute != int(row["reset_minute"] or 0):
@@ -3943,6 +3956,7 @@ def run_scheduled_renew_notice_email(now_dt=None):
         if days_left not in notice_days:
             continue
 
+        recipient = (row["renter_email"] or "").strip()
         if _normalize_next_rent_status(row["next_rent_status"]) == "non_renew":
             log_system_event(
                 "renew_notice",
@@ -3954,6 +3968,35 @@ def run_scheduled_renew_notice_email(now_dt=None):
 
         sent_keys = _parse_notice_key_set(row["renew_notice_sent_keys"])
         notice_key = _compose_notice_key(reset_dt, days_left)
+        missing_recipient_key = f"{notice_key}#missing_recipient"
+
+        if not recipient:
+            if missing_recipient_key in sent_keys:
+                continue
+            subject, body = compose_missing_renter_email_notice(row, reset_dt, days_left)
+            ok = send_email_message(subject, body, category="renew_notice_missing_recipient")
+            if not ok:
+                log_system_event(
+                    "renew_notice",
+                    f"服务器[{row['name']}] 缺少租赁人邮箱，给管理员的提醒邮件发送失败",
+                    level="error",
+                    server_id=row["id"],
+                )
+                continue
+
+            sent_keys.add(missing_recipient_key)
+            sent_text = "|".join(sorted(sent_keys))
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE servers SET renew_notice_sent_keys = ? WHERE id = ?", (sent_text, row["id"]))
+                conn.commit()
+            log_system_event(
+                "renew_notice",
+                f"服务器[{row['name']}] 缺少租赁人邮箱，已通知管理员跟进续租",
+                level="warning",
+                server_id=row["id"],
+            )
+            continue
+
         if notice_key in sent_keys:
             continue
 
