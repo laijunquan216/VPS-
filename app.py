@@ -3070,11 +3070,57 @@ def get_smtp_config():
     }
 
 
-def send_email_message(subject, body, category="general"):
+def _smtp_send_with_mode(host, port, user, password, msg, mode):
+    timeout = 20
+    mode = str(mode or "").strip().lower()
+    if mode == "ssl":
+        with smtplib.SMTP_SSL(host, port, timeout=timeout) as server:
+            server.ehlo()
+            if user:
+                server.login(user, password)
+            server.send_message(msg)
+        return
+
+    if mode != "starttls":
+        raise ValueError(f"unsupported smtp mode: {mode}")
+
+    with smtplib.SMTP(host, port, timeout=timeout) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        if user:
+            server.login(user, password)
+        server.send_message(msg)
+
+
+def _smtp_mode_candidates(port):
+    try:
+        p = int(port)
+    except Exception:
+        p = 0
+    if p == 465:
+        return ["ssl", "starttls"]
+    if p == 587:
+        return ["starttls", "ssl"]
+    return ["starttls", "ssl"]
+
+
+def _smtp_send_with_fallback(host, port, user, password, msg):
+    errors = []
+    for mode in _smtp_mode_candidates(port):
+        try:
+            _smtp_send_with_mode(host, port, user, password, msg, mode)
+            return True, ""
+        except Exception as exc:
+            errors.append(f"{mode}: {exc}")
+    return False, " | ".join(errors) if errors else "unknown smtp error"
+
+
+def send_email_message(subject, body, category="general", return_error=False):
     smtp = get_smtp_config()
     if not smtp:
         record_email_history(category, "", subject, "skipped", "SMTP未配置", body)
-        return False
+        return (False, "SMTP未配置") if return_error else False
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -3082,17 +3128,14 @@ def send_email_message(subject, body, category="general"):
     msg["To"] = smtp["to"]
     msg.set_content(body)
 
-    try:
-        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
-            server.starttls()
-            if smtp["user"]:
-                server.login(smtp["user"], smtp["password"])
-            server.send_message(msg)
+    ok, err_text = _smtp_send_with_fallback(
+        smtp["host"], smtp["port"], smtp["user"], smtp["password"], msg
+    )
+    if ok:
         record_email_history(category, smtp["to"], subject, "success", "", body)
-        return True
-    except Exception as exc:
-        record_email_history(category, smtp.get("to", ""), subject, "failed", str(exc), body)
-        return False
+        return (True, "") if return_error else True
+    record_email_history(category, smtp.get("to", ""), subject, "failed", err_text, body)
+    return (False, err_text) if return_error else False
 
 
 def send_email_to_recipient(subject, body, to_email, category="tenant_notice"):
@@ -3121,17 +3164,12 @@ def send_email_to_recipient(subject, body, to_email, category="tenant_notice"):
     msg["To"] = recipient
     msg.set_content(body)
 
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
-            server.starttls()
-            if smtp_user:
-                server.login(smtp_user, smtp_password)
-            server.send_message(msg)
+    ok, err_text = _smtp_send_with_fallback(smtp_host, smtp_port, smtp_user, smtp_password, msg)
+    if ok:
         record_email_history(category, recipient, subject, "success", "", body)
         return True
-    except Exception as exc:
-        record_email_history(category, recipient, subject, "failed", str(exc), body)
-        return False
+    record_email_history(category, recipient, subject, "failed", err_text, body)
+    return False
 
 
 def send_email_with_attachment(subject, body, attachment_name, attachment_bytes, to_email=None, category="backup"):
@@ -3147,17 +3185,14 @@ def send_email_with_attachment(subject, body, attachment_name, attachment_bytes,
     msg.set_content(body)
     msg.add_attachment(attachment_bytes, maintype="application", subtype="json", filename=attachment_name)
 
-    try:
-        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=20) as server:
-            server.starttls()
-            if smtp["user"]:
-                server.login(smtp["user"], smtp["password"])
-            server.send_message(msg)
+    ok, err_text = _smtp_send_with_fallback(
+        smtp["host"], smtp["port"], smtp["user"], smtp["password"], msg
+    )
+    if ok:
         record_email_history(category, msg["To"], subject, "success", "", body)
         return True
-    except Exception as exc:
-        record_email_history(category, msg["To"], subject, "failed", str(exc), body)
-        return False
+    record_email_history(category, msg["To"], subject, "failed", err_text, body)
+    return False
 
 
 def run_scheduled_backup_email(now_dt=None):
@@ -4692,18 +4727,19 @@ def update_global_tasks():
 @login_required
 def test_notify_email():
     try:
-        ok = send_email_message(
+        ok, err_text = send_email_message(
             "[VPS面板] 邮件通知测试",
             (
                 "这是一封来自 VPS 管理面板的测试邮件。\n"
                 f"发送时间: {datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}\n"
                 "若你收到本邮件，说明 SMTP 配置可用。"
             ),
+            return_error=True,
         )
         if ok:
             flash("测试邮件已发送，请检查收件箱", "success")
         else:
-            flash("测试邮件未发送：请先开启邮件通知并完整填写 SMTP 配置", "error")
+            flash(f"测试邮件发送失败: {err_text or '请先开启邮件通知并完整填写 SMTP 配置'}", "error")
     except Exception as exc:
         flash(f"测试邮件发送失败: {exc}", "error")
     return redirect(url_for("settings_page"))
