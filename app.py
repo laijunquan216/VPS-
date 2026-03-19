@@ -685,18 +685,33 @@ def _rental_cycle_key(now_dt):
     return f"{now_dt.year:04d}-{now_dt.month:02d}"
 
 
+def _server_rental_cycle_key(server_row, now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    reset_day = int(server_row["reset_day"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_day") or 1)
+    reset_hour = int(server_row["reset_hour"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_hour") or 1)
+    reset_minute = int(server_row["reset_minute"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_minute") or 0)
+
+    current_month_day = month_day_safe(now_dt.year, now_dt.month, reset_day)
+    current_refresh_dt = now_dt.replace(day=current_month_day, hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
+    if now_dt >= current_refresh_dt:
+        return _rental_cycle_key(now_dt)
+
+    if now_dt.month == 1:
+        prev_year, prev_month = now_dt.year - 1, 12
+    else:
+        prev_year, prev_month = now_dt.year, now_dt.month - 1
+    return f"{prev_year:04d}-{prev_month:02d}"
+
+
 def apply_monthly_rental_rollover_if_needed(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
-    cycle_key = _rental_cycle_key(now_dt)
     with closing(get_conn()) as conn:
         rows = conn.execute(
             "SELECT id, name, reset_day, is_rented, is_renewed, renew_until_date, renter_name, renter_email, next_rent_status, rental_rollover_key, delivery_email_sent_at, renew_notice_sent_keys FROM servers ORDER BY sort_order ASC, id ASC"
         ).fetchall()
         changed = 0
         for row in rows:
-            refresh_day = int(row["reset_day"] or 1)
-            if now_dt.day < refresh_day:
-                continue
+            cycle_key = _server_rental_cycle_key(row, now_dt)
             if str(row["rental_rollover_key"] or "").strip() == cycle_key:
                 continue
 
@@ -4998,14 +5013,16 @@ def check_ssh_now(server_id):
 def update_renter(server_id):
     renter_name = (request.form.get("renter_name") or "").strip()
     renter_email = (request.form.get("renter_email") or "").strip()
+    now_dt = datetime.now(TIMEZONE)
     with closing(get_conn()) as conn:
-        row = conn.execute("SELECT id FROM servers WHERE id = ?", (server_id,)).fetchone()
+        row = conn.execute("SELECT id, reset_day, reset_hour, reset_minute FROM servers WHERE id = ?", (server_id,)).fetchone()
         if not row:
             flash("服务器不存在", "error")
             return redirect(url_for("details_page"))
+        rollover_key = _server_rental_cycle_key(row, now_dt) if (renter_name or renter_email) else ""
         conn.execute(
-            "UPDATE servers SET renter_name = ?, renter_email = ?, delivery_email_sent_at = NULL WHERE id = ?",
-            (renter_name, renter_email, server_id),
+            "UPDATE servers SET renter_name = ?, renter_email = ?, delivery_email_sent_at = NULL, rental_rollover_key = ? WHERE id = ?",
+            (renter_name, renter_email, rollover_key, server_id),
         )
         conn.commit()
     flash("租赁人信息已更新" if (renter_name or renter_email) else "已清空租赁人信息", "success")
