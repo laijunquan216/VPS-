@@ -687,9 +687,16 @@ def _rental_cycle_key(now_dt):
 
 def _server_rental_cycle_key(server_row, now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
-    reset_day = int(server_row["reset_day"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_day") or 1)
-    reset_hour = int(server_row["reset_hour"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_hour") or 1)
-    reset_minute = int(server_row["reset_minute"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("reset_minute") or 0)
+    if isinstance(server_row, sqlite3.Row):
+        row_keys = set(server_row.keys())
+        reset_day = int(server_row["reset_day"] if "reset_day" in row_keys else 1)
+        reset_hour = int(server_row["reset_hour"] if "reset_hour" in row_keys else 1)
+        reset_minute = int(server_row["reset_minute"] if "reset_minute" in row_keys else 0)
+    else:
+        data = server_row or {}
+        reset_day = int(data.get("reset_day") or 1)
+        reset_hour = int(data.get("reset_hour") or 1)
+        reset_minute = int(data.get("reset_minute") or 0)
 
     current_month_day = month_day_safe(now_dt.year, now_dt.month, reset_day)
     current_refresh_dt = now_dt.replace(day=current_month_day, hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
@@ -707,7 +714,7 @@ def apply_monthly_rental_rollover_if_needed(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     with closing(get_conn()) as conn:
         rows = conn.execute(
-            "SELECT id, name, reset_day, is_rented, is_renewed, renew_until_date, renter_name, renter_email, next_rent_status, rental_rollover_key, delivery_email_sent_at, renew_notice_sent_keys FROM servers ORDER BY sort_order ASC, id ASC"
+            "SELECT id, name, reset_day, reset_hour, reset_minute, is_rented, is_renewed, renew_until_date, renter_name, renter_email, next_rent_status, rental_rollover_key, delivery_email_sent_at, renew_notice_sent_keys FROM servers ORDER BY sort_order ASC, id ASC"
         ).fetchall()
         changed = 0
         for row in rows:
