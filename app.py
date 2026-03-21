@@ -805,6 +805,7 @@ def apply_monthly_rental_rollover_if_needed(now_dt=None):
 def list_rental_management_rows():
     rows = list_servers()
     out = []
+    now_dt = datetime.now(TIMEZONE)
     for row in rows:
         item = dict(row)
         item["next_rent_status"] = _normalize_next_rent_status(item.get("next_rent_status"))
@@ -813,6 +814,7 @@ def list_rental_management_rows():
         item["next_month_tenant_text"] = _format_next_month_tenant(item)
         item["last_month_tenant_text"] = str(item.get("last_month_tenant") or "").strip()
         item["refresh_day_text"] = f"{int(item.get('reset_day') or 1)}号"
+        item["refresh_sort_ts"] = int(build_effective_reset_datetime(item, now_dt).timestamp())
         item["status_card_class"] = {
             "confirmed": "rental-card-confirmed",
             "non_renew": "rental-card-non-renew",

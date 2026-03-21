@@ -150,6 +150,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-cards-stacked{margin-top:10px}
 .rental-table-header,.rental-row{display:grid;grid-template-columns:minmax(180px,1.2fr) 110px minmax(130px,.9fr) minmax(130px,.95fr) minmax(130px,1fr) minmax(360px,1.6fr);align-items:center;gap:8px}
 .rental-table-header{font-weight:800;color:#1f2937;padding:8px 12px;border-bottom:1px solid #cbd5e1}
+.rental-header-action{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.rental-sort-btn{padding:6px 10px;font-size:13px}
 .rental-card{border:1px solid #d1d5db;border-radius:10px;padding:10px 12px}
 .rental-row{min-height:64px}
 .rental-col{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

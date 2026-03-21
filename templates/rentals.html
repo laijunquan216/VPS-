@@ -27,11 +27,15 @@
     <span>上月租户</span>
     <span>目前租户</span>
     <span>下月租户</span>
-    <span>操作</span>
+    <span class="rental-header-action">
+      操作
+      <button type="button" id="sortByRefreshBtn" class="secondary rental-sort-btn">按临近时间排序</button>
+    </span>
   </div>
 
   <div class="rental-cards rental-cards-stacked">
     {% for row in rows %}
+    <div class="rental-item" data-refresh-ts="{{ row.refresh_sort_ts }}" data-origin-index="{{ loop.index0 }}">
     <article class="rental-card rental-row {{ row.status_card_class }}">
       <div class="rental-col rental-col-name" data-label="名称">{{ row.name }}</div>
       <div class="rental-col" data-label="刷新日期">{{ row.refresh_day_text }}</div>
@@ -78,6 +82,7 @@
         </form>
       </div>
     </div>
+    </div>
     {% else %}
     <div class="panel">暂无服务器数据</div>
     {% endfor %}
@@ -101,5 +106,31 @@
   document.querySelectorAll('.rental-col-action form[action*="/reserve"]').forEach(function (legacyForm) {
     legacyForm.remove();
   });
+  (function () {
+    var btn = document.getElementById('sortByRefreshBtn');
+    var container = document.querySelector('.rental-cards');
+    if (!btn || !container) return;
+    var sorted = false;
+    btn.addEventListener('click', function () {
+      var items = Array.from(container.querySelectorAll('.rental-item'));
+      if (!items.length) return;
+      if (!sorted) {
+        items.sort(function (a, b) {
+          var ta = Number(a.dataset.refreshTs || 0);
+          var tb = Number(b.dataset.refreshTs || 0);
+          if (ta !== tb) return ta - tb;
+          return Number(a.dataset.originIndex || 0) - Number(b.dataset.originIndex || 0);
+        });
+        btn.textContent = '恢复默认顺序';
+      } else {
+        items.sort(function (a, b) {
+          return Number(a.dataset.originIndex || 0) - Number(b.dataset.originIndex || 0);
+        });
+        btn.textContent = '按临近时间排序';
+      }
+      items.forEach(function (item) { container.appendChild(item); });
+      sorted = !sorted;
+    });
+  })();
 </script>
 {% endblock %}
