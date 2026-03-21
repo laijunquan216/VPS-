@@ -179,6 +179,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
   .rental-col::before{content:attr(data-label) '：';color:#475569;font-weight:700;margin-right:6px}
   .rental-col-name::before{content:attr(data-label) '：';font-size:14px}
   .rental-col-name{font-size:20px}
+  .rental-reserve-form{flex-wrap:wrap}
 }
 
 
