@@ -161,7 +161,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-card-confirmed{background:#c9f2dd;border-color:#74d69f}
 .rental-card-non-renew{background:#ffd9de;border-color:#f08aa0}
 .rental-card-unknown{background:#f7f0bf;border-color:#dfc347}
-.rental-card-reserved{background:#ffe8cc;border-color:#f6ad55}
+.rental-card-reserved{background:#dbeafe;border-color:#93c5fd}
 .rental-next-form-nowrap{flex-wrap:nowrap;align-items:center;justify-content:flex-start}
 .rental-next-form-nowrap select{min-width:120px}
 .rental-reserve-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:999}

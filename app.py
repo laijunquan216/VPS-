@@ -185,6 +185,7 @@ def init_db():
                 local_setting_json_enabled INTEGER NOT NULL DEFAULT 0,
                 api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0,
                 auto_delivery_delay_hours INTEGER NOT NULL DEFAULT 6,
+                auto_delivery_delay_minutes REAL NOT NULL DEFAULT 360,
                 panel_password_hash TEXT,
                 renew_notice_days TEXT NOT NULL DEFAULT '5,2',
                 stock_page_title TEXT NOT NULL DEFAULT '库存展示',
@@ -400,8 +401,20 @@ def init_db():
         ensure_column(conn, "global_config", "local_setting_json_enabled INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "global_config", "api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "global_config", "auto_delivery_delay_hours INTEGER NOT NULL DEFAULT 6")
+        ensure_column(conn, "global_config", "auto_delivery_delay_minutes REAL NOT NULL DEFAULT 360")
         ensure_column(conn, "email_history", "body_text TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
+        conn.execute(
+            """
+            UPDATE global_config
+            SET auto_delivery_delay_minutes = CASE
+                WHEN auto_delivery_delay_minutes <= 0 AND auto_delivery_delay_hours > 0 THEN auto_delivery_delay_hours * 60
+                WHEN auto_delivery_delay_minutes <= 0 THEN 360
+                ELSE auto_delivery_delay_minutes
+            END
+            WHERE id = 1
+            """
+        )
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
             conn.execute(
@@ -803,7 +816,7 @@ def list_rental_management_rows():
         item["status_card_class"] = {
             "confirmed": "rental-card-confirmed",
             "non_renew": "rental-card-non-renew",
-            "reserved": "rental-card-confirmed",
+            "reserved": "rental-card-reserved",
         }.get(item["next_rent_status"], "rental-card-unknown")
         out.append(item)
     return out
@@ -3897,8 +3910,10 @@ def task_worker_loop():
                     )
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
                         cfg = get_global_config()
-                        auto_delay_hours = max(0, int((cfg.get("auto_delivery_delay_hours", 6) if cfg else 6) or 0))
-                        pending_delivery_at = (datetime.now(TIMEZONE) + timedelta(hours=auto_delay_hours)).strftime("%Y-%m-%d %H:%M:%S")
+                        auto_delay_minutes = float((cfg.get("auto_delivery_delay_minutes", None) if cfg else None) or 0)
+                        if auto_delay_minutes <= 0:
+                            auto_delay_minutes = max(0, int((cfg.get("auto_delivery_delay_hours", 6) if cfg else 6) or 0)) * 60
+                        pending_delivery_at = (datetime.now(TIMEZONE) + timedelta(minutes=auto_delay_minutes)).strftime("%Y-%m-%d %H:%M:%S")
                         conn.execute(
                             """
                             UPDATE servers
@@ -4584,19 +4599,25 @@ def update_renew_notice_days():
 def update_auto_delivery_delay_hours():
     raw_value = (request.form.get("auto_delivery_delay_hours") or "").strip()
     if raw_value == "":
-        flash("自动发货延迟小时不能为空", "error")
+        flash("自动发货延迟分钟不能为空", "error")
         return redirect(url_for("rentals_page"))
-    if not raw_value.isdigit():
-        flash("自动发货延迟小时必须是非负整数", "error")
+    try:
+        delay_minutes = float(raw_value)
+    except ValueError:
+        flash("自动发货延迟分钟必须是数字", "error")
         return redirect(url_for("rentals_page"))
-    delay_hours = max(0, min(168, int(raw_value)))
+    if delay_minutes < 0:
+        flash("自动发货延迟分钟不能为负数", "error")
+        return redirect(url_for("rentals_page"))
+    delay_minutes = max(0.0, min(10080.0, delay_minutes))
+    delay_hours_compat = int(round(delay_minutes / 60))
     with closing(get_conn()) as conn:
         conn.execute(
-            "UPDATE global_config SET auto_delivery_delay_hours = ?, updated_at = ? WHERE id = 1",
-            (delay_hours, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+            "UPDATE global_config SET auto_delivery_delay_minutes = ?, auto_delivery_delay_hours = ?, updated_at = ? WHERE id = 1",
+            (delay_minutes, delay_hours_compat, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
-    flash(f"自动发货延迟已更新为 {delay_hours} 小时", "success")
+    flash(f"自动发货延迟已更新为 {delay_minutes:g} 分钟", "success")
     return redirect(url_for("rentals_page"))
 
 @app.post("/rentals/<int:server_id>/send-renew-email")
