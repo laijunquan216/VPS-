@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import secrets
@@ -21,6 +22,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 from email.message import EmailMessage
+from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 import paramiko
@@ -38,6 +40,7 @@ from flask import (
     jsonify,
     session,
     url_for,
+    g,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
 from markupsafe import Markup, escape
@@ -50,6 +53,8 @@ PANEL_PORT = int(os.environ.get("PANEL_PORT", "5000"))
 PUBLIC_STOCK_PORT = int(os.environ.get("PUBLIC_STOCK_PORT", "5001"))
 PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").strip()
 TIMEZONE = ZoneInfo("Asia/Shanghai")
+DETAILED_LOG_ENABLED = str(os.environ.get("VPS_PANEL_DETAILED_LOG_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+DETAILED_LOG_PATH = os.environ.get("VPS_PANEL_DETAILED_LOG_PATH", os.path.join(os.getcwd(), "panel_detailed.log"))
 
 SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECONDS", "1800"))
 SSH_RETRY_INTERVAL_SECONDS = int(os.environ.get("SSH_RETRY_INTERVAL_SECONDS", "15"))
@@ -62,11 +67,36 @@ DD_NEW_PASSWORD_GRACE_SECONDS = int(os.environ.get("DD_NEW_PASSWORD_GRACE_SECOND
 AGENT_REPORT_INTERVAL_SECONDS = int(os.environ.get("AGENT_REPORT_INTERVAL_SECONDS", "60"))
 DEFAULT_MAX_RETRIES = int(os.environ.get("DEFAULT_MAX_RETRIES", "2"))
 DEFAULT_RETRY_BACKOFF_SECONDS = os.environ.get("DEFAULT_RETRY_BACKOFF_SECONDS", "60,180")
+SCHEDULED_RESET_GRACE_MINUTES = 5
 UPLOAD_DATA_DIR = os.environ.get("VPS_PANEL_UPLOAD_DATA_DIR", os.path.join(os.getcwd(), "uploaded_data"))
 os.makedirs(UPLOAD_DATA_DIR, exist_ok=True)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
+
+DETAILED_LOGGER = logging.getLogger("vps_panel_detailed")
+if DETAILED_LOG_ENABLED:
+    try:
+        os.makedirs(os.path.dirname(DETAILED_LOG_PATH) or ".", exist_ok=True)
+        _handler = RotatingFileHandler(DETAILED_LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        DETAILED_LOGGER.addHandler(_handler)
+        DETAILED_LOGGER.setLevel(logging.INFO)
+        DETAILED_LOGGER.propagate = False
+        DETAILED_LOGGER.info("detailed logging enabled path=%s", DETAILED_LOG_PATH)
+    except Exception:
+        DETAILED_LOG_ENABLED = False
+
+
+def write_detailed_log(event, **fields):
+    if not DETAILED_LOG_ENABLED:
+        return
+    payload = {"event": event}
+    payload.update(fields or {})
+    try:
+        DETAILED_LOGGER.info(json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        pass
 public_app = Flask("public_stock")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|\([A-Za-z0-9])")
 TASK_QUEUE = Queue()
@@ -123,6 +153,7 @@ def init_db():
                 delivery_email_sent_at TEXT,
                 pending_delivery_at TEXT NOT NULL DEFAULT '',
                 pending_delivery_done INTEGER NOT NULL DEFAULT 0,
+                last_scheduled_trigger_key TEXT NOT NULL DEFAULT '',
                 renew_notice_sent_keys TEXT NOT NULL DEFAULT '',
                 server_note TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
@@ -342,6 +373,7 @@ def init_db():
         ensure_column(conn, "servers", "delivery_email_sent_at TEXT")
         ensure_column(conn, "servers", "pending_delivery_at TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "pending_delivery_done INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "last_scheduled_trigger_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "renew_notice_sent_keys TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "server_note TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "server_group_id INTEGER")
@@ -1939,6 +1971,14 @@ def build_effective_reset_datetime(server_row, ref_dt):
         candidate = build_server_reset_datetime(server_row, candidate + timedelta(minutes=1))
         safety += 1
     return candidate
+
+
+def build_current_month_reset_datetime(server_row, ref_dt):
+    reset_day = int(server_row["reset_day"] or 1)
+    reset_hour = int(server_row["reset_hour"] if "reset_hour" in server_row.keys() else 1) if isinstance(server_row, sqlite3.Row) else int(server_row.get("reset_hour") or 1)
+    reset_minute = int(server_row["reset_minute"] if "reset_minute" in server_row.keys() else 0) if isinstance(server_row, sqlite3.Row) else int(server_row.get("reset_minute") or 0)
+    day_safe = month_day_safe(ref_dt.year, ref_dt.month, reset_day)
+    return ref_dt.replace(day=day_safe, hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
 
 
 def mask_server_ip(ip_text):
@@ -3876,10 +3916,12 @@ def task_worker_loop():
     while True:
         task_id = TASK_QUEUE.get()
         task = None
+        write_detailed_log("task_worker.pick", task_id=task_id, queue_size=TASK_QUEUE.qsize())
         try:
             with closing(get_conn()) as conn:
                 task = conn.execute("SELECT * FROM task_queue WHERE id = ?", (task_id,)).fetchone()
             if not task or task["status"] not in ("queued", "retrying"):
+                write_detailed_log("task_worker.skip", task_id=task_id, reason="task missing or not queueable")
                 continue
 
             next_run_at = datetime.strptime(task["next_run_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
@@ -3906,6 +3948,7 @@ def task_worker_loop():
                     (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
                 )
                 conn.commit()
+            write_detailed_log("task_worker.running", task_id=task_id, server_id=task["server_id"], trigger_type=task["trigger_type"])
 
             attempt_no = int(task["attempt"] or 0) + 1
             max_attempts = int(task["max_attempts"] or 1)
@@ -3973,6 +4016,7 @@ def task_worker_loop():
                             (pending_delivery_at, row["id"]),
                         )
                     conn.commit()
+                write_detailed_log("task_worker.success", task_id=task_id, server_id=task["server_id"], attempt=attempt_no)
                 if task["batch_key"]:
                     note = "任务执行完成"
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
@@ -3999,6 +4043,7 @@ def task_worker_loop():
                         ),
                     )
                     conn.commit()
+                write_detailed_log("task_worker.retrying", task_id=task_id, server_id=task["server_id"], next_run_at=next_time.strftime("%Y-%m-%d %H:%M:%S"), attempt=attempt_no)
                 update_log(
                     task["log_id"],
                     "retrying",
@@ -4019,11 +4064,13 @@ def task_worker_loop():
                         ),
                     )
                     conn.commit()
+                write_detailed_log("task_worker.failed", task_id=task_id, server_id=task["server_id"], reason=fail_reason, attempt=attempt_no)
                 if task["batch_key"]:
                     upsert_notification_batch_item(task["batch_key"], row, "failed", note=fail_reason, log_id=task["log_id"])
                     maybe_send_batch_email(task["batch_key"])
         except Exception as exc:
             error_text = f"task worker exception: {exc}"
+            write_detailed_log("task_worker.exception", task_id=task_id, error=error_text)
             try:
                 with closing(get_conn()) as conn:
                     conn.execute(
@@ -4329,11 +4376,18 @@ def run_scheduled_auto_delivery(now_dt=None):
     send_email_message(subject, body, category="delivery_auto_batch")
 
 
-def check_scheduled_jobs():
-    now = datetime.now(TIMEZONE)
+def check_lightweight_scheduled_jobs(now_dt=None):
+    now = now_dt or datetime.now(TIMEZONE)
+    write_detailed_log("scheduler.light.start", now=now.strftime("%Y-%m-%d %H:%M:%S"))
     run_scheduled_backup_email(now)
     run_scheduled_auto_delivery(now)
     run_scheduled_renew_notice_email(now)
+
+
+def check_scheduled_reset_jobs(now_dt=None):
+    now = datetime.now(TIMEZONE)
+    if now_dt:
+        now = now_dt
     batch_key = now.strftime("%Y-%m-%d %H:%M")
     scheduled_for = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -4357,13 +4411,26 @@ def check_scheduled_jobs():
     for sid, sname in long_renew_events:
         log_system_event("long_renew", f"服务器[{sname}] 已到续费日前一月，自动切换为未续租", server_id=sid)
 
-    due_rows = [row for row in rows if row["auto_reset"] and row["reset_day"] == now.day and int(row["reset_hour"] or 1) == now.hour and int(row["reset_minute"] or 0) == now.minute]
+    due_rows = []
+    for row in rows:
+        if not row["auto_reset"]:
+            continue
+        target_dt = build_current_month_reset_datetime(row, now)
+        delta_minutes = (now - target_dt).total_seconds() / 60.0
+        if 0 <= delta_minutes <= SCHEDULED_RESET_GRACE_MINUTES:
+            due_rows.append((row, target_dt))
     if not due_rows:
+        write_detailed_log("scheduler.reset.no_due", now=now.strftime("%Y-%m-%d %H:%M:%S"))
         return
 
+    write_detailed_log("scheduler.reset.due", now=now.strftime("%Y-%m-%d %H:%M:%S"), due_count=len(due_rows))
     ensure_notification_batch(batch_key, scheduled_for)
 
-    for row in due_rows:
+    for row, target_dt in due_rows:
+        slot_key = f"{target_dt.strftime('%Y-%m-%d %H:%M')}#{row['id']}"
+        if str(row["last_scheduled_trigger_key"] or "").strip() == slot_key:
+            upsert_notification_batch_item(batch_key, row, "skipped", note="命中重置容忍窗口，但该时间点任务已触发过")
+            continue
         if is_before_renew_until(row, now):
             upsert_notification_batch_item(batch_key, row, "skipped", note=f"长期续费保护中（续费至{row['renew_until_date']}），已跳过定时重置")
             log_system_event("scheduled_reset", f"服务器[{row['name']}] 因长期续费保护跳过定时重置", server_id=row["id"], details=row["renew_until_date"])
@@ -4382,11 +4449,21 @@ def check_scheduled_jobs():
             continue
 
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
+        if ok:
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE servers SET last_scheduled_trigger_key = ? WHERE id = ?", (slot_key, row["id"]))
+                conn.commit()
         log_system_event("scheduled_reset", f"服务器[{row['name']}] 已触发定时重置任务", server_id=row["id"], details=msg)
         if not ok:
             upsert_notification_batch_item(batch_key, row, "skipped", note=msg, log_id=log_id)
 
     maybe_send_batch_email(batch_key)
+
+
+def check_scheduled_jobs():
+    now = datetime.now(TIMEZONE)
+    check_lightweight_scheduled_jobs(now)
+    check_scheduled_reset_jobs(now)
 
 
 @public_app.route("/")
@@ -4424,12 +4501,34 @@ def login_required(func):
 
 @app.before_request
 def require_login():
+    if DETAILED_LOG_ENABLED:
+        g._req_start = time.time()
     public_endpoints = {"login_page", "login_submit", "static", "uploaded_data_file"}
     if request.endpoint in public_endpoints:
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login_page"))
     return None
+
+
+@app.after_request
+def detailed_request_log(response):
+    if not DETAILED_LOG_ENABLED:
+        return response
+    started = getattr(g, "_req_start", None)
+    duration_ms = round((time.time() - started) * 1000, 2) if started else None
+    write_detailed_log(
+        "http_request",
+        method=request.method,
+        path=request.path,
+        query=request.query_string.decode("utf-8", errors="ignore"),
+        endpoint=request.endpoint,
+        status=response.status_code,
+        duration_ms=duration_ms,
+        remote_addr=request.headers.get("X-Forwarded-For", request.remote_addr),
+        logged_in=bool(session.get("logged_in")),
+    )
+    return response
 
 
 @app.route("/login", methods=["GET"])
@@ -5522,9 +5621,16 @@ def start_public_stock_server():
 
 
 def start_scheduler():
-    scheduler = BackgroundScheduler(timezone=TIMEZONE, executors={"default": ThreadPoolExecutor(1)})
-    scheduler.add_job(check_scheduled_jobs, "cron", minute="*", max_instances=1, coalesce=True)
-    scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*", max_instances=1, coalesce=True)
+    scheduler = BackgroundScheduler(
+        timezone=TIMEZONE,
+        executors={
+            "default": ThreadPoolExecutor(1),  # 重任务串行
+            "light": ThreadPoolExecutor(2),    # 轻任务并行
+        },
+    )
+    scheduler.add_job(check_scheduled_reset_jobs, "cron", minute="*", max_instances=1, coalesce=True, executor="default")
+    scheduler.add_job(check_lightweight_scheduled_jobs, "cron", minute="*", max_instances=1, coalesce=True, executor="light")
+    scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*", max_instances=1, coalesce=True, executor="light")
     scheduler.start()
     return scheduler
 
