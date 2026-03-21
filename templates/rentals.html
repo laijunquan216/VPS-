@@ -39,6 +39,11 @@
       <div class="rental-col" data-label="目前租户">{{ row.renter_name or '—' }}</div>
       <div class="rental-col" data-label="下月租户">{{ row.next_month_tenant_text }}</div>
       <div class="rental-col rental-col-action" data-label="操作">
+        <form method="post" action="{{ url_for('update_rental_reservation', server_id=row.id) }}" class="rental-reserve-form">
+          <input name="reserved_renter_name" value="{{ row.reserved_renter_name or '' }}" placeholder="预定人" />
+          <input name="reserved_renter_email" value="{{ row.reserved_renter_email or '' }}" placeholder="预定邮箱（可选）" />
+          <button type="submit" class="secondary">保存预定</button>
+        </form>
         <form method="post" action="{{ url_for('update_rental_next_status', server_id=row.id) }}" class="rental-next-form rental-next-form-nowrap">
           <select name="next_rent_status">
             <option value="unknown" {% if row.next_rent_status == 'unknown' %}selected{% endif %}>未知</option>
