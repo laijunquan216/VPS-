@@ -53,8 +53,10 @@ PANEL_PORT = int(os.environ.get("PANEL_PORT", "5000"))
 PUBLIC_STOCK_PORT = int(os.environ.get("PUBLIC_STOCK_PORT", "5001"))
 PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").strip()
 TIMEZONE = ZoneInfo("Asia/Shanghai")
-DETAILED_LOG_ENABLED = str(os.environ.get("VPS_PANEL_DETAILED_LOG_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
-DETAILED_LOG_PATH = os.environ.get("VPS_PANEL_DETAILED_LOG_PATH", os.path.join(os.getcwd(), "panel_detailed.log"))
+DETAILED_LOG_ENABLED_DEFAULT = str(os.environ.get("VPS_PANEL_DETAILED_LOG_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+DETAILED_LOG_PATH_DEFAULT = os.environ.get("VPS_PANEL_DETAILED_LOG_PATH", os.path.join(os.getcwd(), "panel_detailed.log"))
+DETAILED_LOG_ENABLED = DETAILED_LOG_ENABLED_DEFAULT
+DETAILED_LOG_PATH = DETAILED_LOG_PATH_DEFAULT
 
 SSH_RECONNECT_TIMEOUT_SECONDS = int(os.environ.get("SSH_RECONNECT_TIMEOUT_SECONDS", "1800"))
 SSH_RETRY_INTERVAL_SECONDS = int(os.environ.get("SSH_RETRY_INTERVAL_SECONDS", "15"))
@@ -75,17 +77,42 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
 
 DETAILED_LOGGER = logging.getLogger("vps_panel_detailed")
-if DETAILED_LOG_ENABLED:
-    try:
-        os.makedirs(os.path.dirname(DETAILED_LOG_PATH) or ".", exist_ok=True)
-        _handler = RotatingFileHandler(DETAILED_LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
-        _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        DETAILED_LOGGER.addHandler(_handler)
+DETAILED_LOG_LOCK = threading.Lock()
+
+
+def configure_detailed_logging(enabled, log_path):
+    global DETAILED_LOG_ENABLED, DETAILED_LOG_PATH
+    clean_path = (log_path or "").strip() or DETAILED_LOG_PATH_DEFAULT
+    desired_enabled = bool(enabled)
+    with DETAILED_LOG_LOCK:
+        for handler in list(DETAILED_LOGGER.handlers):
+            DETAILED_LOGGER.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+        DETAILED_LOG_ENABLED = False
+        DETAILED_LOG_PATH = clean_path
         DETAILED_LOGGER.setLevel(logging.INFO)
         DETAILED_LOGGER.propagate = False
-        DETAILED_LOGGER.info("detailed logging enabled path=%s", DETAILED_LOG_PATH)
-    except Exception:
-        DETAILED_LOG_ENABLED = False
+        if not desired_enabled:
+            return True, ""
+        try:
+            os.makedirs(os.path.dirname(clean_path) or ".", exist_ok=True)
+            file_handler = RotatingFileHandler(clean_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+            file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            DETAILED_LOGGER.addHandler(file_handler)
+            DETAILED_LOG_ENABLED = True
+            DETAILED_LOGGER.info("detailed logging enabled path=%s", clean_path)
+            return True, ""
+        except Exception as exc:
+            DETAILED_LOGGER.handlers.clear()
+            DETAILED_LOG_ENABLED = False
+            return False, str(exc)
+
+
+configure_detailed_logging(DETAILED_LOG_ENABLED_DEFAULT, DETAILED_LOG_PATH_DEFAULT)
 
 
 def write_detailed_log(event, **fields):
@@ -207,6 +234,8 @@ def init_db():
                 backup_email_to TEXT NOT NULL DEFAULT '',
                 backup_interval_days INTEGER NOT NULL DEFAULT 7,
                 backup_last_sent_at TEXT,
+                detailed_log_enabled INTEGER NOT NULL DEFAULT 0,
+                detailed_log_path TEXT NOT NULL DEFAULT '',
                 data_zip_url TEXT NOT NULL DEFAULT '',
                 data_zip_enabled INTEGER NOT NULL DEFAULT 0,
                 data_zip_source TEXT NOT NULL DEFAULT 'original',
@@ -424,6 +453,8 @@ def init_db():
         ensure_column(conn, "global_config", "backup_email_to TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "backup_interval_days INTEGER NOT NULL DEFAULT 7")
         ensure_column(conn, "global_config", "backup_last_sent_at TEXT")
+        ensure_column(conn, "global_config", "detailed_log_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "global_config", "detailed_log_path TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "data_zip_url TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "data_zip_enabled INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "global_config", "data_zip_source TEXT NOT NULL DEFAULT 'original'")
@@ -447,6 +478,32 @@ def init_db():
             WHERE id = 1
             """
         )
+        conn.execute(
+            """
+            UPDATE global_config
+            SET detailed_log_enabled = CASE
+                    WHEN detailed_log_enabled NOT IN (0, 1) THEN ?
+                    ELSE detailed_log_enabled
+                END,
+                detailed_log_path = CASE
+                    WHEN TRIM(COALESCE(detailed_log_path, '')) = '' THEN ?
+                    ELSE detailed_log_path
+                END
+            WHERE id = 1
+            """,
+            (1 if DETAILED_LOG_ENABLED_DEFAULT else 0, DETAILED_LOG_PATH_DEFAULT),
+        )
+        cfg_row = conn.execute(
+            "SELECT detailed_log_enabled, detailed_log_path FROM global_config WHERE id = 1"
+        ).fetchone()
+        cfg_enabled = bool(int(cfg_row["detailed_log_enabled"] or 0)) if cfg_row else DETAILED_LOG_ENABLED_DEFAULT
+        cfg_path = (cfg_row["detailed_log_path"] or DETAILED_LOG_PATH_DEFAULT) if cfg_row else DETAILED_LOG_PATH_DEFAULT
+        ok, _ = configure_detailed_logging(cfg_enabled, cfg_path)
+        if not ok:
+            conn.execute(
+                "UPDATE global_config SET detailed_log_enabled = 0, updated_at = ? WHERE id = 1",
+                (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),),
+            )
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
             conn.execute(
@@ -1555,6 +1612,30 @@ def update_backup_email_config(enabled, backup_email_to, interval_days):
             ),
         )
         conn.commit()
+
+
+def update_detailed_log_config(enabled, log_path):
+    desired_enabled = int(bool(enabled))
+    desired_path = (log_path or "").strip() or DETAILED_LOG_PATH_DEFAULT
+    ok, err_msg = configure_detailed_logging(desired_enabled == 1, desired_path)
+    if not ok:
+        raise RuntimeError(err_msg or "日志文件初始化失败")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            UPDATE global_config
+            SET detailed_log_enabled=?, detailed_log_path=?, updated_at=?
+            WHERE id=1
+            """,
+            (
+                desired_enabled,
+                desired_path,
+                datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
+
+
 def update_global_config(reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, data_zip_enabled, data_zip_source, local_vt_data_path, local_setting_json_enabled, api_failure_notify_enabled, renew_notice_days):
     with closing(get_conn()) as conn:
         conn.execute(
@@ -1732,8 +1813,8 @@ def restore_backup_payload(payload):
 
         conn.execute(
             """
-            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, api_failure_notify_enabled, panel_password_hash, renew_notice_days, stock_page_title, public_stock_port, updated_at)
-            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO global_config(id, reset_command, ssh_command_2, ssh_command_3, agent_install_command, panel_base_url, notify_email_enabled, smtp_host, smtp_port, smtp_user, smtp_password, smtp_from, notify_email_to, traffic_sample_interval_minutes, backup_email_enabled, backup_email_to, backup_interval_days, backup_last_sent_at, detailed_log_enabled, detailed_log_path, data_zip_url, data_zip_enabled, data_zip_source, local_vt_data_path, local_vt_data_zip_url, local_setting_json_path, local_setting_json_enabled, api_failure_notify_enabled, panel_password_hash, renew_notice_days, stock_page_title, public_stock_port, updated_at)
+            VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 global_cfg.get("reset_command", ""),
@@ -1753,6 +1834,8 @@ def restore_backup_payload(payload):
                 global_cfg.get("backup_email_to", ""),
                 int(global_cfg.get("backup_interval_days", 7) or 7),
                 global_cfg.get("backup_last_sent_at"),
+                int(global_cfg.get("detailed_log_enabled", DETAILED_LOG_ENABLED_DEFAULT) or 0),
+                (global_cfg.get("detailed_log_path", DETAILED_LOG_PATH_DEFAULT) or DETAILED_LOG_PATH_DEFAULT).strip(),
                 global_cfg.get("data_zip_url", ""),
                 int(global_cfg.get("data_zip_enabled", 0) or 0),
                 global_cfg.get("data_zip_source", "original"),
@@ -1887,6 +1970,10 @@ def restore_backup_payload(payload):
                 ),
             )
         conn.commit()
+    configure_detailed_logging(
+        bool(int(global_cfg.get("detailed_log_enabled", 0) or 0)),
+        (global_cfg.get("detailed_log_path", DETAILED_LOG_PATH_DEFAULT) or DETAILED_LOG_PATH_DEFAULT).strip(),
+    )
 
 
 def save_log(server_id, status, summary, output):
@@ -4950,6 +5037,7 @@ def management_page():
         "management.html",
         title="面板管理",
         global_cfg=global_cfg,
+        detailed_log_path_default=DETAILED_LOG_PATH_DEFAULT,
         stock_title=stock_title,
         stock_url=stock_url,
         system_events=list_system_events(300),
@@ -4976,6 +5064,38 @@ def update_backup_email_settings():
     )
     flash("定期备份邮件配置已更新", "success")
     return redirect(url_for("management_page"))
+
+
+@app.route("/management/detailed-log", methods=["POST"])
+@login_required
+def update_detailed_log_settings():
+    form = request.form
+    enabled = 1 if form.get("detailed_log_enabled") == "on" else 0
+    log_path = form.get("detailed_log_path", "")
+    try:
+        update_detailed_log_config(enabled, log_path)
+        flash("详细日志配置已更新", "success")
+    except Exception as exc:
+        flash(f"详细日志配置保存失败: {exc}", "error")
+    return redirect(url_for("management_page"))
+
+
+@app.route("/management/detailed-log/download", methods=["GET"])
+@login_required
+def download_detailed_log():
+    cfg = get_global_config()
+    log_path = (cfg["detailed_log_path"] or DETAILED_LOG_PATH_DEFAULT).strip() if cfg else DETAILED_LOG_PATH_DEFAULT
+    if not os.path.isfile(log_path):
+        flash("日志文件不存在，请先启用并触发一些操作", "error")
+        return redirect(url_for("management_page"))
+    return send_file(
+        log_path,
+        as_attachment=True,
+        download_name=f"vps-panel-detailed-{datetime.now(TIMEZONE).strftime('%Y%m%d-%H%M%S')}.log",
+        mimetype="text/plain",
+    )
+
+
 @app.route("/management/public-stock", methods=["POST"])
 @login_required
 def update_public_stock_settings():
