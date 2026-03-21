@@ -1616,7 +1616,9 @@ def list_detail_rows():
                    s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
                    l.summary, l.status, l.created_at AS latest_run_at,
-                   q.status AS queue_status
+                   q.status AS queue_status,
+                   tq.status AS latest_task_status,
+                   tq.last_error AS latest_task_error
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
                 SELECT l2.id FROM job_logs l2
@@ -1629,6 +1631,12 @@ def list_detail_rows():
                 WHERE q2.server_id = s.id
                   AND q2.status IN ('queued','running','retrying')
                 ORDER BY q2.id DESC
+                LIMIT 1
+            )
+            LEFT JOIN task_queue tq ON tq.id = (
+                SELECT q3.id FROM task_queue q3
+                WHERE q3.server_id = s.id
+                ORDER BY q3.id DESC
                 LIMIT 1
             )
             ORDER BY s.sort_order ASC, s.id ASC
@@ -4469,8 +4477,13 @@ def details_page():
         item["traffic_total_text"] = format_bytes(upload + download)
         item["traffic_throttled"] = bool(item.get("traffic_throttled"))
         queue_status = str(item.get("queue_status") or "").strip().lower()
+        latest_task_status = str(item.get("latest_task_status") or "").strip().lower()
         if queue_status in {"queued", "running", "retrying"}:
             item["status"] = queue_status
+        elif str(item.get("status") or "").strip().lower() in {"queued", "running", "retrying"} and latest_task_status in {"success", "failed"}:
+            item["status"] = latest_task_status
+            if latest_task_status == "failed" and not str(item.get("summary") or "").strip():
+                item["summary"] = f"最近队列任务失败: {str(item.get('latest_task_error') or '').strip() or 'unknown'}"
         image_options = load_server_scp_images(item)
         for opt in image_options:
             distro = str(opt.get("distribution") or "").strip()
