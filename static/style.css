@@ -59,6 +59,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .renter-inline-form input[type="email"]{min-width:260px}
 .rental-notice-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin:10px 0 12px}
 .rental-notice-form label{display:flex;flex-direction:column;gap:6px;font-weight:600;color:#334155;min-width:320px}
+.rental-subtabs{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
+.rental-subtab{display:inline-block;padding:6px 12px;border-radius:999px;background:#e2e8f0;color:#1e293b;font-weight:700}
+.rental-subtab.active{background:#2563eb;color:#fff}
 .hidden{display:none !important}
 .rent-btn{font-weight:700}
 .rent-btn-on{background:#ef4444;color:#fff}

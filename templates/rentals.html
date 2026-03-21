@@ -7,7 +7,16 @@
     <h2>出租管理</h2>
   </div>
   <p class="hint">下月租户状态用于跟踪续租计划：选择“确认续租”会联动服务器详情为续租中；选择“未知/不续租”会联动为未续租。</p>
+  <div class="rental-subtabs">
+    <a href="{{ url_for('rentals_page', section='all') }}" class="rental-subtab {% if rental_section == 'all' %}active{% endif %}">全部</a>
+    <a href="{{ url_for('rentals_page', section='unknown') }}" class="rental-subtab {% if rental_section == 'unknown' %}active{% endif %}">未知</a>
+    <a href="{{ url_for('rentals_page', section='non_renew') }}" class="rental-subtab {% if rental_section == 'non_renew' %}active{% endif %}">不续租</a>
+    <a href="{{ url_for('rentals_page', section='confirmed') }}" class="rental-subtab {% if rental_section == 'confirmed' %}active{% endif %}">确认续租</a>
+    <a href="{{ url_for('rentals_page', section='reserved') }}" class="rental-subtab {% if rental_section == 'reserved' %}active{% endif %}">预定</a>
+    <a href="{{ url_for('rentals_page', section='settings') }}" class="rental-subtab {% if rental_section == 'settings' %}active{% endif %}">设置</a>
+  </div>
 
+  {% if rental_section == 'settings' %}
   <form method="post" action="{{ url_for('update_renew_notice_days') }}" class="rental-notice-form">
     <label>服务器重置前X天自动发送续费通知（逗号分隔，如 5,2）
       <input name="renew_notice_days" value="{{ global_cfg.renew_notice_days or '5,2' }}" placeholder="5,2" />
@@ -20,6 +29,7 @@
     </label>
     <button type="submit">保存发货延迟</button>
   </form>
+  {% else %}
 
   <div class="rental-table-header">
     <span>名称</span>
@@ -87,6 +97,7 @@
     <div class="panel">暂无服务器数据</div>
     {% endfor %}
   </div>
+  {% endif %}
 </section>
 <script>
   function openReserveDialog(serverId) {

@@ -4577,7 +4577,16 @@ def settings_page():
 def rentals_page():
     apply_monthly_rental_rollover_if_needed()
     global_cfg = get_global_config()
-    return render_template("rentals.html", rows=list_rental_management_rows(), global_cfg=global_cfg)
+    section = str(request.args.get("section") or "all").strip().lower()
+    allowed_sections = {"all", "unknown", "non_renew", "confirmed", "reserved", "settings"}
+    if section not in allowed_sections:
+        section = "all"
+
+    rows = list_rental_management_rows()
+    if section in {"unknown", "non_renew", "confirmed", "reserved"}:
+        rows = [item for item in rows if item.get("next_rent_status") == section]
+
+    return render_template("rentals.html", rows=rows, global_cfg=global_cfg, rental_section=section)
 
 
 
