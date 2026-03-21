@@ -803,7 +803,7 @@ def list_rental_management_rows():
         item["status_card_class"] = {
             "confirmed": "rental-card-confirmed",
             "non_renew": "rental-card-non-renew",
-            "reserved": "rental-card-reserved",
+            "reserved": "rental-card-confirmed",
         }.get(item["next_rent_status"], "rental-card-unknown")
         out.append(item)
     return out
@@ -1972,7 +1972,8 @@ def _build_public_inventory_server_rows(now_dt=None):
             in_stock.append(item)
             continue
 
-        if int(item.get("is_renewed") or 0) == 0 and not is_before_renew_until(item, now_dt):
+        has_reserved = bool(str(item.get("reserved_renter_name") or "").strip())
+        if int(item.get("is_renewed") or 0) == 0 and not is_before_renew_until(item, now_dt) and not has_reserved:
             start_dt = next_reset
             end_dt = build_effective_reset_datetime(item, start_dt + timedelta(minutes=1))
             item["book_window_text"] = f"可预订档期：{format_reset_datetime_text(start_dt)} ~ {format_reset_datetime_text(end_dt)}（北京时间）"
