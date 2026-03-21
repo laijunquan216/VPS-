@@ -14,6 +14,12 @@
     </label>
     <button type="submit">保存提醒设置</button>
   </form>
+  <form method="post" action="{{ url_for('update_auto_delivery_delay_hours') }}" class="rental-notice-form">
+    <label>自动发货延迟小时（重置成功后）
+      <input type="number" min="0" max="168" name="auto_delivery_delay_hours" value="{{ global_cfg.auto_delivery_delay_hours if global_cfg and global_cfg.auto_delivery_delay_hours is not none else 6 }}" placeholder="6" />
+    </label>
+    <button type="submit">保存发货延迟</button>
+  </form>
 
   <div class="rental-table-header">
     <span>名称</span>
@@ -38,17 +44,46 @@
             <option value="unknown" {% if row.next_rent_status == 'unknown' %}selected{% endif %}>未知</option>
             <option value="confirmed" {% if row.next_rent_status == 'confirmed' %}selected{% endif %}>确认续租</option>
             <option value="non_renew" {% if row.next_rent_status == 'non_renew' %}selected{% endif %}>不续租</option>
+            <option value="reserved" {% if row.next_rent_status == 'reserved' %}selected{% endif %}>预定</option>
           </select>
           <button type="submit">保存</button>
         </form>
         <form method="post" action="{{ url_for('send_manual_renew_notice_email', server_id=row.id) }}" class="rental-renew-mail-form">
           <button type="submit" class="secondary">续费邮件</button>
         </form>
+        <button type="button" class="secondary rental-reserve-open" onclick="openReserveDialog({{ row.id }})">
+          {{ '已预订' if row.reserved_renter_name else '预订' }}
+        </button>
       </div>
     </article>
+    <dialog id="reserveDialog{{ row.id }}" class="rental-reserve-dialog">
+      <form method="post" action="{{ url_for('update_rental_reservation', server_id=row.id) }}" class="rental-reserve-dialog-form">
+        <h3>{{ row.name }} - 预订信息</h3>
+        <label>预订人
+          <input name="reserved_renter_name" value="{{ row.reserved_renter_name or '' }}" placeholder="预订人" />
+        </label>
+        <label>预订邮箱（可选）
+          <input name="reserved_renter_email" value="{{ row.reserved_renter_email or '' }}" placeholder="name@example.com" />
+        </label>
+        <div class="rental-reserve-dialog-actions">
+          <button type="submit">保存</button>
+          <button type="button" class="secondary" onclick="closeReserveDialog({{ row.id }})">取消</button>
+        </div>
+      </form>
+    </dialog>
     {% else %}
     <div class="panel">暂无服务器数据</div>
     {% endfor %}
   </div>
 </section>
+<script>
+  function openReserveDialog(serverId) {
+    var dlg = document.getElementById('reserveDialog' + serverId);
+    if (dlg && typeof dlg.showModal === 'function') dlg.showModal();
+  }
+  function closeReserveDialog(serverId) {
+    var dlg = document.getElementById('reserveDialog' + serverId);
+    if (dlg && typeof dlg.close === 'function') dlg.close();
+  }
+</script>
 {% endblock %}
