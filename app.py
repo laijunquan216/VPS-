@@ -803,6 +803,7 @@ def list_rental_management_rows():
         item["status_card_class"] = {
             "confirmed": "rental-card-confirmed",
             "non_renew": "rental-card-non-renew",
+            "reserved": "rental-card-reserved",
         }.get(item["next_rent_status"], "rental-card-unknown")
         out.append(item)
     return out
@@ -3894,9 +3895,26 @@ def task_worker_loop():
                         (attempt_no, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
                     )
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
+                        cfg = get_global_config()
+                        auto_delay_hours = max(0, int((cfg.get("auto_delivery_delay_hours", 6) if cfg else 6) or 0))
+                        pending_delivery_at = (datetime.now(TIMEZONE) + timedelta(hours=auto_delay_hours)).strftime("%Y-%m-%d %H:%M:%S")
                         conn.execute(
-                            "UPDATE servers SET is_rented = 0, is_renewed = 0, renew_until_date = '', renter_name = '', renter_email = '', delivery_email_sent_at = NULL, renew_notice_sent_keys = '' WHERE id = ?",
-                            (row["id"],),
+                            """
+                            UPDATE servers
+                            SET is_rented = 0,
+                                is_renewed = 0,
+                                renew_until_date = '',
+                                last_month_tenant = CASE WHEN renter_name <> '' THEN renter_name ELSE last_month_tenant END,
+                                renter_name = '',
+                                renter_email = '',
+                                delivery_email_sent_at = NULL,
+                                renew_notice_sent_keys = '',
+                                next_rent_status = CASE WHEN reserved_renter_name <> '' THEN 'reserved' ELSE 'unknown' END,
+                                pending_delivery_done = CASE WHEN reserved_renter_name <> '' THEN 0 ELSE 1 END,
+                                pending_delivery_at = CASE WHEN reserved_renter_name <> '' THEN ? ELSE '' END
+                            WHERE id = ?
+                            """,
+                            (pending_delivery_at, row["id"]),
                         )
                     conn.commit()
                 if task["batch_key"]:
@@ -4202,7 +4220,7 @@ def run_scheduled_auto_delivery(now_dt=None):
                         ELSE renter_name
                     END,
                     renter_email = CASE
-                        WHEN trim(coalesce(renter_name, '')) = '' THEN reserved_renter_email
+                        WHEN trim(coalesce(renter_email, '')) = '' THEN reserved_renter_email
                         ELSE renter_email
                     END,
                     reserved_renter_name = '',
@@ -4559,6 +4577,27 @@ def update_renew_notice_days():
     flash(f"续费提醒天数已更新：{days_text}", "success")
     return redirect(url_for("rentals_page"))
 
+
+@app.post("/rentals/auto-delivery-delay")
+@login_required
+def update_auto_delivery_delay_hours():
+    raw_value = (request.form.get("auto_delivery_delay_hours") or "").strip()
+    if raw_value == "":
+        flash("自动发货延迟小时不能为空", "error")
+        return redirect(url_for("rentals_page"))
+    if not raw_value.isdigit():
+        flash("自动发货延迟小时必须是非负整数", "error")
+        return redirect(url_for("rentals_page"))
+    delay_hours = max(0, min(168, int(raw_value)))
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET auto_delivery_delay_hours = ?, updated_at = ? WHERE id = 1",
+            (delay_hours, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+    flash(f"自动发货延迟已更新为 {delay_hours} 小时", "success")
+    return redirect(url_for("rentals_page"))
+
 @app.post("/rentals/<int:server_id>/send-renew-email")
 @login_required
 def send_manual_renew_notice_email(server_id):
@@ -4594,9 +4633,15 @@ def send_manual_renew_notice_email(server_id):
 def update_rental_next_status(server_id):
     status = _normalize_next_rent_status(request.form.get("next_rent_status"))
     with closing(get_conn()) as conn:
-        row = conn.execute("SELECT id, name, renter_name FROM servers WHERE id = ?", (server_id,)).fetchone()
+        row = conn.execute(
+            "SELECT id, name, renter_name, reserved_renter_name FROM servers WHERE id = ?",
+            (server_id,),
+        ).fetchone()
         if not row:
             flash("服务器不存在", "error")
+            return redirect(url_for("rentals_page"))
+        if status == "reserved" and not str(row["reserved_renter_name"] or "").strip():
+            flash(f"[{row['name']}] 请先填写预定租户，再标记为预定", "error")
             return redirect(url_for("rentals_page"))
 
         is_renewed = 1 if status == "confirmed" else 0
@@ -4610,8 +4655,46 @@ def update_rental_next_status(server_id):
         flash(f"[{row['name']}] 下月租户已标记为确认续租，服务器详情已切换为已续租", "success")
     elif status == "non_renew":
         flash(f"[{row['name']}] 已标记不续租，服务器详情已切换为未续租", "success")
+    elif status == "reserved":
+        flash(f"[{row['name']}] 已标记为预定，下次重置后将按自动发货设置处理", "success")
     else:
         flash(f"[{row['name']}] 下月租户状态已设置为未知，服务器详情已切换为未续租", "success")
+    return redirect(url_for("rentals_page"))
+
+
+@app.post("/rentals/<int:server_id>/reserve")
+@login_required
+def update_rental_reservation(server_id):
+    reserved_name = (request.form.get("reserved_renter_name") or "").strip()
+    reserved_email = (request.form.get("reserved_renter_email") or "").strip()
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT id, name FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            flash("服务器不存在", "error")
+            return redirect(url_for("rentals_page"))
+        if not reserved_name and reserved_email:
+            flash(f"[{row['name']}] 仅填写了邮箱，请先填写预定租户名称", "error")
+            return redirect(url_for("rentals_page"))
+        conn.execute(
+            """
+            UPDATE servers
+            SET reserved_renter_name = ?,
+                reserved_renter_email = ?,
+                next_rent_status = CASE
+                    WHEN ? <> '' THEN 'reserved'
+                    WHEN next_rent_status = 'reserved' THEN 'unknown'
+                    ELSE next_rent_status
+                END,
+                pending_delivery_done = CASE WHEN ? <> '' THEN 0 ELSE pending_delivery_done END
+            WHERE id = ?
+            """,
+            (reserved_name, reserved_email, reserved_name, reserved_name, server_id),
+        )
+        conn.commit()
+    if reserved_name:
+        flash(f"[{row['name']}] 预定租户已保存：{reserved_name}", "success")
+    else:
+        flash(f"[{row['name']}] 已清空预定租户信息", "success")
     return redirect(url_for("rentals_page"))
 
 
