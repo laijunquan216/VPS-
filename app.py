@@ -118,7 +118,11 @@ def init_db():
                 rental_rollover_key TEXT NOT NULL DEFAULT '',
                 renter_name TEXT NOT NULL DEFAULT '',
                 renter_email TEXT NOT NULL DEFAULT '',
+                reserved_renter_name TEXT NOT NULL DEFAULT '',
+                reserved_renter_email TEXT NOT NULL DEFAULT '',
                 delivery_email_sent_at TEXT,
+                pending_delivery_at TEXT NOT NULL DEFAULT '',
+                pending_delivery_done INTEGER NOT NULL DEFAULT 0,
                 renew_notice_sent_keys TEXT NOT NULL DEFAULT '',
                 server_note TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
@@ -180,6 +184,7 @@ def init_db():
                 local_setting_json_path TEXT NOT NULL DEFAULT '',
                 local_setting_json_enabled INTEGER NOT NULL DEFAULT 0,
                 api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0,
+                auto_delivery_delay_hours INTEGER NOT NULL DEFAULT 6,
                 panel_password_hash TEXT,
                 renew_notice_days TEXT NOT NULL DEFAULT '5,2',
                 stock_page_title TEXT NOT NULL DEFAULT '库存展示',
@@ -331,7 +336,11 @@ def init_db():
         ensure_column(conn, "servers", "rental_rollover_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "renter_name TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "renter_email TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "reserved_renter_name TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "reserved_renter_email TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "delivery_email_sent_at TEXT")
+        ensure_column(conn, "servers", "pending_delivery_at TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "pending_delivery_done INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "renew_notice_sent_keys TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "server_note TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "server_group_id INTEGER")
@@ -390,6 +399,7 @@ def init_db():
         ensure_column(conn, "global_config", "local_setting_json_path TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "global_config", "local_setting_json_enabled INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "global_config", "api_failure_notify_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "global_config", "auto_delivery_delay_hours INTEGER NOT NULL DEFAULT 6")
         ensure_column(conn, "email_history", "body_text TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO global_config(id) VALUES (1)")
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
@@ -631,7 +641,7 @@ def get_server(server_id):
 
 def _normalize_next_rent_status(value):
     text = str(value or "unknown").strip().lower()
-    if text in {"confirmed", "unknown", "non_renew"}:
+    if text in {"confirmed", "unknown", "non_renew", "reserved"}:
         return text
     return "unknown"
 
@@ -666,6 +676,9 @@ def _compose_notice_key(target_reset_dt, days_before):
 
 
 def _format_next_month_tenant(row):
+    reserved_name = str(row["reserved_renter_name"] or "").strip() if isinstance(row, sqlite3.Row) else str((row or {}).get("reserved_renter_name") or "").strip()
+    if reserved_name:
+        return f"{reserved_name}（预定）"
     renter = str(row["renter_name"] or "").strip()
     status = _normalize_next_rent_status(row["next_rent_status"])
     if status == "unknown" and int(row["is_renewed"] or 0) == 1:
@@ -3991,6 +4004,30 @@ def compose_missing_renter_email_notice(row, reset_dt, days_left):
     return subject, body
 
 
+def compose_missing_renter_batch_notice(entries, now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    ts_text = now_dt.strftime("%Y-%m-%d %H:%M")
+    subject = f"[VPS面板] 续费提醒未发送（缺少租赁人邮箱）汇总 - {ts_text}"
+    lines = [
+        "以下服务器本应发送自动续费提醒，但因未填写租赁人邮箱而跳过。",
+        "请尽快联系客户确认是否续租。",
+        "",
+    ]
+    for idx, item in enumerate(entries, start=1):
+        lines.extend(
+            [
+                f"{idx}. 服务器名称：{item['server_name']}",
+                f"   刷新日：{item['reset_clock']}",
+                f"   本次预计重置时间：{item['reset_at']}（北京时间）",
+                f"   触发提醒档位：重置前{item['days_left']}天",
+                f"   租赁人：{item['renter_name']}",
+                "",
+            ]
+        )
+    lines.append("建议操作：尽快询问客户是否续租，并补充租赁人邮箱或将状态调整为不续租。")
+    return subject, "\n".join(lines)
+
+
 def run_scheduled_renew_notice_email(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
     cfg = get_global_config()
@@ -3999,6 +4036,8 @@ def run_scheduled_renew_notice_email(now_dt=None):
         return
 
     rows = list_servers()
+    missing_entries = []
+    missing_updates = []
     for row in rows:
         if not int(row["auto_reset"] or 0):
             continue
@@ -4030,28 +4069,19 @@ def run_scheduled_renew_notice_email(now_dt=None):
         if not recipient:
             if missing_recipient_key in sent_keys:
                 continue
-            subject, body = compose_missing_renter_email_notice(row, reset_dt, days_left)
-            ok = send_email_message(subject, body, category="renew_notice_missing_recipient")
-            if not ok:
-                log_system_event(
-                    "renew_notice",
-                    f"服务器[{row['name']}] 缺少租赁人邮箱，给管理员的提醒邮件发送失败",
-                    level="error",
-                    server_id=row["id"],
-                )
-                continue
-
-            sent_keys.add(missing_recipient_key)
-            sent_text = "|".join(sorted(sent_keys))
-            with closing(get_conn()) as conn:
-                conn.execute("UPDATE servers SET renew_notice_sent_keys = ? WHERE id = ?", (sent_text, row["id"]))
-                conn.commit()
-            log_system_event(
-                "renew_notice",
-                f"服务器[{row['name']}] 缺少租赁人邮箱，已通知管理员跟进续租",
-                level="warning",
-                server_id=row["id"],
+            reset_clock = f"每月{int(row['reset_day'] or 1)}日 {int(row['reset_hour'] or 1):02d}:{int(row['reset_minute'] or 0):02d}"
+            missing_entries.append(
+                {
+                    "server_id": row["id"],
+                    "server_name": row["name"],
+                    "reset_clock": reset_clock,
+                    "reset_at": reset_dt.strftime("%Y-%m-%d %H:%M"),
+                    "days_left": days_left,
+                    "renter_name": (row["renter_name"] or "").strip() or "未填写",
+                }
             )
+            sent_keys.add(missing_recipient_key)
+            missing_updates.append((row["id"], "|".join(sorted(sent_keys)), row["name"]))
             continue
 
         if notice_key in sent_keys:
@@ -4070,10 +4100,141 @@ def run_scheduled_renew_notice_email(now_dt=None):
             conn.commit()
         log_system_event("renew_notice", f"服务器[{row['name']}] 已发送重置前{days_left}天续费提醒邮件", server_id=row["id"], details=recipient)
 
+    if missing_entries:
+        subject, body = compose_missing_renter_batch_notice(missing_entries, now_dt)
+        ok = send_email_message(subject, body, category="renew_notice_missing_recipient")
+        if not ok:
+            joined_names = ",".join(item["server_name"] for item in missing_entries)
+            log_system_event(
+                "renew_notice",
+                f"缺少租赁人邮箱的汇总提醒发送失败: {joined_names}",
+                level="error",
+            )
+            return
+
+        with closing(get_conn()) as conn:
+            for server_id, sent_text, _ in missing_updates:
+                conn.execute("UPDATE servers SET renew_notice_sent_keys = ? WHERE id = ?", (sent_text, server_id))
+            conn.commit()
+        for server_id, _, server_name in missing_updates:
+            log_system_event(
+                "renew_notice",
+                f"服务器[{server_name}] 缺少租赁人邮箱，已纳入汇总邮件提醒管理员跟进续租",
+                level="warning",
+                server_id=server_id,
+            )
+
+
+def compose_auto_delivery_batch_notice(success_entries, fail_entries, now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    subject = f"[VPS面板] 自动发货结果汇总 - {now_dt.strftime('%Y-%m-%d %H:%M')}"
+    lines = ["以下为本批次自动发货结果：", ""]
+    if success_entries:
+        lines.append("[发货成功]")
+        for item in success_entries:
+            lines.append(f"- 服务器：{item['server_name']} | 预定租户：{item['reserved_name']} | 收件邮箱：{item['reserved_email']}")
+        lines.append("")
+    if fail_entries:
+        lines.append("[发货失败/未发货]")
+        for item in fail_entries:
+            lines.append(f"- 服务器：{item['server_name']} | 预定租户：{item['reserved_name']} | 原因：{item['reason']}")
+        lines.append("")
+    lines.append("请按失败清单手动跟进。")
+    return subject, "\n".join(lines)
+
+
+def run_scheduled_auto_delivery(now_dt=None):
+    now_dt = now_dt or datetime.now(TIMEZONE)
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM servers
+            WHERE pending_delivery_at <> ''
+              AND pending_delivery_done = 0
+              AND reserved_renter_name <> ''
+            ORDER BY sort_order ASC, id ASC
+            """
+        ).fetchall()
+
+    due_rows = []
+    for row in rows:
+        try:
+            due_dt = datetime.strptime(row["pending_delivery_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+        except Exception:
+            due_dt = now_dt
+        if due_dt <= now_dt:
+            due_rows.append(row)
+
+    if not due_rows:
+        return
+
+    success_entries = []
+    fail_entries = []
+    now_text = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    for row in due_rows:
+        reserved_name = (row["reserved_renter_name"] or "").strip() or "未填写"
+        reserved_email = (row["reserved_renter_email"] or "").strip()
+        latest_summary = ""
+        with closing(get_conn()) as conn:
+            latest_log = conn.execute(
+                "SELECT summary FROM job_logs WHERE server_id = ? ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            latest_summary = (latest_log["summary"] if latest_log else "") or "暂无输出详情"
+
+        ok = False
+        reason = ""
+        if not reserved_email:
+            reason = "未填写预定租户邮箱"
+        else:
+            ok = send_email_to_recipient(f"[服务器发货] {row['name']}", latest_summary, reserved_email, category="delivery_auto")
+            if not ok:
+                reason = "自动发货邮件发送失败"
+
+        with closing(get_conn()) as conn:
+            conn.execute(
+                """
+                UPDATE servers
+                SET last_month_tenant = CASE WHEN renter_name <> '' THEN renter_name ELSE last_month_tenant END,
+                    renter_name = CASE
+                        WHEN trim(coalesce(renter_name, '')) = '' THEN reserved_renter_name
+                        ELSE renter_name
+                    END,
+                    renter_email = CASE
+                        WHEN trim(coalesce(renter_name, '')) = '' THEN reserved_renter_email
+                        ELSE renter_email
+                    END,
+                    reserved_renter_name = '',
+                    reserved_renter_email = '',
+                    is_rented = 1,
+                    next_rent_status = 'unknown',
+                    delivery_email_sent_at = CASE WHEN ? THEN ? ELSE NULL END,
+                    pending_delivery_done = 1,
+                    pending_delivery_at = ''
+                WHERE id = ?
+                """,
+                (1 if ok else 0, now_text, row["id"]),
+            )
+            conn.commit()
+
+        if ok:
+            success_entries.append(
+                {"server_name": row["name"], "reserved_name": reserved_name, "reserved_email": reserved_email}
+            )
+        else:
+            fail_entries.append(
+                {"server_name": row["name"], "reserved_name": reserved_name, "reason": reason}
+            )
+
+    subject, body = compose_auto_delivery_batch_notice(success_entries, fail_entries, now_dt)
+    send_email_message(subject, body, category="delivery_auto_batch")
+
 
 def check_scheduled_jobs():
     now = datetime.now(TIMEZONE)
     run_scheduled_backup_email(now)
+    run_scheduled_auto_delivery(now)
     run_scheduled_renew_notice_email(now)
     batch_key = now.strftime("%Y-%m-%d %H:%M")
     scheduled_for = now.strftime("%Y-%m-%d %H:%M:%S")
