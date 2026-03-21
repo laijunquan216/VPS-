@@ -161,6 +161,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-card-confirmed{background:#c9f2dd;border-color:#74d69f}
 .rental-card-non-renew{background:#ffd9de;border-color:#f08aa0}
 .rental-card-unknown{background:#f7f0bf;border-color:#dfc347}
+.rental-card-reserved{background:#ffe8cc;border-color:#f6ad55}
 .rental-next-form-nowrap{flex-wrap:nowrap;align-items:center;justify-content:flex-start}
 .rental-next-form-nowrap select{min-width:120px}
 .rental-reserve-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:999}
@@ -178,6 +179,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
   .rental-col::before{content:attr(data-label) '：';color:#475569;font-weight:700;margin-right:6px}
   .rental-col-name::before{content:attr(data-label) '：';font-size:14px}
   .rental-col-name{font-size:20px}
+  .rental-reserve-form{flex-wrap:wrap}
 }
 
 
