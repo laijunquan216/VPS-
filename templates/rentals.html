@@ -14,6 +14,12 @@
     </label>
     <button type="submit">保存提醒设置</button>
   </form>
+  <form method="post" action="{{ url_for('update_auto_delivery_delay_hours') }}" class="rental-notice-form">
+    <label>自动发货延迟分钟（重置成功后）
+      <input type="number" min="0" max="10080" step="0.1" name="auto_delivery_delay_hours" value="{{ global_cfg.auto_delivery_delay_minutes if global_cfg and global_cfg.auto_delivery_delay_minutes is not none else ((global_cfg.auto_delivery_delay_hours if global_cfg and global_cfg.auto_delivery_delay_hours is not none else 6) * 60) }}" placeholder="30" />
+    </label>
+    <button type="submit">保存发货延迟</button>
+  </form>
 
   <div class="rental-table-header">
     <span>名称</span>
@@ -21,11 +27,15 @@
     <span>上月租户</span>
     <span>目前租户</span>
     <span>下月租户</span>
-    <span>操作</span>
+    <span class="rental-header-action">
+      操作
+      <button type="button" id="sortByRefreshBtn" class="secondary rental-sort-btn">按临近时间排序</button>
+    </span>
   </div>
 
   <div class="rental-cards rental-cards-stacked">
     {% for row in rows %}
+    <div class="rental-item" data-refresh-ts="{{ row.refresh_sort_ts }}" data-origin-index="{{ loop.index0 }}">
     <article class="rental-card rental-row {{ row.status_card_class }}">
       <div class="rental-col rental-col-name" data-label="名称">{{ row.name }}</div>
       <div class="rental-col" data-label="刷新日期">{{ row.refresh_day_text }}</div>
@@ -38,17 +48,84 @@
             <option value="unknown" {% if row.next_rent_status == 'unknown' %}selected{% endif %}>未知</option>
             <option value="confirmed" {% if row.next_rent_status == 'confirmed' %}selected{% endif %}>确认续租</option>
             <option value="non_renew" {% if row.next_rent_status == 'non_renew' %}selected{% endif %}>不续租</option>
+            <option value="reserved" {% if row.next_rent_status == 'reserved' %}selected{% endif %}>预定</option>
           </select>
           <button type="submit">保存</button>
         </form>
         <form method="post" action="{{ url_for('send_manual_renew_notice_email', server_id=row.id) }}" class="rental-renew-mail-form">
           <button type="submit" class="secondary">续费邮件</button>
         </form>
+        <button type="button" class="secondary rental-reserve-open" onclick="openReserveDialog({{ row.id }})">
+          {{ '已预订' if row.reserved_renter_name else '预订' }}
+        </button>
       </div>
     </article>
+    <div id="reserveDialog{{ row.id }}" class="rental-reserve-modal" hidden>
+      <div class="rental-reserve-modal-card">
+        <form method="post" action="{{ url_for('update_rental_reservation', server_id=row.id) }}" class="rental-reserve-dialog-form">
+          <h3>{{ row.name }} - 预订信息</h3>
+          <label>预订人
+            <input name="reserved_renter_name" value="{{ row.reserved_renter_name or '' }}" placeholder="预订人" />
+          </label>
+          <label>预订邮箱（可选）
+            <input name="reserved_renter_email" value="{{ row.reserved_renter_email or '' }}" placeholder="name@example.com" />
+          </label>
+          <div class="rental-reserve-dialog-actions">
+            <button type="submit">保存</button>
+            <button type="button" class="secondary" onclick="closeReserveDialog({{ row.id }})">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    </div>
     {% else %}
     <div class="panel">暂无服务器数据</div>
     {% endfor %}
   </div>
 </section>
+<script>
+  function openReserveDialog(serverId) {
+    var dlg = document.getElementById('reserveDialog' + serverId);
+    if (!dlg) return;
+    dlg.hidden = false;
+  }
+  function closeReserveDialog(serverId) {
+    var dlg = document.getElementById('reserveDialog' + serverId);
+    if (!dlg) return;
+    dlg.hidden = true;
+  }
+  document.addEventListener('click', function (event) {
+    if (!event.target.classList || !event.target.classList.contains('rental-reserve-modal')) return;
+    event.target.hidden = true;
+  });
+  document.querySelectorAll('.rental-col-action form[action*="/reserve"]').forEach(function (legacyForm) {
+    legacyForm.remove();
+  });
+  (function () {
+    var btn = document.getElementById('sortByRefreshBtn');
+    var container = document.querySelector('.rental-cards');
+    if (!btn || !container) return;
+    var sorted = false;
+    btn.addEventListener('click', function () {
+      var items = Array.from(container.querySelectorAll('.rental-item'));
+      if (!items.length) return;
+      if (!sorted) {
+        items.sort(function (a, b) {
+          var ta = Number(a.dataset.refreshTs || 0);
+          var tb = Number(b.dataset.refreshTs || 0);
+          if (ta !== tb) return ta - tb;
+          return Number(a.dataset.originIndex || 0) - Number(b.dataset.originIndex || 0);
+        });
+        btn.textContent = '恢复默认顺序';
+      } else {
+        items.sort(function (a, b) {
+          return Number(a.dataset.originIndex || 0) - Number(b.dataset.originIndex || 0);
+        });
+        btn.textContent = '按临近时间排序';
+      }
+      items.forEach(function (item) { container.appendChild(item); });
+      sorted = !sorted;
+    });
+  })();
+</script>
 {% endblock %}
