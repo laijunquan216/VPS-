@@ -98,5 +98,8 @@
     if (!event.target.classList || !event.target.classList.contains('rental-reserve-modal')) return;
     event.target.hidden = true;
   });
+  document.querySelectorAll('.rental-col-action form[action*="/reserve"]').forEach(function (legacyForm) {
+    legacyForm.remove();
+  });
 </script>
 {% endblock %}
