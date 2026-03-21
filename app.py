@@ -1615,12 +1615,20 @@ def list_detail_rows():
                    s.auto_reset, s.is_renewed, s.is_rented, s.renew_until_date, s.next_rent_status, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
-                   l.summary, l.status, l.created_at AS latest_run_at
+                   l.summary, l.status, l.created_at AS latest_run_at,
+                   q.status AS queue_status
             FROM servers s
             LEFT JOIN job_logs l ON l.id = (
                 SELECT l2.id FROM job_logs l2
                 WHERE l2.server_id = s.id
                 ORDER BY l2.id DESC
+                LIMIT 1
+            )
+            LEFT JOIN task_queue q ON q.id = (
+                SELECT q2.id FROM task_queue q2
+                WHERE q2.server_id = s.id
+                  AND q2.status IN ('queued','running','retrying')
+                ORDER BY q2.id DESC
                 LIMIT 1
             )
             ORDER BY s.sort_order ASC, s.id ASC
@@ -4460,6 +4468,9 @@ def details_page():
         item["traffic_download_text"] = format_bytes(download)
         item["traffic_total_text"] = format_bytes(upload + download)
         item["traffic_throttled"] = bool(item.get("traffic_throttled"))
+        queue_status = str(item.get("queue_status") or "").strip().lower()
+        if queue_status in {"queued", "running", "retrying"}:
+            item["status"] = queue_status
         image_options = load_server_scp_images(item)
         for opt in image_options:
             distro = str(opt.get("distribution") or "").strip()
