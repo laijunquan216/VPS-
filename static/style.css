@@ -59,8 +59,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .renter-inline-form input[type="email"]{min-width:260px}
 .rental-notice-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin:10px 0 12px}
 .rental-notice-form label{display:flex;flex-direction:column;gap:6px;font-weight:600;color:#334155;min-width:320px}
-.rental-subtabs{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
-.rental-subtab{display:inline-block;padding:6px 12px;border-radius:999px;background:#e2e8f0;color:#1e293b;font-weight:700}
+.rental-subtabs{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin:10px 0 14px}
+.rental-subtab{display:flex;align-items:center;justify-content:center;padding:12px 10px;border-radius:12px;background:#e2e8f0;color:#1e293b;font-weight:800}
 .rental-subtab.active{background:#2563eb;color:#fff}
 .hidden{display:none !important}
 .rent-btn{font-weight:700}
@@ -178,6 +178,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-reserve-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 
 @media (max-width: 1100px){
+  .rental-subtabs{grid-template-columns:repeat(3,minmax(0,1fr))}
   .rental-table-header{display:none}
   .rental-row{grid-template-columns:1fr;gap:6px}
   .rental-col{white-space:normal}
