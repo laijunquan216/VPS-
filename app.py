@@ -3603,14 +3603,15 @@ def has_pending_or_running(server_id):
     with closing(get_conn()) as conn:
         row = conn.execute(
             """
-            SELECT status FROM job_logs
+            SELECT status FROM task_queue
             WHERE server_id = ?
+              AND status IN ('queued', 'running', 'retrying')
             ORDER BY id DESC
             LIMIT 1
             """,
             (server_id,),
         ).fetchone()
-    return bool(row and row["status"] in ("queued", "running", "retrying"))
+    return bool(row)
 
 
 
@@ -3826,19 +3827,39 @@ def enqueue_task(server_row, log_id, trigger_type="manual", batch_key=""):
 def requeue_pending_tasks_on_startup():
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     with closing(get_conn()) as conn:
-        conn.execute(
-            "UPDATE task_queue SET status='queued', updated_at=? WHERE status IN ('queued','running','retrying')",
-            (now_text,),
-        )
-        rows = conn.execute("SELECT id FROM task_queue WHERE status='queued' ORDER BY id ASC").fetchall()
+        rows = conn.execute(
+            """
+            SELECT q.id, q.log_id, q.attempt, q.status, l.status AS log_status
+            FROM task_queue q
+            LEFT JOIN job_logs l ON l.id = q.log_id
+            WHERE q.status IN ('queued','running','retrying')
+            ORDER BY q.id ASC
+            """
+        ).fetchall()
+        queue_ids = []
+        for row in rows:
+            log_status = (row["log_status"] or "").strip().lower()
+            task_status = (row["status"] or "").strip().lower()
+            if task_status == "running" and log_status in {"success", "failed"}:
+                conn.execute(
+                    "UPDATE task_queue SET status = ?, attempt = CASE WHEN attempt > 0 THEN attempt ELSE 1 END, updated_at = ? WHERE id = ?",
+                    (log_status, now_text, row["id"]),
+                )
+                continue
+            conn.execute(
+                "UPDATE task_queue SET status='queued', updated_at=? WHERE id = ?",
+                (now_text, row["id"]),
+            )
+            queue_ids.append(row["id"])
         conn.commit()
-    for row in rows:
-        TASK_QUEUE.put(row["id"])
+    for task_id in queue_ids:
+        TASK_QUEUE.put(task_id)
 
 
 def task_worker_loop():
     while True:
         task_id = TASK_QUEUE.get()
+        task = None
         try:
             with closing(get_conn()) as conn:
                 task = conn.execute("SELECT * FROM task_queue WHERE id = ?", (task_id,)).fetchone()
@@ -3912,9 +3933,10 @@ def task_worker_loop():
                     )
                     if str(task["trigger_type"] or "").strip().lower() == "scheduled":
                         cfg = get_global_config()
-                        auto_delay_minutes = float((cfg.get("auto_delivery_delay_minutes", None) if cfg else None) or 0)
+                        auto_delay_minutes = float((cfg["auto_delivery_delay_minutes"] if (cfg and "auto_delivery_delay_minutes" in cfg.keys()) else 0) or 0)
                         if auto_delay_minutes <= 0:
-                            auto_delay_minutes = max(0, int((cfg.get("auto_delivery_delay_hours", 6) if cfg else 6) or 0)) * 60
+                            auto_delay_hours = int((cfg["auto_delivery_delay_hours"] if (cfg and "auto_delivery_delay_hours" in cfg.keys()) else 6) or 6)
+                            auto_delay_minutes = max(0, auto_delay_hours) * 60
                         pending_delivery_at = (datetime.now(TIMEZONE) + timedelta(minutes=auto_delay_minutes)).strftime("%Y-%m-%d %H:%M:%S")
                         conn.execute(
                             """
@@ -3984,6 +4006,30 @@ def task_worker_loop():
                 if task["batch_key"]:
                     upsert_notification_batch_item(task["batch_key"], row, "failed", note=fail_reason, log_id=task["log_id"])
                     maybe_send_batch_email(task["batch_key"])
+        except Exception as exc:
+            error_text = f"task worker exception: {exc}"
+            try:
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        """
+                        UPDATE task_queue
+                        SET status = 'failed',
+                            last_error = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                          AND status IN ('queued', 'running', 'retrying')
+                        """,
+                        (error_text[:400], datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
+                    )
+                    conn.commit()
+            except Exception:
+                pass
+            try:
+                if task and task["log_id"]:
+                    update_log(task["log_id"], "failed", "任务失败：队列执行异常", error_text)
+            except Exception:
+                pass
+            log_system_event("task_worker", f"任务队列异常: {exc}", level="error")
         finally:
             TASK_QUEUE.task_done()
 
