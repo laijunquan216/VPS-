@@ -61,21 +61,23 @@
         </button>
       </div>
     </article>
-    <dialog id="reserveDialog{{ row.id }}" class="rental-reserve-dialog">
-      <form method="post" action="{{ url_for('update_rental_reservation', server_id=row.id) }}" class="rental-reserve-dialog-form">
-        <h3>{{ row.name }} - 预订信息</h3>
-        <label>预订人
-          <input name="reserved_renter_name" value="{{ row.reserved_renter_name or '' }}" placeholder="预订人" />
-        </label>
-        <label>预订邮箱（可选）
-          <input name="reserved_renter_email" value="{{ row.reserved_renter_email or '' }}" placeholder="name@example.com" />
-        </label>
-        <div class="rental-reserve-dialog-actions">
-          <button type="submit">保存</button>
-          <button type="button" class="secondary" onclick="closeReserveDialog({{ row.id }})">取消</button>
-        </div>
-      </form>
-    </dialog>
+    <div id="reserveDialog{{ row.id }}" class="rental-reserve-modal" hidden>
+      <div class="rental-reserve-modal-card">
+        <form method="post" action="{{ url_for('update_rental_reservation', server_id=row.id) }}" class="rental-reserve-dialog-form">
+          <h3>{{ row.name }} - 预订信息</h3>
+          <label>预订人
+            <input name="reserved_renter_name" value="{{ row.reserved_renter_name or '' }}" placeholder="预订人" />
+          </label>
+          <label>预订邮箱（可选）
+            <input name="reserved_renter_email" value="{{ row.reserved_renter_email or '' }}" placeholder="name@example.com" />
+          </label>
+          <div class="rental-reserve-dialog-actions">
+            <button type="submit">保存</button>
+            <button type="button" class="secondary" onclick="closeReserveDialog({{ row.id }})">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
     {% else %}
     <div class="panel">暂无服务器数据</div>
     {% endfor %}
@@ -84,11 +86,17 @@
 <script>
   function openReserveDialog(serverId) {
     var dlg = document.getElementById('reserveDialog' + serverId);
-    if (dlg && typeof dlg.showModal === 'function') dlg.showModal();
+    if (!dlg) return;
+    dlg.hidden = false;
   }
   function closeReserveDialog(serverId) {
     var dlg = document.getElementById('reserveDialog' + serverId);
-    if (dlg && typeof dlg.close === 'function') dlg.close();
+    if (!dlg) return;
+    dlg.hidden = true;
   }
+  document.addEventListener('click', function (event) {
+    if (!event.target.classList || !event.target.classList.contains('rental-reserve-modal')) return;
+    event.target.hidden = true;
+  });
 </script>
 {% endblock %}

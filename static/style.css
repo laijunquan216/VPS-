@@ -148,7 +148,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-next-form select{min-width:120px}
 .rental-cards{display:flex;flex-direction:column;gap:10px}
 .rental-cards-stacked{margin-top:10px}
-.rental-table-header,.rental-row{display:grid;grid-template-columns:1.2fr .55fr .85fr .95fr 1fr 1.6fr;align-items:center;gap:8px}
+.rental-table-header,.rental-row{display:grid;grid-template-columns:minmax(180px,1.2fr) 110px minmax(130px,.9fr) minmax(130px,.95fr) minmax(130px,1fr) minmax(360px,1.6fr);align-items:center;gap:8px}
 .rental-table-header{font-weight:800;color:#1f2937;padding:8px 12px;border-bottom:1px solid #cbd5e1}
 .rental-card{border:1px solid #d1d5db;border-radius:10px;padding:10px 12px}
 .rental-row{min-height:64px}
@@ -165,8 +165,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-card-reserved{background:#ffe8cc;border-color:#f6ad55}
 .rental-next-form-nowrap{flex-wrap:nowrap;align-items:center;justify-content:flex-start}
 .rental-next-form-nowrap select{min-width:120px}
-.rental-reserve-dialog{border:none;border-radius:12px;padding:0;max-width:420px;width:92%}
-.rental-reserve-dialog::backdrop{background:rgba(15,23,42,.45)}
+.rental-reserve-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:999}
+.rental-reserve-modal[hidden]{display:none !important}
+.rental-reserve-modal-card{background:#fff;border-radius:12px;max-width:420px;width:92%}
 .rental-reserve-dialog-form{display:flex;flex-direction:column;gap:10px;padding:16px}
 .rental-reserve-dialog-form h3{margin:0 0 4px}
 .rental-reserve-dialog-form label{display:flex;flex-direction:column;gap:6px}
