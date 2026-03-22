@@ -4509,6 +4509,26 @@ def run_scheduled_auto_delivery(now_dt=None):
 
     for batch_key in touched_batch_keys:
         with closing(get_conn()) as conn:
+            reset_batch_items = conn.execute(
+                "SELECT status FROM notification_batch_items WHERE batch_key = ?",
+                (batch_key,),
+            ).fetchall()
+            if reset_batch_items and any(
+                str(item["status"] or "").strip().lower() in {"pending", "queued", "running", "retrying"}
+                for item in reset_batch_items
+            ):
+                write_detailed_log(
+                    "auto_delivery.batch.waiting_reset_tasks",
+                    batch_key=batch_key,
+                    waiting_count=len(
+                        [
+                            item
+                            for item in reset_batch_items
+                            if str(item["status"] or "").strip().lower() in {"pending", "queued", "running", "retrying"}
+                        ]
+                    ),
+                )
+                continue
             pending_count = conn.execute(
                 "SELECT COUNT(1) FROM servers WHERE pending_delivery_done = 0 AND pending_delivery_batch_key = ?",
                 (batch_key,),
