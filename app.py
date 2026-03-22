@@ -4285,10 +4285,12 @@ def run_scheduled_renew_notice_email(now_dt=None):
             continue
 
         recipient = (row["renter_email"] or "").strip()
-        if _normalize_next_rent_status(row["next_rent_status"]) == "non_renew":
+        status = _normalize_next_rent_status(row["next_rent_status"])
+        if status in {"non_renew", "reserved"}:
+            status_text = "不续租" if status == "non_renew" else "预定"
             log_system_event(
                 "renew_notice",
-                f"服务器[{row['name']}] 已标记不续租，跳过重置前{days_left}天续费提醒",
+                f"服务器[{row['name']}] 已标记{status_text}，跳过重置前{days_left}天续费提醒",
                 server_id=row["id"],
                 details=recipient,
             )
