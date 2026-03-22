@@ -180,6 +180,7 @@ def init_db():
                 delivery_email_sent_at TEXT,
                 pending_delivery_at TEXT NOT NULL DEFAULT '',
                 pending_delivery_done INTEGER NOT NULL DEFAULT 0,
+                pending_delivery_batch_key TEXT NOT NULL DEFAULT '',
                 last_scheduled_trigger_key TEXT NOT NULL DEFAULT '',
                 renew_notice_sent_keys TEXT NOT NULL DEFAULT '',
                 server_note TEXT NOT NULL DEFAULT '',
@@ -332,6 +333,23 @@ def init_db():
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS auto_delivery_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_key TEXT NOT NULL,
+                server_id INTEGER NOT NULL,
+                server_name TEXT NOT NULL,
+                recipient_name TEXT NOT NULL DEFAULT '',
+                recipient_email TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                processed_at TEXT NOT NULL,
+                summary_notified INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(batch_key, server_id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS api_image_refresh_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT NOT NULL DEFAULT 'running',
@@ -402,6 +420,7 @@ def init_db():
         ensure_column(conn, "servers", "delivery_email_sent_at TEXT")
         ensure_column(conn, "servers", "pending_delivery_at TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "pending_delivery_done INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "pending_delivery_batch_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "last_scheduled_trigger_key TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "renew_notice_sent_keys TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "server_note TEXT NOT NULL DEFAULT ''")
@@ -1855,8 +1874,8 @@ def restore_backup_payload(payload):
         for server in servers:
             conn.execute(
                 """
-                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, renter_email, delivery_email_sent_at, renew_notice_sent_keys, server_note, server_group_id, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO servers(id, name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renew_until_date, next_rent_status, last_month_tenant, rental_rollover_key, renter_name, renter_email, delivery_email_sent_at, pending_delivery_at, pending_delivery_done, pending_delivery_batch_key, renew_notice_sent_keys, server_note, server_group_id, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at, last_reset_at, ssh_status, ssh_checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     server.get("id"),
@@ -1878,6 +1897,9 @@ def restore_backup_payload(payload):
                     (server.get("renter_name", "") or "").strip(),
                     (server.get("renter_email", "") or "").strip(),
                     server.get("delivery_email_sent_at"),
+                    (server.get("pending_delivery_at", "") or "").strip(),
+                    int(server.get("pending_delivery_done", 0) or 0),
+                    (server.get("pending_delivery_batch_key", "") or "").strip(),
                     (server.get("renew_notice_sent_keys", "") or "").strip(),
                     (server.get("server_note", "") or "").strip(),
                     server.get("server_group_id"),
@@ -3502,6 +3524,25 @@ def maybe_send_batch_email(batch_key):
     failed_count = len([st for st in statuses if st == "failed"])
     skipped_count = len([st for st in statuses if st == "skipped"])
     total_count = len(statuses)
+    duplicate_window_skip_only = (
+        total_count > 0
+        and success_count == 0
+        and failed_count == 0
+        and all(
+            item["status"] == "skipped"
+            and "命中重置容忍窗口，但该时间点任务已触发过" in str(item["note"] or "")
+            for item in items
+        )
+    )
+    if duplicate_window_skip_only:
+        write_detailed_log("scheduler.reset.batch_email.suppressed", batch_key=batch_key, reason="duplicate_window_skip_only")
+        with closing(get_conn()) as conn:
+            conn.execute(
+                "UPDATE notification_batches SET notified = 1, updated_at = ? WHERE batch_key = ?",
+                (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), batch_key),
+            )
+            conn.commit()
+        return
 
     lines = [
         f"批次: {batch_key}",
@@ -4087,20 +4128,23 @@ def task_worker_loop():
                         conn.execute(
                             """
                             UPDATE servers
-                            SET is_rented = 0,
-                                is_renewed = 0,
+                            SET is_renewed = 0,
                                 renew_until_date = '',
                                 last_month_tenant = CASE WHEN renter_name <> '' THEN renter_name ELSE last_month_tenant END,
-                                renter_name = '',
-                                renter_email = '',
+                                renter_name = CASE WHEN reserved_renter_name <> '' THEN reserved_renter_name ELSE '' END,
+                                renter_email = CASE WHEN reserved_renter_name <> '' THEN reserved_renter_email ELSE '' END,
+                                reserved_renter_name = '',
+                                reserved_renter_email = '',
+                                is_rented = CASE WHEN reserved_renter_name <> '' THEN 1 ELSE 0 END,
                                 delivery_email_sent_at = NULL,
                                 renew_notice_sent_keys = '',
-                                next_rent_status = CASE WHEN reserved_renter_name <> '' THEN 'reserved' ELSE 'unknown' END,
+                                next_rent_status = 'unknown',
                                 pending_delivery_done = CASE WHEN reserved_renter_name <> '' THEN 0 ELSE 1 END,
-                                pending_delivery_at = CASE WHEN reserved_renter_name <> '' THEN ? ELSE '' END
+                                pending_delivery_at = CASE WHEN reserved_renter_name <> '' THEN ? ELSE '' END,
+                                pending_delivery_batch_key = CASE WHEN reserved_renter_name <> '' THEN ? ELSE '' END
                             WHERE id = ?
                             """,
-                            (pending_delivery_at, row["id"]),
+                            (pending_delivery_at, task["batch_key"] or "", row["id"]),
                         )
                     conn.commit()
                 write_detailed_log("task_worker.success", task_id=task_id, server_id=task["server_id"], attempt=attempt_no)
@@ -4366,12 +4410,12 @@ def compose_auto_delivery_batch_notice(success_entries, fail_entries, now_dt=Non
     if success_entries:
         lines.append("[发货成功]")
         for item in success_entries:
-            lines.append(f"- 服务器：{item['server_name']} | 预定租户：{item['reserved_name']} | 收件邮箱：{item['reserved_email']}")
+            lines.append(f"- 服务器：{item['server_name']} | 租户：{item['recipient_name']} | 收件邮箱：{item['recipient_email']}")
         lines.append("")
     if fail_entries:
         lines.append("[发货失败/未发货]")
         for item in fail_entries:
-            lines.append(f"- 服务器：{item['server_name']} | 预定租户：{item['reserved_name']} | 原因：{item['reason']}")
+            lines.append(f"- 服务器：{item['server_name']} | 租户：{item['recipient_name']} | 原因：{item['reason']}")
         lines.append("")
     lines.append("请按失败清单手动跟进。")
     return subject, "\n".join(lines)
@@ -4385,7 +4429,6 @@ def run_scheduled_auto_delivery(now_dt=None):
             SELECT * FROM servers
             WHERE pending_delivery_at <> ''
               AND pending_delivery_done = 0
-              AND reserved_renter_name <> ''
             ORDER BY sort_order ASC, id ASC
             """
         ).fetchall()
@@ -4402,13 +4445,14 @@ def run_scheduled_auto_delivery(now_dt=None):
     if not due_rows:
         return
 
-    success_entries = []
-    fail_entries = []
     now_text = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    touched_batch_keys = set()
 
     for row in due_rows:
-        reserved_name = (row["reserved_renter_name"] or "").strip() or "未填写"
-        reserved_email = (row["reserved_renter_email"] or "").strip()
+        recipient_name = (row["renter_name"] or "").strip() or "未填写"
+        recipient_email = (row["renter_email"] or "").strip()
+        batch_key = (row["pending_delivery_batch_key"] or "").strip() or f"{int(row['reset_day'] or 1):02d}-{int(row['reset_hour'] or 1):02d}:{int(row['reset_minute'] or 0):02d}"
+        touched_batch_keys.add(batch_key)
         latest_summary = ""
         with closing(get_conn()) as conn:
             latest_log = conn.execute(
@@ -4419,10 +4463,10 @@ def run_scheduled_auto_delivery(now_dt=None):
 
         ok = False
         reason = ""
-        if not reserved_email:
-            reason = "未填写预定租户邮箱"
+        if not recipient_email:
+            reason = "未填写当前租户邮箱"
         else:
-            ok = send_email_to_recipient(f"[服务器发货] {row['name']}", latest_summary, reserved_email, category="delivery_auto")
+            ok = send_email_to_recipient(f"[服务器发货] {row['name']}", latest_summary, recipient_email, category="delivery_auto")
             if not ok:
                 reason = "自动发货邮件发送失败"
 
@@ -4430,39 +4474,74 @@ def run_scheduled_auto_delivery(now_dt=None):
             conn.execute(
                 """
                 UPDATE servers
-                SET last_month_tenant = CASE WHEN renter_name <> '' THEN renter_name ELSE last_month_tenant END,
-                    renter_name = CASE
-                        WHEN trim(coalesce(renter_name, '')) = '' THEN reserved_renter_name
-                        ELSE renter_name
-                    END,
-                    renter_email = CASE
-                        WHEN trim(coalesce(renter_email, '')) = '' THEN reserved_renter_email
-                        ELSE renter_email
-                    END,
-                    reserved_renter_name = '',
-                    reserved_renter_email = '',
-                    is_rented = 1,
-                    next_rent_status = 'unknown',
-                    delivery_email_sent_at = CASE WHEN ? THEN ? ELSE NULL END,
+                SET delivery_email_sent_at = CASE WHEN ? THEN ? ELSE NULL END,
                     pending_delivery_done = 1,
-                    pending_delivery_at = ''
+                    pending_delivery_at = '',
+                    pending_delivery_batch_key = ''
                 WHERE id = ?
                 """,
                 (1 if ok else 0, now_text, row["id"]),
             )
+            conn.execute(
+                """
+                INSERT INTO auto_delivery_results(batch_key, server_id, server_name, recipient_name, recipient_email, status, reason, processed_at, summary_notified)
+                VALUES(?,?,?,?,?,?,?,?,0)
+                ON CONFLICT(batch_key, server_id) DO UPDATE SET
+                    server_name=excluded.server_name,
+                    recipient_name=excluded.recipient_name,
+                    recipient_email=excluded.recipient_email,
+                    status=excluded.status,
+                    reason=excluded.reason,
+                    processed_at=excluded.processed_at
+                """,
+                (
+                    batch_key,
+                    row["id"],
+                    row["name"],
+                    recipient_name,
+                    recipient_email,
+                    "success" if ok else "failed",
+                    reason,
+                    now_text,
+                ),
+            )
             conn.commit()
 
-        if ok:
-            success_entries.append(
-                {"server_name": row["name"], "reserved_name": reserved_name, "reserved_email": reserved_email}
-            )
-        else:
-            fail_entries.append(
-                {"server_name": row["name"], "reserved_name": reserved_name, "reason": reason}
-            )
+    for batch_key in touched_batch_keys:
+        with closing(get_conn()) as conn:
+            pending_count = conn.execute(
+                "SELECT COUNT(1) FROM servers WHERE pending_delivery_done = 0 AND pending_delivery_batch_key = ?",
+                (batch_key,),
+            ).fetchone()[0]
+            if int(pending_count or 0) > 0:
+                continue
+            results = conn.execute(
+                "SELECT * FROM auto_delivery_results WHERE batch_key = ? ORDER BY server_id ASC",
+                (batch_key,),
+            ).fetchall()
+            if not results:
+                continue
+            if all(int(item["summary_notified"] or 0) == 1 for item in results):
+                continue
 
-    subject, body = compose_auto_delivery_batch_notice(success_entries, fail_entries, now_dt)
-    send_email_message(subject, body, category="delivery_auto_batch")
+        success_entries = []
+        fail_entries = []
+        for item in results:
+            if item["status"] == "success":
+                success_entries.append(
+                    {"server_name": item["server_name"], "recipient_name": item["recipient_name"], "recipient_email": item["recipient_email"]}
+                )
+            else:
+                fail_entries.append(
+                    {"server_name": item["server_name"], "recipient_name": item["recipient_name"], "reason": item["reason"] or "未知错误"}
+                )
+
+        subject, body = compose_auto_delivery_batch_notice(success_entries, fail_entries, now_dt)
+        sent = send_email_message(subject, body, category="delivery_auto_batch")
+        if sent:
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE auto_delivery_results SET summary_notified = 1 WHERE batch_key = ?", (batch_key,))
+                conn.commit()
 
 
 def check_lightweight_scheduled_jobs(now_dt=None):
