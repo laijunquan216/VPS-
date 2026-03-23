@@ -2153,7 +2153,7 @@ def _build_public_inventory_server_rows(now_dt=None):
             continue
 
         has_reserved = bool(str(item.get("reserved_renter_name") or "").strip())
-        if int(item.get("is_renewed") or 0) == 0 and not is_before_renew_until(item, now_dt) and not has_reserved:
+        if int(item.get("is_renewed") or 0) == 0 and not has_reserved:
             start_dt = next_reset
             end_dt = build_effective_reset_datetime(item, start_dt + timedelta(minutes=1))
             item["book_window_text"] = f"可预订档期：{format_reset_datetime_text(start_dt)} ~ {format_reset_datetime_text(end_dt)}（北京时间）"
@@ -4630,10 +4630,6 @@ def check_scheduled_reset_jobs(now_dt=None):
                 conn.commit()
             upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置；已自动切换为未续租")
             log_system_event("scheduled_reset", f"服务器[{row['name']}] 因续租状态跳过定时重置", server_id=row["id"])
-            continue
-
-        if not should_reset(row):
-            upsert_notification_batch_item(batch_key, row, "skipped", note="未开启定时自动执行或不在预定时间")
             continue
 
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
