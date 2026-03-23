@@ -4828,6 +4828,13 @@ def traffic_page():
         else:
             item["generated_at"] = ""
             item["metrics_error"] = "暂无缓存数据，请点击上方“手动更新数据”"
+        upload_bytes = int(item.get("period_upload_bytes") or 0)
+        download_bytes = int(item.get("period_download_bytes") or 0)
+        item["period_upload_text"] = format_bytes(upload_bytes)
+        item["period_download_text"] = format_bytes(download_bytes)
+        item["period_total_text"] = format_bytes(upload_bytes + download_bytes)
+        item["renter_display_name"] = (item.get("renter_name") or "").strip() or "未填写"
+        item["reset_clock_text"] = f"每月{int(item.get('reset_day') or 1)}日 {int(item.get('reset_hour') or 1):02d}:{int(item.get('reset_minute') or 0):02d}"
 
         windows = item["windows"]
         if windows:

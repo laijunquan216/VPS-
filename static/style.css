@@ -132,6 +132,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .traffic-summary-grid article{border:1px solid #e2e8f0;border-radius:10px;padding:10px;background:#f8fafc}
 .traffic-summary-grid h4{margin:0 0 8px 0;font-size:14px}
 .traffic-total{font-size:18px;font-weight:800;margin:0 0 4px 0}
+.traffic-page-guide{margin-top:8px}
+.traffic-meta-line{display:flex;flex-wrap:wrap;gap:8px 14px;margin:8px 0 10px;font-size:14px;color:#1e293b}
+.traffic-meta-line span{display:inline-block;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;border-radius:999px;padding:3px 10px}
 .table-wrap{overflow:auto}
 .traffic-table th,.traffic-table td{white-space:nowrap}
 .traffic-chart-block{margin:10px 0}
