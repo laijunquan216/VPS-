@@ -4671,6 +4671,9 @@ def require_login():
     public_endpoints = {"login_page", "login_submit", "static", "uploaded_data_file"}
     if request.endpoint in public_endpoints:
         return None
+    if request.endpoint is None:
+        # Let Flask return 404/405 for unknown routes/methods instead of forcing a login redirect.
+        return None
     if not session.get("logged_in"):
         return redirect(url_for("login_page"))
     return None
