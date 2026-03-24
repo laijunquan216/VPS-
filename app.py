@@ -3524,26 +3524,6 @@ def maybe_send_batch_email(batch_key):
     failed_count = len([st for st in statuses if st == "failed"])
     skipped_count = len([st for st in statuses if st == "skipped"])
     total_count = len(statuses)
-    duplicate_window_skip_only = (
-        total_count > 0
-        and success_count == 0
-        and failed_count == 0
-        and all(
-            item["status"] == "skipped"
-            and "命中重置容忍窗口，但该时间点任务已触发过" in str(item["note"] or "")
-            for item in items
-        )
-    )
-    if duplicate_window_skip_only:
-        write_detailed_log("scheduler.reset.batch_email.suppressed", batch_key=batch_key, reason="duplicate_window_skip_only")
-        with closing(get_conn()) as conn:
-            conn.execute(
-                "UPDATE notification_batches SET notified = 1, updated_at = ? WHERE batch_key = ?",
-                (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), batch_key),
-            )
-            conn.commit()
-        return
-
     lines = [
         f"批次: {batch_key}",
         f"总计: {total_count}",
@@ -4600,25 +4580,26 @@ def check_scheduled_reset_jobs(now_dt=None):
         log_system_event("long_renew", f"服务器[{sname}] 已到续费日前一月，自动切换为未续租", server_id=sid)
 
     due_rows = []
+    current_slot = now.strftime("%Y-%m-%d %H:%M")
     for row in rows:
         if not row["auto_reset"]:
             continue
         target_dt = build_current_month_reset_datetime(row, now)
-        delta_minutes = (now - target_dt).total_seconds() / 60.0
-        if 0 <= delta_minutes <= SCHEDULED_RESET_GRACE_MINUTES:
+        if target_dt.strftime("%Y-%m-%d %H:%M") == current_slot:
             due_rows.append((row, target_dt))
     if not due_rows:
         write_detailed_log("scheduler.reset.no_due", now=now.strftime("%Y-%m-%d %H:%M:%S"))
         return
 
     write_detailed_log("scheduler.reset.due", now=now.strftime("%Y-%m-%d %H:%M:%S"), due_count=len(due_rows))
+    with closing(get_conn()) as conn:
+        existing_batch = conn.execute("SELECT id FROM notification_batches WHERE batch_key = ?", (batch_key,)).fetchone()
+    if existing_batch:
+        write_detailed_log("scheduler.reset.batch_already_processed", batch_key=batch_key)
+        return
     ensure_notification_batch(batch_key, scheduled_for)
 
     for row, target_dt in due_rows:
-        slot_key = f"{target_dt.strftime('%Y-%m-%d %H:%M')}#{row['id']}"
-        if str(row["last_scheduled_trigger_key"] or "").strip() == slot_key:
-            upsert_notification_batch_item(batch_key, row, "skipped", note="命中重置容忍窗口，但该时间点任务已触发过")
-            continue
         if is_before_renew_until(row, now):
             upsert_notification_batch_item(batch_key, row, "skipped", note=f"长期续费保护中（续费至{row['renew_until_date']}），已跳过定时重置")
             log_system_event("scheduled_reset", f"服务器[{row['name']}] 因长期续费保护跳过定时重置", server_id=row["id"], details=row["renew_until_date"])
