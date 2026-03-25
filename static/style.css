@@ -34,6 +34,12 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .server-column h3{margin:4px 0 10px}
 .server-list{display:grid;gap:14px;min-width:0}
 .server-column{min-width:0}
+.details-layout{position:relative;padding-right:0}
+.details-floating-nav{position:fixed;right:8px;top:130px;width:150px;max-height:68vh;overflow:auto;background:#fff;border:1px solid #dbe4f0;border-radius:12px;padding:8px;box-shadow:0 8px 24px rgba(15,23,42,.08);z-index:20}
+.details-floating-nav h4{margin:0 0 8px 0;font-size:14px;color:#334155}
+.details-floating-nav-list{display:flex;flex-direction:column;gap:6px}
+.details-floating-nav a{display:block;padding:5px 7px;border-radius:8px;background:#f8fafc;color:#1e293b;text-decoration:none;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.details-floating-nav a.active{background:#2563eb;color:#fff}
 .server-card{border:1px solid #e5e7eb;border-radius:14px;padding:14px;width:100%;min-width:0}
 .server-card.not-rented{background:#f0fdf4;border-color:#bbf7d0}
 .server-card.rented{background:#fff1f2;border-color:#fecdd3}
@@ -59,6 +65,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .renter-inline-form input[type="email"]{min-width:260px}
 .rental-notice-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin:10px 0 12px}
 .rental-notice-form label{display:flex;flex-direction:column;gap:6px;font-weight:600;color:#334155;min-width:320px}
+.rental-subtabs{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin:10px 0 14px}
+.rental-subtab{display:flex;align-items:center;justify-content:center;padding:12px 10px;border-radius:12px;background:#e2e8f0;color:#1e293b;font-weight:800}
+.rental-subtab.active{background:#2563eb;color:#fff}
 .hidden{display:none !important}
 .rent-btn{font-weight:700}
 .rent-btn-on{background:#ef4444;color:#fff}
@@ -86,6 +95,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 @media (max-width:1000px){
   .stats-grid{grid-template-columns:1fr 1fr}
   .brand{font-size:28px}
+  .details-layout{padding-right:0}
+  .details-floating-nav{display:none}
 }
 @media (max-width:680px){
   .topbar{padding:12px;align-items:flex-start}
@@ -101,6 +112,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
   .stat-card h3{font-size:34px}
   .server-meta{grid-template-columns:1fr}
   .server-columns{grid-template-columns:1fr}
+  .details-layout{padding-right:0}
+  .details-floating-nav{display:none}
   .server-actions{display:grid;grid-template-columns:1fr}
   .server-actions form,.server-actions .copy-btn{width:100%}
   .dd-form{display:grid;grid-template-columns:1fr;gap:8px}
@@ -129,6 +142,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .traffic-summary-grid article{border:1px solid #e2e8f0;border-radius:10px;padding:10px;background:#f8fafc}
 .traffic-summary-grid h4{margin:0 0 8px 0;font-size:14px}
 .traffic-total{font-size:18px;font-weight:800;margin:0 0 4px 0}
+.traffic-page-guide{margin-top:8px}
+.traffic-meta-line{display:flex;flex-wrap:wrap;gap:8px 14px;margin:8px 0 10px;font-size:14px;color:#1e293b}
+.traffic-meta-line span{display:inline-block;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;border-radius:999px;padding:3px 10px}
 .table-wrap{overflow:auto}
 .traffic-table th,.traffic-table td{white-space:nowrap}
 .traffic-chart-block{margin:10px 0}
@@ -148,8 +164,10 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-next-form select{min-width:120px}
 .rental-cards{display:flex;flex-direction:column;gap:10px}
 .rental-cards-stacked{margin-top:10px}
-.rental-table-header,.rental-row{display:grid;grid-template-columns:1.2fr .55fr .85fr .95fr 1fr 1.45fr;align-items:center;gap:8px}
+.rental-table-header,.rental-row{display:grid;grid-template-columns:minmax(180px,1.2fr) 110px minmax(130px,.9fr) minmax(130px,.95fr) minmax(130px,1fr) minmax(360px,1.6fr);align-items:center;gap:8px}
 .rental-table-header{font-weight:800;color:#1f2937;padding:8px 12px;border-bottom:1px solid #cbd5e1}
+.rental-header-action{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.rental-sort-btn{padding:6px 10px;font-size:13px}
 .rental-card{border:1px solid #d1d5db;border-radius:10px;padding:10px 12px}
 .rental-row{min-height:64px}
 .rental-col{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -157,13 +175,23 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .rental-col-action{overflow:visible;display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:nowrap}
 .rental-renew-mail-form{margin:0}
 .rental-col-action button{padding:8px 10px}
+.rental-col-action form[action*="/reserve"]{display:none !important}
 .rental-card-confirmed{background:#c9f2dd;border-color:#74d69f}
 .rental-card-non-renew{background:#ffd9de;border-color:#f08aa0}
 .rental-card-unknown{background:#f7f0bf;border-color:#dfc347}
+.rental-card-reserved{background:#dbeafe;border-color:#93c5fd}
 .rental-next-form-nowrap{flex-wrap:nowrap;align-items:center;justify-content:flex-start}
 .rental-next-form-nowrap select{min-width:120px}
+.rental-reserve-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:999}
+.rental-reserve-modal[hidden]{display:none !important}
+.rental-reserve-modal-card{background:#fff;border-radius:12px;max-width:420px;width:92%}
+.rental-reserve-dialog-form{display:flex;flex-direction:column;gap:10px;padding:16px}
+.rental-reserve-dialog-form h3{margin:0 0 4px}
+.rental-reserve-dialog-form label{display:flex;flex-direction:column;gap:6px}
+.rental-reserve-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 
 @media (max-width: 1100px){
+  .rental-subtabs{grid-template-columns:repeat(3,minmax(0,1fr))}
   .rental-table-header{display:none}
   .rental-row{grid-template-columns:1fr;gap:6px}
   .rental-col{white-space:normal}
@@ -183,3 +211,24 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 
 .public-stock-group-card{display:flex;flex-direction:column;gap:8px}
 .public-stock-group-card .button-link{align-self:flex-start}
+
+
+.md-red {
+  color: #d93025;
+  font-weight: 700;
+}
+
+.snapshot-panel .snapshot-select-form{margin-bottom:12px}
+.snapshot-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:12px 0 14px}
+.snapshot-grid-4{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.snapshot-grid .grid-form{background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px}
+.snapshot-grid .grid-form label{display:flex;flex-direction:column;gap:6px}
+.snapshot-card button{width:100%;min-height:44px;border-radius:10px;font-weight:700}
+.snapshot-table-wrap{overflow:auto;border:1px solid #e5e7eb;border-radius:8px}
+.snapshot-table{width:100%;border-collapse:collapse;font-size:13px}
+.snapshot-table th,.snapshot-table td{border-bottom:1px solid #f1f5f9;padding:10px;text-align:left;white-space:nowrap}
+.snapshot-table th{background:#f8fafc;font-weight:800}
+.snapshot-task-view{margin-bottom:10px}
+.hint.danger{color:#b91c1c}
+.snapshot-table td form{margin:0}
+.snapshot-table .small{padding:6px 12px;min-height:32px}
