@@ -5280,87 +5280,6 @@ def details_page():
     )
 
 
-@app.route("/snapshots")
-@login_required
-def snapshot_page():
-    rows = list_detail_rows()
-    snapshot_servers = [dict(r) for r in rows]
-    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
-    snapshot_server = None
-    snapshot_list = []
-    snapshot_error = ""
-    if selected_snapshot_server_id:
-        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
-        if snapshot_server:
-            try:
-                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
-            except Exception as exc:
-                snapshot_error = str(exc)
-    return render_template(
-        "snapshots.html",
-        snapshot_servers=snapshot_servers,
-        snapshot_server=snapshot_server,
-        snapshot_list=snapshot_list,
-        snapshot_error=snapshot_error,
-        selected_snapshot_server_id=selected_snapshot_server_id,
-        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
-    )
-
-
-@app.route("/snapshots")
-@login_required
-def snapshot_page():
-    rows = list_detail_rows()
-    snapshot_servers = [dict(r) for r in rows]
-    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
-    snapshot_server = None
-    snapshot_list = []
-    snapshot_error = ""
-    if selected_snapshot_server_id:
-        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
-        if snapshot_server:
-            try:
-                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
-            except Exception as exc:
-                snapshot_error = str(exc)
-    return render_template(
-        "snapshots.html",
-        snapshot_servers=snapshot_servers,
-        snapshot_server=snapshot_server,
-        snapshot_list=snapshot_list,
-        snapshot_error=snapshot_error,
-        selected_snapshot_server_id=selected_snapshot_server_id,
-        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
-    )
-
-
-@app.route("/snapshots", endpoint="snapshot_page_view")
-@login_required
-def snapshot_page():
-    rows = list_detail_rows()
-    snapshot_servers = [dict(r) for r in rows]
-    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
-    snapshot_server = None
-    snapshot_list = []
-    snapshot_error = ""
-    if selected_snapshot_server_id:
-        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
-        if snapshot_server:
-            try:
-                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
-            except Exception as exc:
-                snapshot_error = str(exc)
-    return render_template(
-        "snapshots.html",
-        snapshot_servers=snapshot_servers,
-        snapshot_server=snapshot_server,
-        snapshot_list=snapshot_list,
-        snapshot_error=snapshot_error,
-        selected_snapshot_server_id=selected_snapshot_server_id,
-        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
-    )
-
-
 @app.route("/snapshots", endpoint="snapshot_center")
 @login_required
 def snapshot_center_page():
@@ -5386,8 +5305,6 @@ def snapshot_center_page():
         selected_snapshot_server_id=selected_snapshot_server_id,
         snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
     )
-
-
 
 
 @app.route("/traffic")
