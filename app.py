@@ -69,6 +69,7 @@ DD_NEW_PASSWORD_GRACE_SECONDS = int(os.environ.get("DD_NEW_PASSWORD_GRACE_SECOND
 AGENT_REPORT_INTERVAL_SECONDS = int(os.environ.get("AGENT_REPORT_INTERVAL_SECONDS", "60"))
 DEFAULT_MAX_RETRIES = int(os.environ.get("DEFAULT_MAX_RETRIES", "2"))
 DEFAULT_RETRY_BACKOFF_SECONDS = os.environ.get("DEFAULT_RETRY_BACKOFF_SECONDS", "60,180")
+SCHEDULED_RESET_GRACE_MINUTES = 5
 UPLOAD_DATA_DIR = os.environ.get("VPS_PANEL_UPLOAD_DATA_DIR", os.path.join(os.getcwd(), "uploaded_data"))
 os.makedirs(UPLOAD_DATA_DIR, exist_ok=True)
 
@@ -5041,6 +5042,10 @@ def check_scheduled_reset_jobs(now_dt=None):
             continue
 
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
+        if ok:
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE servers SET last_scheduled_trigger_key = ? WHERE id = ?", (slot_key, row["id"]))
+                conn.commit()
         log_system_event("scheduled_reset", f"服务器[{row['name']}] 已触发定时重置任务", server_id=row["id"], details=msg)
         if not ok:
             upsert_notification_batch_item(batch_key, row, "skipped", note=msg, log_id=log_id)
@@ -5195,6 +5200,18 @@ def details_page():
     success = len([r for r in normalized_rows if r["status"] == "success"])
     failed = len([r for r in normalized_rows if r["status"] == "failed"])
     never = len([r for r in normalized_rows if not r["latest_run_at"]])
+    selected_snapshot_server_id = int(request.args.get("snapshot_server_id") or 0) if str(request.args.get("snapshot_server_id") or "").isdigit() else 0
+    snapshot_server = None
+    snapshot_list = []
+    snapshot_error = ""
+    snapshot_default_name = datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
+    if selected_snapshot_server_id:
+        snapshot_server = next((item for item in normalized_rows if int(item["id"]) == selected_snapshot_server_id), None)
+        if snapshot_server:
+            try:
+                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
+            except Exception as exc:
+                snapshot_error = str(exc)
     return render_template(
         "details.html",
         rented_rows=rented_rows,
@@ -5206,6 +5223,39 @@ def details_page():
         failed=failed,
         never=never,
         latest_api_image_refresh_job=get_latest_api_image_refresh_job(),
+        snapshot_servers=normalized_rows,
+        snapshot_server=snapshot_server,
+        snapshot_list=snapshot_list,
+        snapshot_error=snapshot_error,
+        selected_snapshot_server_id=selected_snapshot_server_id,
+        snapshot_default_name=snapshot_default_name,
+    )
+
+
+@app.route("/snapshots")
+@login_required
+def snapshot_page():
+    rows = list_detail_rows()
+    snapshot_servers = [dict(r) for r in rows]
+    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
+    snapshot_server = None
+    snapshot_list = []
+    snapshot_error = ""
+    if selected_snapshot_server_id:
+        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
+        if snapshot_server:
+            try:
+                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
+            except Exception as exc:
+                snapshot_error = str(exc)
+    return render_template(
+        "snapshots.html",
+        snapshot_servers=snapshot_servers,
+        snapshot_server=snapshot_server,
+        snapshot_list=snapshot_list,
+        snapshot_error=snapshot_error,
+        selected_snapshot_server_id=selected_snapshot_server_id,
+        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
     )
 
 

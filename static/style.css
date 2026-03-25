@@ -198,6 +198,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
   .rental-col::before{content:attr(data-label) '：';color:#475569;font-weight:700;margin-right:6px}
   .rental-col-name::before{content:attr(data-label) '：';font-size:14px}
   .rental-col-name{font-size:20px}
+  .rental-reserve-form{flex-wrap:wrap}
 }
 
 
@@ -221,6 +222,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .snapshot-panel .snapshot-select-form{margin-bottom:12px}
 .snapshot-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:12px 0 14px}
 .snapshot-grid-4{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+<<<<<<< codex/analyze-project-code-for-functionality-nn80ku
 .snapshot-grid .grid-form{background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px}
 .snapshot-grid .grid-form label{display:flex;flex-direction:column;gap:6px}
 .snapshot-card button{width:100%;min-height:44px;border-radius:10px;font-weight:700}
@@ -228,6 +230,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
 .snapshot-table{width:100%;border-collapse:collapse;font-size:13px}
 .snapshot-table th,.snapshot-table td{border-bottom:1px solid #f1f5f9;padding:10px;text-align:left;white-space:nowrap}
 .snapshot-table th{background:#f8fafc;font-weight:800}
+=======
+.snapshot-grid .grid-form{background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px}
+.snapshot-card button{width:100%;min-height:44px}
+.snapshot-table-wrap{overflow:auto;border:1px solid #e5e7eb;border-radius:8px}
+.snapshot-table{width:100%;border-collapse:collapse;font-size:13px}
+.snapshot-table th,.snapshot-table td{border-bottom:1px solid #f1f5f9;padding:8px;text-align:left;white-space:nowrap}
+>>>>>>> main
 .snapshot-task-view{margin-bottom:10px}
 .hint.danger{color:#b91c1c}
 .snapshot-table td form{margin:0}
