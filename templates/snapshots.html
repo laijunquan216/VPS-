@@ -33,7 +33,7 @@
       <label>离线快照名<input name="snapshot_name" value="{{ snapshot_default_name }}" /></label>
       <label>diskName<input name="snapshot_disk_name" value="vda" required /></label>
       <label>描述<input name="snapshot_description" value="Offline snapshot" /></label>
-      <button type="submit" class="warn" onclick="return confirm('离线快照会导致服务器短暂下线，继续？')">创建离线快照</button>
+      <button type="submit" onclick="return confirm('离线快照会导致服务器短暂下线，继续？')">创建离线快照</button>
     </form>
 
     <form method="post" action="/snapshots/settings" class="grid-form snapshot-card">
@@ -55,7 +55,7 @@
     <form method="post" action="/snapshots/cleanup" class="grid-form snapshot-card">
       <input type="hidden" name="server_id" value="{{ snapshot_server.id }}" />
       <label>手动清理保留数<input type="number" min="1" max="20" name="snapshot_keep_count" value="{{ snapshot_server.snapshot_keep_count or 3 }}" /></label>
-      <button type="submit" class="secondary">执行快照清理</button>
+      <button type="submit">执行快照清理</button>
     </form>
   </div>
 
