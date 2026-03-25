@@ -207,6 +207,7 @@ def init_db():
                 snapshot_keep_count INTEGER NOT NULL DEFAULT 3,
                 snapshot_schedule_hour INTEGER NOT NULL DEFAULT 3,
                 snapshot_schedule_minute INTEGER NOT NULL DEFAULT 0,
+                snapshot_schedule_cron TEXT NOT NULL DEFAULT '0 3 * * *',
                 snapshot_last_run_slot TEXT NOT NULL DEFAULT ''
             )
             """
@@ -460,6 +461,7 @@ def init_db():
         ensure_column(conn, "servers", "snapshot_keep_count INTEGER NOT NULL DEFAULT 3")
         ensure_column(conn, "servers", "snapshot_schedule_hour INTEGER NOT NULL DEFAULT 3")
         ensure_column(conn, "servers", "snapshot_schedule_minute INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "snapshot_schedule_cron TEXT NOT NULL DEFAULT '0 3 * * *'")
         ensure_column(conn, "servers", "snapshot_last_run_slot TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "reinstall_mode TEXT NOT NULL DEFAULT 'ssh'")
         ensure_column(conn, "scp_accounts", "refresh_token TEXT NOT NULL DEFAULT ''")
@@ -1541,6 +1543,54 @@ def _snapshot_task_success(state_text):
     return state in {"SUCCESS", "FINISHED"}
 
 
+def _cron_field_match(expr, value, min_value, max_value):
+    text = str(expr or "").strip()
+    if not text or text == "*":
+        return True
+    for part in text.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if item.startswith("*/"):
+            try:
+                step = int(item[2:])
+            except Exception:
+                return False
+            if step <= 0:
+                return False
+            if (value - min_value) % step == 0:
+                return True
+            continue
+        if "-" in item:
+            try:
+                start, end = item.split("-", 1)
+                start_v = int(start)
+                end_v = int(end)
+            except Exception:
+                return False
+            if start_v <= value <= end_v:
+                return True
+            continue
+        if item.isdigit() and int(item) == value:
+            return True
+    return False
+
+
+def _snapshot_cron_matches(cron_expr, now_dt):
+    parts = str(cron_expr or "").split()
+    if len(parts) != 5:
+        return False
+    minute, hour, day, month, week = parts
+    week_value = (now_dt.weekday() + 1) % 7
+    return (
+        _cron_field_match(minute, now_dt.minute, 0, 59)
+        and _cron_field_match(hour, now_dt.hour, 0, 23)
+        and _cron_field_match(day, now_dt.day, 1, 31)
+        and _cron_field_match(month, now_dt.month, 1, 12)
+        and _cron_field_match(week, week_value, 0, 6)
+    )
+
+
 def scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=300):
     deadline = time.time() + max(30, int(timeout_seconds or 300))
     while time.time() < deadline:
@@ -1567,7 +1617,8 @@ def scp_cleanup_old_snapshots(server_id, keep_count):
             if not _snapshot_task_success(final_data.get("state")):
                 raise RuntimeError(f"删除快照失败: {item.get('name')} ({final_data.get('state')})")
         deleted.append(item.get("name"))
-    return {"deleted": deleted, "skipped": skipped}
+    after_list = scp_list_snapshots(server_id)
+    return {"deleted": deleted, "skipped": skipped, "total_after": len(after_list), "skipped_active": len(skipped)}
 
 
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
@@ -4893,16 +4944,17 @@ def run_scheduled_snapshot_jobs(now_dt=None):
     with closing(get_conn()) as conn:
         rows = conn.execute(
             """
-            SELECT id, name, snapshot_auto_enabled, snapshot_schedule_hour, snapshot_schedule_minute, snapshot_last_run_slot
+            SELECT id, name, snapshot_auto_enabled, snapshot_schedule_hour, snapshot_schedule_minute, snapshot_schedule_cron, snapshot_last_run_slot
             FROM servers
             WHERE snapshot_auto_enabled = 1
             ORDER BY sort_order ASC, id ASC
             """
         ).fetchall()
     for row in rows:
-        hour = int(row["snapshot_schedule_hour"] or 0)
-        minute = int(row["snapshot_schedule_minute"] or 0)
-        if now.hour != hour or now.minute != minute:
+        cron_expr = str(row["snapshot_schedule_cron"] or "").strip()
+        if not cron_expr:
+            cron_expr = f"{int(row['snapshot_schedule_minute'] or 0)} {int(row['snapshot_schedule_hour'] or 3)} * * *"
+        if not _snapshot_cron_matches(cron_expr, now):
             continue
         last_slot = str(row["snapshot_last_run_slot"] or "").strip()
         if last_slot == slot:
@@ -5151,8 +5203,8 @@ def details_page():
     selected_snapshot_server_id = int(request.args.get("snapshot_server_id") or 0) if str(request.args.get("snapshot_server_id") or "").isdigit() else 0
     snapshot_server = None
     snapshot_list = []
-    snapshot_task = None
     snapshot_error = ""
+    snapshot_default_name = datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
     if selected_snapshot_server_id:
         snapshot_server = next((item for item in normalized_rows if int(item["id"]) == selected_snapshot_server_id), None)
         if snapshot_server:
@@ -5160,12 +5212,6 @@ def details_page():
                 snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
             except Exception as exc:
                 snapshot_error = str(exc)
-            task_uuid = (request.args.get("snapshot_task_uuid") or "").strip()
-            if task_uuid:
-                try:
-                    snapshot_task = scp_get_task_status(selected_snapshot_server_id, task_uuid)
-                except Exception as exc:
-                    snapshot_error = f"{snapshot_error}; {exc}" if snapshot_error else str(exc)
     return render_template(
         "details.html",
         rented_rows=rented_rows,
@@ -5180,9 +5226,9 @@ def details_page():
         snapshot_servers=normalized_rows,
         snapshot_server=snapshot_server,
         snapshot_list=snapshot_list,
-        snapshot_task=snapshot_task,
         snapshot_error=snapshot_error,
         selected_snapshot_server_id=selected_snapshot_server_id,
+        snapshot_default_name=snapshot_default_name,
     )
 
 
@@ -6246,7 +6292,7 @@ def create_online_snapshot():
     try:
         task_uuid, _ = scp_create_snapshot(server_id, True, name, desc)
         flash(f"在线快照任务已提交: {task_uuid or '未知任务ID'}", "success")
-        return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid or ""))
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
     except Exception as exc:
         flash(f"在线快照创建失败: {exc}", "error")
         return redirect(url_for("details_page", snapshot_server_id=server_id))
@@ -6265,7 +6311,7 @@ def create_offline_snapshot():
     try:
         task_uuid, _ = scp_create_snapshot(server_id, False, name, desc, disk_name=disk_name)
         flash(f"离线快照任务已提交: {task_uuid or '未知任务ID'}（注意会短暂关机）", "success")
-        return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid or ""))
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
     except Exception as exc:
         flash(f"离线快照创建失败: {exc}", "error")
         return redirect(url_for("details_page", snapshot_server_id=server_id))
@@ -6279,7 +6325,7 @@ def delete_snapshot_action():
     try:
         task_uuid, _ = scp_delete_snapshot(server_id, snap_name)
         flash(f"删除快照任务已提交: {task_uuid or '未知任务ID'}", "success")
-        return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid or ""))
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
     except Exception as exc:
         flash(f"删除快照失败: {exc}", "error")
         return redirect(url_for("details_page", snapshot_server_id=server_id))
@@ -6314,7 +6360,12 @@ def cleanup_snapshot_action():
     keep_count = int(request.form.get("snapshot_keep_count") or 3)
     try:
         result = scp_cleanup_old_snapshots(server_id, keep_count)
-        flash(f"快照清理完成：删除{len(result['deleted'])}个，跳过进行中{len(result['skipped'])}个", "success")
+        total_after = int(result.get("total_after") or 0)
+        skipped_active = int(result.get("skipped_active") or 0)
+        msg = f"快照清理完成：删除{len(result['deleted'])}个，当前剩余{total_after}个"
+        if skipped_active > 0:
+            msg += f"（其中进行中{skipped_active}个，等待完成后再清理）"
+        flash(msg, "success")
     except Exception as exc:
         flash(f"快照清理失败: {exc}", "error")
     return redirect(url_for("details_page", snapshot_server_id=server_id))
@@ -6328,10 +6379,16 @@ def update_snapshot_settings():
     if mode not in {"online", "offline"}:
         mode = "online"
     disk_name = (request.form.get("snapshot_auto_disk_name") or "").strip()
+    cron_expr = (request.form.get("snapshot_schedule_cron") or "").strip()
+    if not cron_expr:
+        cron_expr = "0 3 * * *"
+    cron_parts = cron_expr.split()
+    if len(cron_parts) != 5:
+        flash("Cron 表达式格式错误，需为 5 段（分 时 日 月 周）", "error")
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
+
     try:
         keep_count = max(1, min(20, int(request.form.get("snapshot_keep_count") or 3)))
-        hour = max(0, min(23, int(request.form.get("snapshot_schedule_hour") or 3)))
-        minute = max(0, min(59, int(request.form.get("snapshot_schedule_minute") or 0)))
     except Exception:
         flash("快照定时参数格式错误", "error")
         return redirect(url_for("details_page", snapshot_server_id=server_id))
@@ -6344,8 +6401,7 @@ def update_snapshot_settings():
                 snapshot_auto_mode = ?,
                 snapshot_auto_disk_name = ?,
                 snapshot_keep_count = ?,
-                snapshot_schedule_hour = ?,
-                snapshot_schedule_minute = ?
+                snapshot_schedule_cron = ?
             WHERE id = ?
             """,
             (
@@ -6353,8 +6409,7 @@ def update_snapshot_settings():
                 mode,
                 disk_name,
                 keep_count,
-                hour,
-                minute,
+                cron_expr,
                 server_id,
             ),
         )
