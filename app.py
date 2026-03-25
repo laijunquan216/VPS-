@@ -69,6 +69,7 @@ DD_NEW_PASSWORD_GRACE_SECONDS = int(os.environ.get("DD_NEW_PASSWORD_GRACE_SECOND
 AGENT_REPORT_INTERVAL_SECONDS = int(os.environ.get("AGENT_REPORT_INTERVAL_SECONDS", "60"))
 DEFAULT_MAX_RETRIES = int(os.environ.get("DEFAULT_MAX_RETRIES", "2"))
 DEFAULT_RETRY_BACKOFF_SECONDS = os.environ.get("DEFAULT_RETRY_BACKOFF_SECONDS", "60,180")
+SCHEDULED_RESET_GRACE_MINUTES = 5
 UPLOAD_DATA_DIR = os.environ.get("VPS_PANEL_UPLOAD_DATA_DIR", os.path.join(os.getcwd(), "uploaded_data"))
 os.makedirs(UPLOAD_DATA_DIR, exist_ok=True)
 
@@ -4768,6 +4769,10 @@ def check_scheduled_reset_jobs(now_dt=None):
             continue
 
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
+        if ok:
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE servers SET last_scheduled_trigger_key = ? WHERE id = ?", (slot_key, row["id"]))
+                conn.commit()
         log_system_event("scheduled_reset", f"服务器[{row['name']}] 已触发定时重置任务", server_id=row["id"], details=msg)
         if not ok:
             upsert_notification_batch_item(batch_key, row, "skipped", note=msg, log_id=log_id)
