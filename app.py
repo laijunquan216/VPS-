@@ -1460,6 +1460,22 @@ def _get_snapshot_server_context(server_id):
     return dict(row), account, str(scp_server_id).strip(), endpoint_base, token
 
 
+def _normalize_snapshot_state(item):
+    raw_state = str(item.get("state") or "").strip().upper()
+    raw_status = str(item.get("status") or item.get("snapshotStatus") or item.get("snapshot_state") or "").strip().upper()
+
+    if raw_status:
+        return raw_status, raw_state
+
+    # 某些SCP接口把 state 返回为服务器电源状态（RUNNING/SHUTOFF），并非快照任务状态。
+    # 快照能出现在列表中通常意味着创建已完成，这里统一展示为 FINISHED，避免误判一直 RUNNING。
+    power_states = {"RUNNING", "SHUTOFF", "STOPPED", "STOPPING", "STARTING", "SUSPENDED"}
+    if raw_state in power_states:
+        return "FINISHED", raw_state
+
+    return raw_state, ""
+
+
 def scp_list_snapshots(server_id):
     _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
     payload = scp_rest_request(account, "GET", f"servers/{urlparse.quote(scp_server_id)}/snapshots", token=token, endpoint_base=endpoint_base)
@@ -1468,6 +1484,7 @@ def scp_list_snapshots(server_id):
     for item in items or []:
         if not isinstance(item, dict):
             continue
+        snapshot_state, instance_state = _normalize_snapshot_state(item)
         results.append(
             {
                 "uuid": str(item.get("uuid") or "").strip(),
@@ -1476,7 +1493,8 @@ def scp_list_snapshots(server_id):
                 "creationTime": str(item.get("creationTime") or "").strip(),
                 "disks": item.get("disks") if isinstance(item.get("disks"), list) else [],
                 "online": bool(item.get("online")),
-                "state": str(item.get("state") or "").strip(),
+                "state": snapshot_state,
+                "instance_state": instance_state,
             }
         )
     results.sort(key=lambda x: x.get("creationTime") or "", reverse=True)

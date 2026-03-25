@@ -68,7 +68,7 @@
         <td>{{ snap.name }}</td>
         <td>{{ snap.creationTime or '-' }}</td>
         <td>{{ '是' if snap.online else '否' }}</td>
-        <td>{{ snap.state or '-' }}</td>
+        <td>{{ snap.state or '-' }}{% if snap.instance_state %}<span class="hint">（实例: {{ snap.instance_state }}）</span>{% endif %}</td>
         <td>{{ (snap.disks or [])|join(', ') }}</td>
         <td>{{ snap.description or '-' }}</td>
         <td>{{ snap.uuid or '-' }}</td>
