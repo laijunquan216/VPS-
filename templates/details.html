@@ -24,8 +24,14 @@
       {% if row.status == 'success' %}<span class="badge ok">正常</span>
       {% elif row.status == 'failed' %}<span class="badge bad">失败</span>
       {% elif row.status == 'running' %}<span class="badge running">执行中</span>
-      {% elif row.status == 'queued' %}<span class="badge queued">排队中</span>
-      {% elif row.status == 'retrying' %}<span class="badge retrying">重试中</span>
+      {% elif row.status == 'queued' %}
+      <form method="post" action="/servers/{{ row.id }}/cancel-queued-reset" class="inline-cancel-form" onsubmit="return confirm('是否终止此次自动重置？')">
+        <button type="submit" class="badge queued">排队中</button>
+      </form>
+      {% elif row.status == 'retrying' %}
+      <form method="post" action="/servers/{{ row.id }}/cancel-queued-reset" class="inline-cancel-form" onsubmit="return confirm('是否终止此次自动重置？')">
+        <button type="submit" class="badge retrying">重试中</button>
+      </form>
       {% else %}<span class="badge">未执行</span>{% endif %}
       {% if row.delivery_email_sent_at %}<span class="badge ok">已发货</span>{% endif %}
       <span class="badge {% if row.traffic_throttled %}bad{% else %}ok{% endif %}">

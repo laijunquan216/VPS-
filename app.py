@@ -3524,6 +3524,15 @@ def maybe_send_batch_email(batch_key):
     failed_count = len([st for st in statuses if st == "failed"])
     skipped_count = len([st for st in statuses if st == "skipped"])
     total_count = len(statuses)
+    status_label_map = {
+        "success": "成功",
+        "failed": "失败",
+        "skipped": "跳过",
+        "queued": "排队中",
+        "running": "执行中",
+        "retrying": "重试中",
+        "pending": "待处理",
+    }
     lines = [
         f"批次: {batch_key}",
         f"总计: {total_count}",
@@ -3535,7 +3544,8 @@ def maybe_send_batch_email(batch_key):
     ]
     for item in items:
         note = f"（{item['note']}）" if item["note"] else ""
-        lines.append(f"- {item['server_name']} ({item['server_ip']}，目前租赁人: {get_current_renter_text(item['server_id'])}): {item['status']}{note}")
+        status_text = status_label_map.get(str(item["status"] or "").strip().lower(), str(item["status"] or "未知"))
+        lines.append(f"- {item['server_name']} ({item['server_ip']}，目前租赁人: {get_current_renter_text(item['server_id'])}): {status_text}{note}")
 
     sent = send_email_message(
         f"[VPS面板] {batch_key} 重置批次结果（成功{success_count}/失败{failed_count}/跳过{skipped_count}）",
@@ -3778,6 +3788,47 @@ def has_pending_or_running(server_id):
     return bool(row)
 
 
+def cancel_pending_scheduled_tasks(server_id, reason="已取消任务"):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    canceled = []
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, log_id, batch_key
+            FROM task_queue
+            WHERE server_id = ?
+              AND trigger_type = 'scheduled'
+              AND status IN ('queued', 'retrying')
+            ORDER BY id ASC
+            """,
+            (server_id,),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                """
+                UPDATE task_queue
+                SET status = 'failed',
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (reason[:400], now_text, row["id"]),
+            )
+            canceled.append((row["id"], row["log_id"], (row["batch_key"] or "").strip()))
+        conn.commit()
+
+    for task_id, log_id, batch_key in canceled:
+        if log_id:
+            update_log(log_id, "failed", reason, reason)
+        if batch_key:
+            row = get_server(server_id)
+            if row:
+                upsert_notification_batch_item(batch_key, row, "skipped", note=reason, log_id=log_id)
+                maybe_send_batch_email(batch_key)
+        write_detailed_log("task.cancel_pending_scheduled", server_id=server_id, task_id=task_id, reason=reason)
+    return len(canceled)
+
+
 
 
 def _inject_data_zip_url_into_ssh2(command_text, data_zip_url):
@@ -3969,6 +4020,20 @@ def is_retryable_failure(output_text):
     return any(pattern in text for pattern in patterns)
 
 
+def has_pt_install_failure(output_text):
+    text = (output_text or "").lower()
+    failure_patterns = (
+        "qbittorrent 启动失败",
+        "qbittorrent 安装失败",
+        "vertex 安装失败",
+        "filebrowser 安装失败",
+        "pt环境安装失败",
+        "vt 安装失败",
+        "✗",
+    )
+    return any(pattern in text for pattern in failure_patterns)
+
+
 def enqueue_task(server_row, log_id, trigger_type="manual", batch_key=""):
     trigger_type = (trigger_type or "manual").strip()
     batch_key = (batch_key or "").strip()
@@ -4049,6 +4114,27 @@ def task_worker_loop():
                     )
                     conn.commit()
                 continue
+            trigger_type_text = str(task["trigger_type"] or "").strip().lower()
+            if trigger_type_text == "scheduled" and (int(row["is_renewed"] or 0) == 1 or is_before_renew_until(row, now_dt)):
+                skip_reason = "检测到服务器已续租，已取消队列中的定时重置任务"
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        "UPDATE task_queue SET status='failed', last_error=?, updated_at=? WHERE id=?",
+                        (skip_reason, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
+                    )
+                    conn.commit()
+                update_log(task["log_id"], "failed", skip_reason, skip_reason)
+                if task["batch_key"]:
+                    upsert_notification_batch_item(task["batch_key"], row, "skipped", note=skip_reason, log_id=task["log_id"])
+                    maybe_send_batch_email(task["batch_key"])
+                write_detailed_log(
+                    "task_worker.skip_renewed",
+                    task_id=task_id,
+                    server_id=task["server_id"],
+                    is_renewed=int(row["is_renewed"] or 0),
+                    renew_until_date=row["renew_until_date"],
+                )
+                continue
 
             with closing(get_conn()) as conn:
                 conn.execute(
@@ -4060,6 +4146,8 @@ def task_worker_loop():
 
             attempt_no = int(task["attempt"] or 0) + 1
             max_attempts = int(task["max_attempts"] or 1)
+            if trigger_type_text == "scheduled":
+                max_attempts = max(max_attempts, 3)
             update_log(
                 task["log_id"],
                 "running",
@@ -4093,12 +4181,81 @@ def task_worker_loop():
                 latest = conn.execute("SELECT status, output FROM job_logs WHERE id = ?", (task["log_id"],)).fetchone()
 
             if latest and latest["status"] == "success":
+                output = latest["output"] if latest else ""
+                pt_install_failed = has_pt_install_failure(output)
+                if pt_install_failed and trigger_type_text == "scheduled":
+                    if attempt_no < 3:
+                        next_time = datetime.now(TIMEZONE) + timedelta(seconds=5)
+                        with closing(get_conn()) as conn:
+                            conn.execute(
+                                "UPDATE task_queue SET status='retrying', attempt=?, next_run_at=?, last_error=?, updated_at=? WHERE id=?",
+                                (
+                                    attempt_no,
+                                    next_time.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "pt install failed",
+                                    datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                                    task_id,
+                                ),
+                            )
+                            conn.commit()
+                        write_detailed_log(
+                            "task_worker.pt_retrying",
+                            task_id=task_id,
+                            server_id=task["server_id"],
+                            attempt=attempt_no,
+                            next_run_at=next_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        )
+                        update_log(
+                            task["log_id"],
+                            "retrying",
+                            f"检测到 PT 环境安装失败，已自动重试（第{attempt_no + 1}/3次）",
+                            (output or "") + "\n\n系统提示: 检测到PT环境安装失败，已自动加入队列重置并重装",
+                        )
+                        if task["batch_key"]:
+                            upsert_notification_batch_item(
+                                task["batch_key"],
+                                row,
+                                "retrying",
+                                note=f"PT环境安装失败，已自动重试（第{attempt_no + 1}/3次）",
+                                log_id=task["log_id"],
+                            )
+                        TASK_QUEUE.put(task_id)
+                        continue
+
+                    with closing(get_conn()) as conn:
+                        conn.execute(
+                            "UPDATE task_queue SET status='failed', attempt=?, last_error=?, updated_at=? WHERE id=?",
+                            (
+                                attempt_no,
+                                "pt install failed after retries",
+                                datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                                task_id,
+                            ),
+                        )
+                        conn.commit()
+                    update_log(
+                        task["log_id"],
+                        "failed",
+                        "任务失败：PT环境安装失败（已重试3次）",
+                        (output or "") + "\n\n系统提示: PT环境重装累计3次仍失败，已停止自动重试",
+                    )
+                    if task["batch_key"]:
+                        upsert_notification_batch_item(
+                            task["batch_key"],
+                            row,
+                            "failed",
+                            note="PT环境安装失败，自动重试3次后仍失败",
+                            log_id=task["log_id"],
+                        )
+                        maybe_send_batch_email(task["batch_key"])
+                    continue
+
                 with closing(get_conn()) as conn:
                     conn.execute(
                         "UPDATE task_queue SET status='success', attempt=?, updated_at=? WHERE id=?",
                         (attempt_no, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
                     )
-                    if str(task["trigger_type"] or "").strip().lower() == "scheduled":
+                    if trigger_type_text == "scheduled":
                         cfg = get_global_config()
                         auto_delay_minutes = float((cfg["auto_delivery_delay_minutes"] if (cfg and "auto_delivery_delay_minutes" in cfg.keys()) else 0) or 0)
                         if auto_delay_minutes <= 0:
@@ -4130,7 +4287,7 @@ def task_worker_loop():
                 write_detailed_log("task_worker.success", task_id=task_id, server_id=task["server_id"], attempt=attempt_no)
                 if task["batch_key"]:
                     note = "任务执行完成"
-                    if str(task["trigger_type"] or "").strip().lower() == "scheduled":
+                    if trigger_type_text == "scheduled":
                         note = "任务执行完成；已自动切换为未出租、未续租"
                     upsert_notification_batch_item(task["batch_key"], row, "success", note=note, log_id=task["log_id"])
                     maybe_send_batch_email(task["batch_key"])
@@ -4164,6 +4321,7 @@ def task_worker_loop():
                 TASK_QUEUE.put(task_id)
             else:
                 fail_reason = "retry exhausted" if retryable else "non-retryable"
+                fail_note = "可重试错误达到上限，任务失败" if retryable else "不可重试错误，任务失败"
                 with closing(get_conn()) as conn:
                     conn.execute(
                         "UPDATE task_queue SET status='failed', attempt=?, last_error=?, updated_at=? WHERE id=?",
@@ -4177,7 +4335,7 @@ def task_worker_loop():
                     conn.commit()
                 write_detailed_log("task_worker.failed", task_id=task_id, server_id=task["server_id"], reason=fail_reason, attempt=attempt_no)
                 if task["batch_key"]:
-                    upsert_notification_batch_item(task["batch_key"], row, "failed", note=fail_reason, log_id=task["log_id"])
+                    upsert_notification_batch_item(task["batch_key"], row, "failed", note=fail_note, log_id=task["log_id"])
                     maybe_send_batch_email(task["batch_key"])
         except Exception as exc:
             error_text = f"task worker exception: {exc}"
@@ -4606,10 +4764,7 @@ def check_scheduled_reset_jobs(now_dt=None):
             continue
 
         if row["is_renewed"]:
-            with closing(get_conn()) as conn:
-                conn.execute("UPDATE servers SET is_renewed = 0 WHERE id = ?", (row["id"],))
-                conn.commit()
-            upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置；已自动切换为未续租")
+            upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置")
             log_system_event("scheduled_reset", f"服务器[{row['name']}] 因续租状态跳过定时重置", server_id=row["id"])
             continue
 
@@ -5029,7 +5184,10 @@ def update_rental_next_status(server_id):
         conn.commit()
 
     if status == "confirmed":
+        canceled = cancel_pending_scheduled_tasks(server_id, reason="已标记确认续租，已取消队列中的定时重置任务")
         flash(f"[{row['name']}] 下月租户已标记为确认续租，服务器详情已切换为已续租", "success")
+        if canceled:
+            flash(f"[{row['name']}] 已取消 {canceled} 条排队中的定时重置任务", "success")
     elif status == "non_renew":
         flash(f"[{row['name']}] 已标记不续租，服务器详情已切换为未续租", "success")
     elif status == "reserved":
@@ -5625,14 +5783,19 @@ def delete_server(server_id):
 @login_required
 def toggle_renew(server_id):
     with closing(get_conn()) as conn:
-        row = conn.execute("SELECT is_renewed FROM servers WHERE id = ?", (server_id,)).fetchone()
+        row = conn.execute("SELECT is_renewed, name FROM servers WHERE id = ?", (server_id,)).fetchone()
         if not row:
             flash("服务器不存在", "error")
             return redirect(url_for("details_page"))
         next_state = 0 if row["is_renewed"] else 1
         conn.execute("UPDATE servers SET is_renewed = ? WHERE id = ?", (next_state, server_id))
         conn.commit()
+    canceled = 0
+    if next_state == 1:
+        canceled = cancel_pending_scheduled_tasks(server_id, reason="已切换为续租状态，已取消队列中的定时重置任务")
     flash("已切换为续租状态，后续将跳过定时重置" if next_state else "已关闭续租状态，恢复按计划重置", "success")
+    if canceled:
+        flash(f"[{row['name']}] 已取消 {canceled} 条排队中的定时重置任务", "success")
     return redirect(url_for("details_page"))
 
 
@@ -5653,6 +5816,21 @@ def set_renew_until(server_id):
         conn.commit()
     log_system_event("long_renew", f"服务器[{row['name']}] 设置长期续费至 {date_text or '空'}", server_id=server_id)
     flash(f"长期续费日期已更新为 {date_text or '未设置'}", "success")
+    return redirect(url_for("details_page"))
+
+
+@app.post("/servers/<int:server_id>/cancel-queued-reset")
+@login_required
+def cancel_queued_reset(server_id):
+    row = get_server(server_id)
+    if not row:
+        flash("服务器不存在", "error")
+        return redirect(url_for("details_page"))
+    canceled = cancel_pending_scheduled_tasks(server_id, reason="用户手动取消队列中的定时重置任务")
+    if canceled:
+        flash(f"[{row['name']}] 已取消 {canceled} 条排队中的定时重置任务", "success")
+    else:
+        flash(f"[{row['name']}] 当前没有可取消的排队任务", "error")
     return redirect(url_for("details_page"))
 
 
