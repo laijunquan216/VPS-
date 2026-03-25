@@ -15,6 +15,7 @@
       <a class="nav-link {% if active == 'rentals' %}active{% endif %}" href="{{ url_for('rentals_page') }}">出租管理</a>
       <a class="nav-link {% if active == 'traffic' %}active{% endif %}" href="{{ url_for('traffic_page') }}">流量统计</a>
       <a class="nav-link {% if active == 'management' %}active{% endif %}" href="{{ url_for('management_page') }}">面板管理</a>
+      <a class="nav-link {% if active == 'snapshots' %}active{% endif %}" href="{{ url_for('snapshot_page_view') }}">服务器快照</a>
     </nav>
     <form method="post" action="{{ url_for('logout_submit') }}">
       <button type="submit" class="ghost-btn">退出登录</button>
