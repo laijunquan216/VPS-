@@ -10,6 +10,7 @@
     </form>
   </div>
   <p class="hint">本页默认只展示缓存结果，点击“手动更新数据”后才会向 SCP API 拉取并刷新。</p>
+  <p class="hint traffic-page-guide">说明：下方每台服务器均显示「租赁人｜API 获取的本周期上传/下载/总流量｜服务器重置时间」。采样间隔采用：当日 60 秒 / 6小时 60 秒 / 24小时 600 秒 / 7天 1800 秒 / 31天 3600 秒；每日统计采用 3600 秒。</p>
   {% if refresh_state.running %}
     <p class="flash warning">更新进行中（开始于 {{ refresh_state.started_at }}），请稍后刷新页面查看结果。</p>
   {% elif refresh_state.message %}
@@ -20,20 +21,15 @@
 {% for row in rows %}
 <section class="panel">
   <h3>{{ row.name }} ({{ row.ip }})</h3>
+  <p class="traffic-meta-line">
+    <span>租赁人：{{ row.renter_display_name }}</span>
+    <span>API本周期：上传 {{ row.period_upload_text }} / 下载 {{ row.period_download_text }} / 总流量 {{ row.period_total_text }}</span>
+    <span>服务器重置时间：{{ row.reset_clock_text }}</span>
+    {% if row.generated_at %}<span>缓存时间：{{ row.generated_at }}（北京时间）</span>{% endif %}
+  </p>
   {% if row.metrics_error %}
     <p class="flash error">统计失败：{{ row.metrics_error }}</p>
   {% else %}
-    <p class="hint">缓存时间：{{ row.generated_at }}（北京时间）</p>
-    <p class="hint">
-      采样间隔：当日 {{ row.sample_steps.today or '-' }} 秒 / 6小时 {{ row.sample_steps['6h'] or '-' }} 秒 /
-      24小时 {{ row.sample_steps['24h'] or '-' }} 秒 / 7天 {{ row.sample_steps['7d'] or '-' }} 秒 /
-      31天 {{ row.sample_steps['31d'] or '-' }} 秒；每日统计采用 {{ row.sample_steps.daily_31d or '-' }} 秒。
-    </p>
-    <p class="hint">
-      采样点：当日 {{ row.sample_counts.today or 0 }} / 6小时 {{ row.sample_counts['6h'] or 0 }} /
-      24小时 {{ row.sample_counts['24h'] or 0 }} / 7天 {{ row.sample_counts['7d'] or 0 }} /
-      31天 {{ row.sample_counts['31d'] or 0 }}。
-    </p>
     <div class="traffic-summary-grid">
       <article>
         <h4>当日总流量（00:00 到现在）</h4>
