@@ -61,14 +61,14 @@
 
   <div class="snapshot-table-wrap">
     <table class="snapshot-table">
-      <thead><tr><th>名称</th><th>创建时间</th><th>在线</th><th>状态</th><th>磁盘</th><th>描述</th><th>UUID</th><th>操作</th></tr></thead>
+      <thead><tr><th>名称</th><th>创建时间</th><th>在线</th><th>快照状态</th><th>磁盘</th><th>描述</th><th>UUID</th><th>操作</th></tr></thead>
       <tbody>
       {% for snap in snapshot_list %}
       <tr>
         <td>{{ snap.name }}</td>
         <td>{{ snap.creationTime or '-' }}</td>
         <td>{{ '是' if snap.online else '否' }}</td>
-        <td>{{ snap.state or '-' }}</td>
+        <td>{{ snap.state_display or snap.state or '-' }}</td>
         <td>{{ (snap.disks or [])|join(', ') }}</td>
         <td>{{ snap.description or '-' }}</td>
         <td>{{ snap.uuid or '-' }}</td>
