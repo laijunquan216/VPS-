@@ -3787,6 +3787,47 @@ def has_pending_or_running(server_id):
     return bool(row)
 
 
+def cancel_pending_scheduled_tasks(server_id, reason="已取消任务"):
+    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    canceled = []
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, log_id, batch_key
+            FROM task_queue
+            WHERE server_id = ?
+              AND trigger_type = 'scheduled'
+              AND status IN ('queued', 'retrying')
+            ORDER BY id ASC
+            """,
+            (server_id,),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                """
+                UPDATE task_queue
+                SET status = 'failed',
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (reason[:400], now_text, row["id"]),
+            )
+            canceled.append((row["id"], row["log_id"], (row["batch_key"] or "").strip()))
+        conn.commit()
+
+    for task_id, log_id, batch_key in canceled:
+        if log_id:
+            update_log(log_id, "failed", reason, reason)
+        if batch_key:
+            row = get_server(server_id)
+            if row:
+                upsert_notification_batch_item(batch_key, row, "skipped", note=reason, log_id=log_id)
+                maybe_send_batch_email(batch_key)
+        write_detailed_log("task.cancel_pending_scheduled", server_id=server_id, task_id=task_id, reason=reason)
+    return len(canceled)
+
+
 
 
 def _inject_data_zip_url_into_ssh2(command_text, data_zip_url):
@@ -4072,6 +4113,27 @@ def task_worker_loop():
                     )
                     conn.commit()
                 continue
+            trigger_type_text = str(task["trigger_type"] or "").strip().lower()
+            if trigger_type_text == "scheduled" and (int(row["is_renewed"] or 0) == 1 or is_before_renew_until(row, now_dt)):
+                skip_reason = "检测到服务器已续租，已取消队列中的定时重置任务"
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        "UPDATE task_queue SET status='failed', last_error=?, updated_at=? WHERE id=?",
+                        (skip_reason, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), task_id),
+                    )
+                    conn.commit()
+                update_log(task["log_id"], "failed", skip_reason, skip_reason)
+                if task["batch_key"]:
+                    upsert_notification_batch_item(task["batch_key"], row, "skipped", note=skip_reason, log_id=task["log_id"])
+                    maybe_send_batch_email(task["batch_key"])
+                write_detailed_log(
+                    "task_worker.skip_renewed",
+                    task_id=task_id,
+                    server_id=task["server_id"],
+                    is_renewed=int(row["is_renewed"] or 0),
+                    renew_until_date=row["renew_until_date"],
+                )
+                continue
 
             with closing(get_conn()) as conn:
                 conn.execute(
@@ -4083,7 +4145,6 @@ def task_worker_loop():
 
             attempt_no = int(task["attempt"] or 0) + 1
             max_attempts = int(task["max_attempts"] or 1)
-            trigger_type_text = str(task["trigger_type"] or "").strip().lower()
             if trigger_type_text == "scheduled":
                 max_attempts = max(max_attempts, 3)
             update_log(
@@ -5121,7 +5182,10 @@ def update_rental_next_status(server_id):
         conn.commit()
 
     if status == "confirmed":
+        canceled = cancel_pending_scheduled_tasks(server_id, reason="已标记确认续租，已取消队列中的定时重置任务")
         flash(f"[{row['name']}] 下月租户已标记为确认续租，服务器详情已切换为已续租", "success")
+        if canceled:
+            flash(f"[{row['name']}] 已取消 {canceled} 条排队中的定时重置任务", "success")
     elif status == "non_renew":
         flash(f"[{row['name']}] 已标记不续租，服务器详情已切换为未续租", "success")
     elif status == "reserved":
@@ -5717,14 +5781,19 @@ def delete_server(server_id):
 @login_required
 def toggle_renew(server_id):
     with closing(get_conn()) as conn:
-        row = conn.execute("SELECT is_renewed FROM servers WHERE id = ?", (server_id,)).fetchone()
+        row = conn.execute("SELECT is_renewed, name FROM servers WHERE id = ?", (server_id,)).fetchone()
         if not row:
             flash("服务器不存在", "error")
             return redirect(url_for("details_page"))
         next_state = 0 if row["is_renewed"] else 1
         conn.execute("UPDATE servers SET is_renewed = ? WHERE id = ?", (next_state, server_id))
         conn.commit()
+    canceled = 0
+    if next_state == 1:
+        canceled = cancel_pending_scheduled_tasks(server_id, reason="已切换为续租状态，已取消队列中的定时重置任务")
     flash("已切换为续租状态，后续将跳过定时重置" if next_state else "已关闭续租状态，恢复按计划重置", "success")
+    if canceled:
+        flash(f"[{row['name']}] 已取消 {canceled} 条排队中的定时重置任务", "success")
     return redirect(url_for("details_page"))
 
 
@@ -5745,6 +5814,21 @@ def set_renew_until(server_id):
         conn.commit()
     log_system_event("long_renew", f"服务器[{row['name']}] 设置长期续费至 {date_text or '空'}", server_id=server_id)
     flash(f"长期续费日期已更新为 {date_text or '未设置'}", "success")
+    return redirect(url_for("details_page"))
+
+
+@app.post("/servers/<int:server_id>/cancel-queued-reset")
+@login_required
+def cancel_queued_reset(server_id):
+    row = get_server(server_id)
+    if not row:
+        flash("服务器不存在", "error")
+        return redirect(url_for("details_page"))
+    canceled = cancel_pending_scheduled_tasks(server_id, reason="用户手动取消队列中的定时重置任务")
+    if canceled:
+        flash(f"[{row['name']}] 已取消 {canceled} 条排队中的定时重置任务", "success")
+    else:
+        flash(f"[{row['name']}] 当前没有可取消的排队任务", "error")
     return redirect(url_for("details_page"))
 
 
