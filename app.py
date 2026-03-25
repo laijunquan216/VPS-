@@ -4764,7 +4764,16 @@ def check_scheduled_reset_jobs(now_dt=None):
             continue
 
         if row["is_renewed"]:
-            upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置")
+            renew_until = _parse_date_text(row["renew_until_date"])
+            if renew_until:
+                upsert_notification_batch_item(batch_key, row, "skipped", note=f"续租中（长期续费至{row['renew_until_date']}），已跳过定时重置")
+                log_system_event("scheduled_reset", f"服务器[{row['name']}] 因续租状态跳过定时重置", server_id=row["id"], details=row["renew_until_date"])
+                continue
+
+            with closing(get_conn()) as conn:
+                conn.execute("UPDATE servers SET is_renewed = 0 WHERE id = ?", (row["id"],))
+                conn.commit()
+            upsert_notification_batch_item(batch_key, row, "skipped", note="续租中，已跳过定时重置；已自动切换为未续租（仅本周期跳过）")
             log_system_event("scheduled_reset", f"服务器[{row['name']}] 因续租状态跳过定时重置", server_id=row["id"])
             continue
 
