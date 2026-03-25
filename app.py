@@ -137,6 +137,8 @@ TRAFFIC_REFRESH_STATE = {
     "fail_count": 0,
     "message": "",
 }
+SNAPSHOT_JOB_LOCK = threading.Lock()
+SNAPSHOT_RUNNING_SERVERS = set()
 
 
 def get_conn():
@@ -198,7 +200,14 @@ def init_db():
                 ssh_status TEXT NOT NULL DEFAULT 'unknown',
                 ssh_checked_at TEXT,
                 scp_image_catalog TEXT NOT NULL DEFAULT '',
-                scp_selected_image TEXT NOT NULL DEFAULT ''
+                scp_selected_image TEXT NOT NULL DEFAULT '',
+                snapshot_auto_enabled INTEGER NOT NULL DEFAULT 0,
+                snapshot_auto_mode TEXT NOT NULL DEFAULT 'online',
+                snapshot_auto_disk_name TEXT NOT NULL DEFAULT '',
+                snapshot_keep_count INTEGER NOT NULL DEFAULT 3,
+                snapshot_schedule_hour INTEGER NOT NULL DEFAULT 3,
+                snapshot_schedule_minute INTEGER NOT NULL DEFAULT 0,
+                snapshot_last_run_slot TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -445,6 +454,13 @@ def init_db():
         ensure_column(conn, "servers", "retry_backoff_seconds TEXT NOT NULL DEFAULT '60,180'")
         ensure_column(conn, "servers", "scp_account_id INTEGER")
         ensure_column(conn, "servers", "scp_server_id TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "snapshot_auto_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "snapshot_auto_mode TEXT NOT NULL DEFAULT 'online'")
+        ensure_column(conn, "servers", "snapshot_auto_disk_name TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "servers", "snapshot_keep_count INTEGER NOT NULL DEFAULT 3")
+        ensure_column(conn, "servers", "snapshot_schedule_hour INTEGER NOT NULL DEFAULT 3")
+        ensure_column(conn, "servers", "snapshot_schedule_minute INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "snapshot_last_run_slot TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "servers", "reinstall_mode TEXT NOT NULL DEFAULT 'ssh'")
         ensure_column(conn, "scp_accounts", "refresh_token TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "scp_accounts", "api_status TEXT NOT NULL DEFAULT 'unknown'")
@@ -1417,6 +1433,141 @@ def _scp_extract_root_password(task_data):
             return str(pwd).strip()
     pwd = task_data.get("rootPassword") or task_data.get("root_password")
     return str(pwd).strip() if pwd else ""
+
+
+def _get_snapshot_server_context(server_id):
+    row = get_server(server_id)
+    if not row:
+        raise ValueError("服务器不存在")
+
+    account_id = row["scp_account_id"] if isinstance(row, sqlite3.Row) else (row or {}).get("scp_account_id")
+    scp_server_id = str(row["scp_server_id"] if isinstance(row, sqlite3.Row) else (row or {}).get("scp_server_id") or "").strip()
+    account = get_scp_account(account_id) if account_id else None
+
+    if not scp_server_id:
+        output_lines = []
+        account_scope = [account] if account else None
+        account, scp_server_id = find_scp_server_id_by_ip(row["ip"], output_lines, account_candidates=account_scope)
+        if not account or not scp_server_id:
+            raise RuntimeError("未绑定SCP服务器ID，且无法按IP自动识别")
+        bind_scp_server(server_id, account["id"], scp_server_id)
+    elif not account:
+        raise RuntimeError("该服务器绑定的SCP账号不存在，请在设置页重新配置")
+
+    endpoint_base, token = scp_rest_login(account)
+    return dict(row), account, str(scp_server_id).strip(), endpoint_base, token
+
+
+def scp_list_snapshots(server_id):
+    _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+    payload = scp_rest_request(account, "GET", f"servers/{urlparse.quote(scp_server_id)}/snapshots", token=token, endpoint_base=endpoint_base)
+    items = payload if isinstance(payload, list) else payload.get("items") if isinstance(payload, dict) else []
+    results = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        results.append(
+            {
+                "uuid": str(item.get("uuid") or "").strip(),
+                "name": str(item.get("name") or "").strip(),
+                "description": str(item.get("description") or "").strip(),
+                "creationTime": str(item.get("creationTime") or "").strip(),
+                "disks": item.get("disks") if isinstance(item.get("disks"), list) else [],
+                "online": bool(item.get("online")),
+                "state": str(item.get("state") or "").strip(),
+            }
+        )
+    results.sort(key=lambda x: x.get("creationTime") or "", reverse=True)
+    return results
+
+
+def scp_create_snapshot(server_id, online_snapshot, name, description="", disk_name=""):
+    _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+    payload = {
+        "name": str(name or "").strip(),
+        "description": str(description or "").strip() or ("Auto snapshot" if online_snapshot else "Offline snapshot"),
+        "onlineSnapshot": bool(online_snapshot),
+    }
+    if not payload["name"]:
+        payload["name"] = datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
+    if not online_snapshot:
+        disk_text = str(disk_name or "").strip()
+        if not disk_text:
+            raise ValueError("离线快照必须填写 diskName")
+        payload["diskName"] = disk_text
+    data = scp_rest_request(
+        account,
+        "POST",
+        f"servers/{urlparse.quote(scp_server_id)}/snapshots",
+        token=token,
+        payload=payload,
+        endpoint_base=endpoint_base,
+    )
+    task_uuid = _scp_extract_task_uuid(data if isinstance(data, dict) else {})
+    return task_uuid, data
+
+
+def scp_delete_snapshot(server_id, snapshot_name):
+    _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+    name_text = str(snapshot_name or "").strip()
+    if not name_text:
+        raise ValueError("快照名称不能为空")
+    data = scp_rest_request(
+        account,
+        "DELETE",
+        f"servers/{urlparse.quote(scp_server_id)}/snapshots/{urlparse.quote(name_text)}",
+        token=token,
+        endpoint_base=endpoint_base,
+    )
+    task_uuid = _scp_extract_task_uuid(data if isinstance(data, dict) else {})
+    return task_uuid, data
+
+
+def scp_get_task_status(server_id, task_uuid):
+    _, account, _, endpoint_base, token = _get_snapshot_server_context(server_id)
+    uuid_text = str(task_uuid or "").strip()
+    if not uuid_text:
+        raise ValueError("任务UUID不能为空")
+    return scp_rest_request(account, "GET", f"tasks/{urlparse.quote(uuid_text)}", token=token, endpoint_base=endpoint_base)
+
+
+def _snapshot_task_finished(state_text):
+    state = str(state_text or "").upper()
+    return state in {"SUCCESS", "FINISHED", "FAILED", "ERROR", "CANCELLED", "CANCELED"}
+
+
+def _snapshot_task_success(state_text):
+    state = str(state_text or "").upper()
+    return state in {"SUCCESS", "FINISHED"}
+
+
+def scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=300):
+    deadline = time.time() + max(30, int(timeout_seconds or 300))
+    while time.time() < deadline:
+        data = scp_get_task_status(server_id, task_uuid)
+        state = str((data or {}).get("state") or "").upper()
+        if _snapshot_task_finished(state):
+            return data
+        time.sleep(max(1, int(interval_seconds or 3)))
+    raise TimeoutError(f"任务轮询超时: {task_uuid}")
+
+
+def scp_cleanup_old_snapshots(server_id, keep_count):
+    keep = max(0, int(keep_count or 0))
+    snapshots = scp_list_snapshots(server_id)
+    active_states = {"PENDING", "RUNNING"}
+    stable = [x for x in snapshots if str(x.get("state") or "").upper() not in active_states]
+    remove_targets = stable[keep:]
+    deleted = []
+    skipped = [x.get("name") for x in snapshots if str(x.get("state") or "").upper() in active_states]
+    for item in remove_targets:
+        task_uuid, _ = scp_delete_snapshot(server_id, item.get("name"))
+        if task_uuid:
+            final_data = scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=600)
+            if not _snapshot_task_success(final_data.get("state")):
+                raise RuntimeError(f"删除快照失败: {item.get('name')} ({final_data.get('state')})")
+        deleted.append(item.get("name"))
+    return {"deleted": deleted, "skipped": skipped}
 
 
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
@@ -4702,12 +4853,73 @@ def run_scheduled_auto_delivery(now_dt=None):
                 conn.commit()
 
 
+def _run_snapshot_automation_for_server(server_id, trigger_slot):
+    with SNAPSHOT_JOB_LOCK:
+        if server_id in SNAPSHOT_RUNNING_SERVERS:
+            return
+        SNAPSHOT_RUNNING_SERVERS.add(server_id)
+    try:
+        row = get_server(server_id)
+        if not row:
+            return
+        mode = str(row["snapshot_auto_mode"] or "online").strip().lower()
+        online = mode != "offline"
+        disk_name = str(row["snapshot_auto_disk_name"] or "").strip()
+        keep_count = int(row["snapshot_keep_count"] or 3)
+        snapshot_name = datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
+        desc = f"Auto snapshot {trigger_slot}"
+        task_uuid, _ = scp_create_snapshot(server_id, online, snapshot_name, desc, disk_name=disk_name)
+        if task_uuid:
+            final_task = scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=1800)
+            if not _snapshot_task_success(final_task.get("state")):
+                raise RuntimeError(f"快照任务失败: {final_task.get('state')}")
+        cleanup_result = scp_cleanup_old_snapshots(server_id, keep_count)
+        log_system_event(
+            "snapshot_auto",
+            f"服务器[{row['name']}] 自动快照完成，保留{keep_count}个，删除{len(cleanup_result['deleted'])}个",
+            server_id=server_id,
+            details=",".join(cleanup_result["deleted"][:10]),
+        )
+    except Exception as exc:
+        log_system_event("snapshot_auto", f"服务器[{server_id}] 自动快照失败: {exc}", level="error", server_id=server_id)
+    finally:
+        with SNAPSHOT_JOB_LOCK:
+            SNAPSHOT_RUNNING_SERVERS.discard(server_id)
+
+
+def run_scheduled_snapshot_jobs(now_dt=None):
+    now = now_dt or datetime.now(TIMEZONE)
+    slot = now.strftime("%Y-%m-%d %H:%M")
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, snapshot_auto_enabled, snapshot_schedule_hour, snapshot_schedule_minute, snapshot_last_run_slot
+            FROM servers
+            WHERE snapshot_auto_enabled = 1
+            ORDER BY sort_order ASC, id ASC
+            """
+        ).fetchall()
+    for row in rows:
+        hour = int(row["snapshot_schedule_hour"] or 0)
+        minute = int(row["snapshot_schedule_minute"] or 0)
+        if now.hour != hour or now.minute != minute:
+            continue
+        last_slot = str(row["snapshot_last_run_slot"] or "").strip()
+        if last_slot == slot:
+            continue
+        with closing(get_conn()) as conn:
+            conn.execute("UPDATE servers SET snapshot_last_run_slot = ? WHERE id = ?", (slot, row["id"]))
+            conn.commit()
+        threading.Thread(target=_run_snapshot_automation_for_server, args=(row["id"], slot), daemon=True).start()
+
+
 def check_lightweight_scheduled_jobs(now_dt=None):
     now = now_dt or datetime.now(TIMEZONE)
     write_detailed_log("scheduler.light.start", now=now.strftime("%Y-%m-%d %H:%M:%S"))
     run_scheduled_backup_email(now)
     run_scheduled_auto_delivery(now)
     run_scheduled_renew_notice_email(now)
+    run_scheduled_snapshot_jobs(now)
 
 
 def check_scheduled_reset_jobs(now_dt=None):
@@ -4936,6 +5148,24 @@ def details_page():
     success = len([r for r in normalized_rows if r["status"] == "success"])
     failed = len([r for r in normalized_rows if r["status"] == "failed"])
     never = len([r for r in normalized_rows if not r["latest_run_at"]])
+    selected_snapshot_server_id = int(request.args.get("snapshot_server_id") or 0) if str(request.args.get("snapshot_server_id") or "").isdigit() else 0
+    snapshot_server = None
+    snapshot_list = []
+    snapshot_task = None
+    snapshot_error = ""
+    if selected_snapshot_server_id:
+        snapshot_server = next((item for item in normalized_rows if int(item["id"]) == selected_snapshot_server_id), None)
+        if snapshot_server:
+            try:
+                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
+            except Exception as exc:
+                snapshot_error = str(exc)
+            task_uuid = (request.args.get("snapshot_task_uuid") or "").strip()
+            if task_uuid:
+                try:
+                    snapshot_task = scp_get_task_status(selected_snapshot_server_id, task_uuid)
+                except Exception as exc:
+                    snapshot_error = f"{snapshot_error}; {exc}" if snapshot_error else str(exc)
     return render_template(
         "details.html",
         rented_rows=rented_rows,
@@ -4947,6 +5177,12 @@ def details_page():
         failed=failed,
         never=never,
         latest_api_image_refresh_job=get_latest_api_image_refresh_job(),
+        snapshot_servers=normalized_rows,
+        snapshot_server=snapshot_server,
+        snapshot_list=snapshot_list,
+        snapshot_task=snapshot_task,
+        snapshot_error=snapshot_error,
+        selected_snapshot_server_id=selected_snapshot_server_id,
     )
 
 
@@ -5996,6 +6232,135 @@ def run_now(server_id):
     ok, msg, _ = run_for_server(server_id)
     flash(msg, "success" if ok else "error")
     return redirect(url_for("details_page"))
+
+
+@app.post("/snapshots/create-online")
+@login_required
+def create_online_snapshot():
+    server_id = int(request.form.get("server_id") or 0)
+    if not server_id:
+        flash("请先选择服务器", "error")
+        return redirect(url_for("details_page"))
+    name = (request.form.get("snapshot_name") or "").strip() or datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
+    desc = (request.form.get("snapshot_description") or "").strip() or "Auto snapshot"
+    try:
+        task_uuid, _ = scp_create_snapshot(server_id, True, name, desc)
+        flash(f"在线快照任务已提交: {task_uuid or '未知任务ID'}", "success")
+        return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid or ""))
+    except Exception as exc:
+        flash(f"在线快照创建失败: {exc}", "error")
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
+
+
+@app.post("/snapshots/create-offline")
+@login_required
+def create_offline_snapshot():
+    server_id = int(request.form.get("server_id") or 0)
+    if not server_id:
+        flash("请先选择服务器", "error")
+        return redirect(url_for("details_page"))
+    name = (request.form.get("snapshot_name") or "").strip() or datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
+    desc = (request.form.get("snapshot_description") or "").strip() or "Offline snapshot"
+    disk_name = (request.form.get("snapshot_disk_name") or "").strip()
+    try:
+        task_uuid, _ = scp_create_snapshot(server_id, False, name, desc, disk_name=disk_name)
+        flash(f"离线快照任务已提交: {task_uuid or '未知任务ID'}（注意会短暂关机）", "success")
+        return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid or ""))
+    except Exception as exc:
+        flash(f"离线快照创建失败: {exc}", "error")
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
+
+
+@app.post("/snapshots/delete")
+@login_required
+def delete_snapshot_action():
+    server_id = int(request.form.get("server_id") or 0)
+    snap_name = (request.form.get("snapshot_delete_name") or "").strip()
+    try:
+        task_uuid, _ = scp_delete_snapshot(server_id, snap_name)
+        flash(f"删除快照任务已提交: {task_uuid or '未知任务ID'}", "success")
+        return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid or ""))
+    except Exception as exc:
+        flash(f"删除快照失败: {exc}", "error")
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
+
+
+@app.post("/snapshots/task/query")
+@login_required
+def query_snapshot_task():
+    server_id = int(request.form.get("server_id") or 0)
+    task_uuid = (request.form.get("snapshot_task_uuid") or "").strip()
+    return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid))
+
+
+@app.post("/snapshots/task/poll")
+@login_required
+def poll_snapshot_task():
+    server_id = int(request.form.get("server_id") or 0)
+    task_uuid = (request.form.get("snapshot_task_uuid") or "").strip()
+    timeout_seconds = int(request.form.get("timeout_seconds") or 300)
+    try:
+        final_task = scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=timeout_seconds)
+        flash(f"任务轮询完成: state={final_task.get('state')}", "success" if _snapshot_task_success(final_task.get("state")) else "error")
+    except Exception as exc:
+        flash(f"任务轮询失败: {exc}", "error")
+    return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid))
+
+
+@app.post("/snapshots/cleanup")
+@login_required
+def cleanup_snapshot_action():
+    server_id = int(request.form.get("server_id") or 0)
+    keep_count = int(request.form.get("snapshot_keep_count") or 3)
+    try:
+        result = scp_cleanup_old_snapshots(server_id, keep_count)
+        flash(f"快照清理完成：删除{len(result['deleted'])}个，跳过进行中{len(result['skipped'])}个", "success")
+    except Exception as exc:
+        flash(f"快照清理失败: {exc}", "error")
+    return redirect(url_for("details_page", snapshot_server_id=server_id))
+
+
+@app.post("/snapshots/settings")
+@login_required
+def update_snapshot_settings():
+    server_id = int(request.form.get("server_id") or 0)
+    mode = (request.form.get("snapshot_auto_mode") or "online").strip().lower()
+    if mode not in {"online", "offline"}:
+        mode = "online"
+    disk_name = (request.form.get("snapshot_auto_disk_name") or "").strip()
+    try:
+        keep_count = max(1, min(20, int(request.form.get("snapshot_keep_count") or 3)))
+        hour = max(0, min(23, int(request.form.get("snapshot_schedule_hour") or 3)))
+        minute = max(0, min(59, int(request.form.get("snapshot_schedule_minute") or 0)))
+    except Exception:
+        flash("快照定时参数格式错误", "error")
+        return redirect(url_for("details_page", snapshot_server_id=server_id))
+    enabled = 1 if (request.form.get("snapshot_auto_enabled") == "on") else 0
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            UPDATE servers
+            SET snapshot_auto_enabled = ?,
+                snapshot_auto_mode = ?,
+                snapshot_auto_disk_name = ?,
+                snapshot_keep_count = ?,
+                snapshot_schedule_hour = ?,
+                snapshot_schedule_minute = ?
+            WHERE id = ?
+            """,
+            (
+                enabled,
+                mode,
+                disk_name,
+                keep_count,
+                hour,
+                minute,
+                server_id,
+            ),
+        )
+        conn.commit()
+    flash("快照定时设置已保存", "success")
+    return redirect(url_for("details_page", snapshot_server_id=server_id))
 
 
 def start_public_stock_server():
