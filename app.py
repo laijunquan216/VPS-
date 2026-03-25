@@ -5232,6 +5232,33 @@ def details_page():
     )
 
 
+@app.route("/snapshots")
+@login_required
+def snapshot_page():
+    rows = list_detail_rows()
+    snapshot_servers = [dict(r) for r in rows]
+    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
+    snapshot_server = None
+    snapshot_list = []
+    snapshot_error = ""
+    if selected_snapshot_server_id:
+        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
+        if snapshot_server:
+            try:
+                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
+            except Exception as exc:
+                snapshot_error = str(exc)
+    return render_template(
+        "snapshots.html",
+        snapshot_servers=snapshot_servers,
+        snapshot_server=snapshot_server,
+        snapshot_list=snapshot_list,
+        snapshot_error=snapshot_error,
+        selected_snapshot_server_id=selected_snapshot_server_id,
+        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
+    )
+
+
 
 
 @app.route("/traffic")
@@ -6292,10 +6319,10 @@ def create_online_snapshot():
     try:
         task_uuid, _ = scp_create_snapshot(server_id, True, name, desc)
         flash(f"在线快照任务已提交: {task_uuid or '未知任务ID'}", "success")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
+        return redirect(url_for("snapshot_page", server_id=server_id))
     except Exception as exc:
         flash(f"在线快照创建失败: {exc}", "error")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
+        return redirect(url_for("snapshot_page", server_id=server_id))
 
 
 @app.post("/snapshots/create-offline")
@@ -6311,10 +6338,10 @@ def create_offline_snapshot():
     try:
         task_uuid, _ = scp_create_snapshot(server_id, False, name, desc, disk_name=disk_name)
         flash(f"离线快照任务已提交: {task_uuid or '未知任务ID'}（注意会短暂关机）", "success")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
+        return redirect(url_for("snapshot_page", server_id=server_id))
     except Exception as exc:
         flash(f"离线快照创建失败: {exc}", "error")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
+        return redirect(url_for("snapshot_page", server_id=server_id))
 
 
 @app.post("/snapshots/delete")
@@ -6325,32 +6352,10 @@ def delete_snapshot_action():
     try:
         task_uuid, _ = scp_delete_snapshot(server_id, snap_name)
         flash(f"删除快照任务已提交: {task_uuid or '未知任务ID'}", "success")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
+        return redirect(url_for("snapshot_page", server_id=server_id))
     except Exception as exc:
         flash(f"删除快照失败: {exc}", "error")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
-
-
-@app.post("/snapshots/task/query")
-@login_required
-def query_snapshot_task():
-    server_id = int(request.form.get("server_id") or 0)
-    task_uuid = (request.form.get("snapshot_task_uuid") or "").strip()
-    return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid))
-
-
-@app.post("/snapshots/task/poll")
-@login_required
-def poll_snapshot_task():
-    server_id = int(request.form.get("server_id") or 0)
-    task_uuid = (request.form.get("snapshot_task_uuid") or "").strip()
-    timeout_seconds = int(request.form.get("timeout_seconds") or 300)
-    try:
-        final_task = scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=timeout_seconds)
-        flash(f"任务轮询完成: state={final_task.get('state')}", "success" if _snapshot_task_success(final_task.get("state")) else "error")
-    except Exception as exc:
-        flash(f"任务轮询失败: {exc}", "error")
-    return redirect(url_for("details_page", snapshot_server_id=server_id, snapshot_task_uuid=task_uuid))
+        return redirect(url_for("snapshot_page", server_id=server_id))
 
 
 @app.post("/snapshots/cleanup")
@@ -6368,7 +6373,7 @@ def cleanup_snapshot_action():
         flash(msg, "success")
     except Exception as exc:
         flash(f"快照清理失败: {exc}", "error")
-    return redirect(url_for("details_page", snapshot_server_id=server_id))
+    return redirect(url_for("snapshot_page", server_id=server_id))
 
 
 @app.post("/snapshots/settings")
@@ -6385,13 +6390,13 @@ def update_snapshot_settings():
     cron_parts = cron_expr.split()
     if len(cron_parts) != 5:
         flash("Cron 表达式格式错误，需为 5 段（分 时 日 月 周）", "error")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
+        return redirect(url_for("snapshot_page", server_id=server_id))
 
     try:
         keep_count = max(1, min(20, int(request.form.get("snapshot_keep_count") or 3)))
     except Exception:
         flash("快照定时参数格式错误", "error")
-        return redirect(url_for("details_page", snapshot_server_id=server_id))
+        return redirect(url_for("snapshot_page", server_id=server_id))
     enabled = 1 if (request.form.get("snapshot_auto_enabled") == "on") else 0
     with closing(get_conn()) as conn:
         conn.execute(
@@ -6415,7 +6420,7 @@ def update_snapshot_settings():
         )
         conn.commit()
     flash("快照定时设置已保存", "success")
-    return redirect(url_for("details_page", snapshot_server_id=server_id))
+    return redirect(url_for("snapshot_page", server_id=server_id))
 
 
 def start_public_stock_server():

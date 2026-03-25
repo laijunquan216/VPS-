@@ -219,11 +219,15 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:
   font-weight: 700;
 }
 
-.snapshot-panel .snapshot-select-form{margin-bottom:10px}
-.snapshot-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin:10px 0 14px}
-.snapshot-grid .grid-form{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
+.snapshot-panel .snapshot-select-form{margin-bottom:12px}
+.snapshot-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:12px 0 14px}
+.snapshot-grid-4{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.snapshot-grid .grid-form{background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px}
+.snapshot-card button{width:100%;min-height:44px}
 .snapshot-table-wrap{overflow:auto;border:1px solid #e5e7eb;border-radius:8px}
 .snapshot-table{width:100%;border-collapse:collapse;font-size:13px}
 .snapshot-table th,.snapshot-table td{border-bottom:1px solid #f1f5f9;padding:8px;text-align:left;white-space:nowrap}
 .snapshot-task-view{margin-bottom:10px}
 .hint.danger{color:#b91c1c}
+.snapshot-table td form{margin:0}
+.snapshot-table .small{padding:6px 12px;min-height:32px}
