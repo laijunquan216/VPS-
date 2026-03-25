@@ -1465,15 +1465,32 @@ def _normalize_snapshot_state(item):
     raw_status = str(item.get("status") or item.get("snapshotStatus") or item.get("snapshot_state") or "").strip().upper()
 
     if raw_status:
-        return raw_status, raw_state
+        return raw_status
 
     # 某些SCP接口把 state 返回为服务器电源状态（RUNNING/SHUTOFF），并非快照任务状态。
     # 快照能出现在列表中通常意味着创建已完成，这里统一展示为 FINISHED，避免误判一直 RUNNING。
     power_states = {"RUNNING", "SHUTOFF", "STOPPED", "STOPPING", "STARTING", "SUSPENDED"}
     if raw_state in power_states:
-        return "FINISHED", raw_state
+        return "FINISHED"
 
-    return raw_state, ""
+    return raw_state
+
+
+SNAPSHOT_STATE_LABELS = {
+    "FINISHED": "已完成",
+    "SUCCESS": "已完成",
+    "RUNNING": "进行中",
+    "PENDING": "排队中",
+    "FAILED": "失败",
+    "ERROR": "错误",
+    "CANCELLED": "已取消",
+    "CANCELED": "已取消",
+}
+
+
+def _display_snapshot_state(state_text):
+    state = str(state_text or "").strip().upper()
+    return SNAPSHOT_STATE_LABELS.get(state, state or "-")
 
 
 def scp_list_snapshots(server_id):
@@ -1484,7 +1501,7 @@ def scp_list_snapshots(server_id):
     for item in items or []:
         if not isinstance(item, dict):
             continue
-        snapshot_state, instance_state = _normalize_snapshot_state(item)
+        snapshot_state = _normalize_snapshot_state(item)
         results.append(
             {
                 "uuid": str(item.get("uuid") or "").strip(),
@@ -1494,7 +1511,7 @@ def scp_list_snapshots(server_id):
                 "disks": item.get("disks") if isinstance(item.get("disks"), list) else [],
                 "online": bool(item.get("online")),
                 "state": snapshot_state,
-                "instance_state": instance_state,
+                "state_display": _display_snapshot_state(snapshot_state),
             }
         )
     results.sort(key=lambda x: x.get("creationTime") or "", reverse=True)
