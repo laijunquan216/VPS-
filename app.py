@@ -5280,6 +5280,7 @@ def details_page():
     )
 
 
+@app.route("/snapshots", endpoint="snapshot_page")
 @app.route("/snapshots", endpoint="snapshot_center")
 @login_required
 def snapshot_center_page():
