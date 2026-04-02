@@ -1460,6 +1460,39 @@ def _get_snapshot_server_context(server_id):
     return dict(row), account, str(scp_server_id).strip(), endpoint_base, token
 
 
+def _normalize_snapshot_state(item):
+    raw_state = str(item.get("state") or "").strip().upper()
+    raw_status = str(item.get("status") or item.get("snapshotStatus") or item.get("snapshot_state") or "").strip().upper()
+
+    if raw_status:
+        return raw_status
+
+    # 某些SCP接口把 state 返回为服务器电源状态（RUNNING/SHUTOFF），并非快照任务状态。
+    # 快照能出现在列表中通常意味着创建已完成，这里统一展示为 FINISHED，避免误判一直 RUNNING。
+    power_states = {"RUNNING", "SHUTOFF", "STOPPED", "STOPPING", "STARTING", "SUSPENDED"}
+    if raw_state in power_states:
+        return "FINISHED"
+
+    return raw_state
+
+
+SNAPSHOT_STATE_LABELS = {
+    "FINISHED": "已完成",
+    "SUCCESS": "已完成",
+    "RUNNING": "进行中",
+    "PENDING": "排队中",
+    "FAILED": "失败",
+    "ERROR": "错误",
+    "CANCELLED": "已取消",
+    "CANCELED": "已取消",
+}
+
+
+def _display_snapshot_state(state_text):
+    state = str(state_text or "").strip().upper()
+    return SNAPSHOT_STATE_LABELS.get(state, state or "-")
+
+
 def scp_list_snapshots(server_id):
     _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
     payload = scp_rest_request(account, "GET", f"servers/{urlparse.quote(scp_server_id)}/snapshots", token=token, endpoint_base=endpoint_base)
@@ -1468,6 +1501,7 @@ def scp_list_snapshots(server_id):
     for item in items or []:
         if not isinstance(item, dict):
             continue
+        snapshot_state = _normalize_snapshot_state(item)
         results.append(
             {
                 "uuid": str(item.get("uuid") or "").strip(),
@@ -1476,7 +1510,8 @@ def scp_list_snapshots(server_id):
                 "creationTime": str(item.get("creationTime") or "").strip(),
                 "disks": item.get("disks") if isinstance(item.get("disks"), list) else [],
                 "online": bool(item.get("online")),
-                "state": str(item.get("state") or "").strip(),
+                "state": snapshot_state,
+                "state_display": _display_snapshot_state(snapshot_state),
             }
         )
     results.sort(key=lambda x: x.get("creationTime") or "", reverse=True)
@@ -4385,8 +4420,10 @@ def task_worker_loop():
             if latest and latest["status"] == "success":
                 output = latest["output"] if latest else ""
                 pt_install_failed = has_pt_install_failure(output)
-                if pt_install_failed and trigger_type_text == "scheduled":
-                    if attempt_no < 3:
+                if pt_install_failed:
+                    # 定时任务固定最多重试3次；手动任务遵循服务器配置的 max_attempts。
+                    pt_retry_limit = 3 if trigger_type_text == "scheduled" else max_attempts
+                    if attempt_no < pt_retry_limit:
                         next_time = datetime.now(TIMEZONE) + timedelta(seconds=5)
                         with closing(get_conn()) as conn:
                             conn.execute(
@@ -4406,11 +4443,13 @@ def task_worker_loop():
                             server_id=task["server_id"],
                             attempt=attempt_no,
                             next_run_at=next_time.strftime("%Y-%m-%d %H:%M:%S"),
+                            retry_limit=pt_retry_limit,
+                            trigger_type=trigger_type_text,
                         )
                         update_log(
                             task["log_id"],
                             "retrying",
-                            f"检测到 PT 环境安装失败，已自动重试（第{attempt_no + 1}/3次）",
+                            f"检测到 PT 环境安装失败，已自动重试（第{attempt_no + 1}/{pt_retry_limit}次）",
                             (output or "") + "\n\n系统提示: 检测到PT环境安装失败，已自动加入队列重置并重装",
                         )
                         if task["batch_key"]:
@@ -4418,7 +4457,7 @@ def task_worker_loop():
                                 task["batch_key"],
                                 row,
                                 "retrying",
-                                note=f"PT环境安装失败，已自动重试（第{attempt_no + 1}/3次）",
+                                note=f"PT环境安装失败，已自动重试（第{attempt_no + 1}/{pt_retry_limit}次）",
                                 log_id=task["log_id"],
                             )
                         TASK_QUEUE.put(task_id)
@@ -4438,15 +4477,15 @@ def task_worker_loop():
                     update_log(
                         task["log_id"],
                         "failed",
-                        "任务失败：PT环境安装失败（已重试3次）",
-                        (output or "") + "\n\n系统提示: PT环境重装累计3次仍失败，已停止自动重试",
+                        f"任务失败：PT环境安装失败（已重试{pt_retry_limit}次）",
+                        (output or "") + f"\n\n系统提示: PT环境重装累计{pt_retry_limit}次仍失败，已停止自动重试",
                     )
                     if task["batch_key"]:
                         upsert_notification_batch_item(
                             task["batch_key"],
                             row,
                             "failed",
-                            note="PT环境安装失败，自动重试3次后仍失败",
+                            note=f"PT环境安装失败，自动重试{pt_retry_limit}次后仍失败",
                             log_id=task["log_id"],
                         )
                         maybe_send_batch_email(task["batch_key"])
@@ -5280,87 +5319,7 @@ def details_page():
     )
 
 
-@app.route("/snapshots")
-@login_required
-def snapshot_page():
-    rows = list_detail_rows()
-    snapshot_servers = [dict(r) for r in rows]
-    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
-    snapshot_server = None
-    snapshot_list = []
-    snapshot_error = ""
-    if selected_snapshot_server_id:
-        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
-        if snapshot_server:
-            try:
-                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
-            except Exception as exc:
-                snapshot_error = str(exc)
-    return render_template(
-        "snapshots.html",
-        snapshot_servers=snapshot_servers,
-        snapshot_server=snapshot_server,
-        snapshot_list=snapshot_list,
-        snapshot_error=snapshot_error,
-        selected_snapshot_server_id=selected_snapshot_server_id,
-        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
-    )
-
-
-@app.route("/snapshots")
-@login_required
-def snapshot_page():
-    rows = list_detail_rows()
-    snapshot_servers = [dict(r) for r in rows]
-    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
-    snapshot_server = None
-    snapshot_list = []
-    snapshot_error = ""
-    if selected_snapshot_server_id:
-        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
-        if snapshot_server:
-            try:
-                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
-            except Exception as exc:
-                snapshot_error = str(exc)
-    return render_template(
-        "snapshots.html",
-        snapshot_servers=snapshot_servers,
-        snapshot_server=snapshot_server,
-        snapshot_list=snapshot_list,
-        snapshot_error=snapshot_error,
-        selected_snapshot_server_id=selected_snapshot_server_id,
-        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
-    )
-
-
-@app.route("/snapshots", endpoint="snapshot_page_view")
-@login_required
-def snapshot_page():
-    rows = list_detail_rows()
-    snapshot_servers = [dict(r) for r in rows]
-    selected_snapshot_server_id = int(request.args.get("server_id") or 0) if str(request.args.get("server_id") or "").isdigit() else 0
-    snapshot_server = None
-    snapshot_list = []
-    snapshot_error = ""
-    if selected_snapshot_server_id:
-        snapshot_server = next((item for item in snapshot_servers if int(item["id"]) == selected_snapshot_server_id), None)
-        if snapshot_server:
-            try:
-                snapshot_list = scp_list_snapshots(selected_snapshot_server_id)
-            except Exception as exc:
-                snapshot_error = str(exc)
-    return render_template(
-        "snapshots.html",
-        snapshot_servers=snapshot_servers,
-        snapshot_server=snapshot_server,
-        snapshot_list=snapshot_list,
-        snapshot_error=snapshot_error,
-        selected_snapshot_server_id=selected_snapshot_server_id,
-        snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
-    )
-
-
+@app.route("/snapshots", endpoint="snapshot_page")
 @app.route("/snapshots", endpoint="snapshot_center")
 @login_required
 def snapshot_center_page():
@@ -5386,8 +5345,6 @@ def snapshot_center_page():
         selected_snapshot_server_id=selected_snapshot_server_id,
         snapshot_default_name=datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S"),
     )
-
-
 
 
 @app.route("/traffic")
