@@ -4420,8 +4420,10 @@ def task_worker_loop():
             if latest and latest["status"] == "success":
                 output = latest["output"] if latest else ""
                 pt_install_failed = has_pt_install_failure(output)
-                if pt_install_failed and trigger_type_text == "scheduled":
-                    if attempt_no < 3:
+                if pt_install_failed:
+                    # 定时任务固定最多重试3次；手动任务遵循服务器配置的 max_attempts。
+                    pt_retry_limit = 3 if trigger_type_text == "scheduled" else max_attempts
+                    if attempt_no < pt_retry_limit:
                         next_time = datetime.now(TIMEZONE) + timedelta(seconds=5)
                         with closing(get_conn()) as conn:
                             conn.execute(
@@ -4441,11 +4443,13 @@ def task_worker_loop():
                             server_id=task["server_id"],
                             attempt=attempt_no,
                             next_run_at=next_time.strftime("%Y-%m-%d %H:%M:%S"),
+                            retry_limit=pt_retry_limit,
+                            trigger_type=trigger_type_text,
                         )
                         update_log(
                             task["log_id"],
                             "retrying",
-                            f"检测到 PT 环境安装失败，已自动重试（第{attempt_no + 1}/3次）",
+                            f"检测到 PT 环境安装失败，已自动重试（第{attempt_no + 1}/{pt_retry_limit}次）",
                             (output or "") + "\n\n系统提示: 检测到PT环境安装失败，已自动加入队列重置并重装",
                         )
                         if task["batch_key"]:
@@ -4453,7 +4457,7 @@ def task_worker_loop():
                                 task["batch_key"],
                                 row,
                                 "retrying",
-                                note=f"PT环境安装失败，已自动重试（第{attempt_no + 1}/3次）",
+                                note=f"PT环境安装失败，已自动重试（第{attempt_no + 1}/{pt_retry_limit}次）",
                                 log_id=task["log_id"],
                             )
                         TASK_QUEUE.put(task_id)
@@ -4473,15 +4477,15 @@ def task_worker_loop():
                     update_log(
                         task["log_id"],
                         "failed",
-                        "任务失败：PT环境安装失败（已重试3次）",
-                        (output or "") + "\n\n系统提示: PT环境重装累计3次仍失败，已停止自动重试",
+                        f"任务失败：PT环境安装失败（已重试{pt_retry_limit}次）",
+                        (output or "") + f"\n\n系统提示: PT环境重装累计{pt_retry_limit}次仍失败，已停止自动重试",
                     )
                     if task["batch_key"]:
                         upsert_notification_batch_item(
                             task["batch_key"],
                             row,
                             "failed",
-                            note="PT环境安装失败，自动重试3次后仍失败",
+                            note=f"PT环境安装失败，自动重试{pt_retry_limit}次后仍失败",
                             log_id=task["log_id"],
                         )
                         maybe_send_batch_email(task["batch_key"])
