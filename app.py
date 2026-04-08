@@ -4502,6 +4502,7 @@ def task_worker_loop():
                         if auto_delay_minutes <= 0:
                             auto_delay_hours = int((cfg["auto_delivery_delay_hours"] if (cfg and "auto_delivery_delay_hours" in cfg.keys()) else 6) or 6)
                             auto_delay_minutes = max(0, auto_delay_hours) * 60
+                        current_cycle_key = _server_rental_cycle_key(row, datetime.now(TIMEZONE))
                         pending_delivery_at = (datetime.now(TIMEZONE) + timedelta(minutes=auto_delay_minutes)).strftime("%Y-%m-%d %H:%M:%S")
                         conn.execute(
                             """
@@ -4519,10 +4520,11 @@ def task_worker_loop():
                                 next_rent_status = 'unknown',
                                 pending_delivery_done = CASE WHEN reserved_renter_name <> '' THEN 0 ELSE 1 END,
                                 pending_delivery_at = CASE WHEN reserved_renter_name <> '' THEN ? ELSE '' END,
-                                pending_delivery_batch_key = CASE WHEN reserved_renter_name <> '' THEN ? ELSE '' END
+                                pending_delivery_batch_key = CASE WHEN reserved_renter_name <> '' THEN ? ELSE '' END,
+                                rental_rollover_key = ?
                             WHERE id = ?
                             """,
-                            (pending_delivery_at, task["batch_key"] or "", row["id"]),
+                            (pending_delivery_at, task["batch_key"] or "", current_cycle_key, row["id"]),
                         )
                     conn.commit()
                 write_detailed_log("task_worker.success", task_id=task_id, server_id=task["server_id"], attempt=attempt_no)
