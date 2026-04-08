@@ -3083,6 +3083,15 @@ def _one_month_before(date_obj):
     return datetime(year, month, day).date()
 
 
+def _one_month_after(date_obj):
+    year, month = date_obj.year, date_obj.month + 1
+    if month > 12:
+        month = 1
+        year += 1
+    day = month_day_safe(year, month, date_obj.day)
+    return datetime(year, month, day).date()
+
+
 def is_before_renew_until(server_row, now_dt):
     renew_until = _parse_date_text(server_row["renew_until_date"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("renew_until_date"))
     if not renew_until:
@@ -5252,6 +5261,7 @@ def home():
 def details_page():
     rows = list_detail_rows()
     normalized_rows = []
+    now_dt = datetime.now(TIMEZONE)
     for r in rows:
         item = dict(r)
         upload = int(item.get("period_upload_bytes") or 0)
@@ -5259,6 +5269,7 @@ def details_page():
         item["traffic_upload_text"] = format_bytes(upload)
         item["traffic_download_text"] = format_bytes(download)
         item["traffic_total_text"] = format_bytes(upload + download)
+        item["next_reset_at_text"] = format_reset_datetime_text(build_effective_reset_datetime(item, now_dt))
         item["traffic_throttled"] = bool(item.get("traffic_throttled"))
         queue_status = str(item.get("queue_status") or "").strip().lower()
         latest_task_status = str(item.get("latest_task_status") or "").strip().lower()
@@ -5572,7 +5583,7 @@ def update_rental_next_status(server_id):
     status = _normalize_next_rent_status(request.form.get("next_rent_status"))
     with closing(get_conn()) as conn:
         row = conn.execute(
-            "SELECT id, name, renter_name, reserved_renter_name FROM servers WHERE id = ?",
+            "SELECT id, name, renter_name, reserved_renter_name, renew_until_date FROM servers WHERE id = ?",
             (server_id,),
         ).fetchone()
         if not row:
@@ -5583,15 +5594,25 @@ def update_rental_next_status(server_id):
             return redirect(url_for("rentals_page"))
 
         is_renewed = 1 if status == "confirmed" else 0
+        renew_until = _parse_date_text(row["renew_until_date"])
+        now_date = datetime.now(TIMEZONE).date()
+        should_roll_long_renew = bool(
+            status == "confirmed"
+            and renew_until
+            and _one_month_before(renew_until) <= now_date < renew_until
+        )
+        next_renew_until_text = _one_month_after(renew_until).strftime("%Y-%m-%d") if should_roll_long_renew else str(row["renew_until_date"] or "")
         conn.execute(
-            "UPDATE servers SET next_rent_status = ?, is_renewed = ? WHERE id = ?",
-            (status, is_renewed, server_id),
+            "UPDATE servers SET next_rent_status = ?, is_renewed = ?, renew_until_date = ? WHERE id = ?",
+            (status, is_renewed, next_renew_until_text, server_id),
         )
         conn.commit()
 
     if status == "confirmed":
         canceled = cancel_pending_scheduled_tasks(server_id, reason="已标记确认续租，已取消队列中的定时重置任务")
         flash(f"[{row['name']}] 下月租户已标记为确认续租，服务器详情已切换为已续租", "success")
+        if should_roll_long_renew:
+            flash(f"[{row['name']}] 长期续费已自动顺延至 {next_renew_until_text}", "success")
         if canceled:
             flash(f"[{row['name']}] 已取消 {canceled} 条排队中的定时重置任务", "success")
     elif status == "non_renew":
