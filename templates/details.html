@@ -50,7 +50,7 @@
     <div><span>总流量（本周期）</span><strong>{{ row.traffic_total_text }}</strong></div>
     <div><span>最近采样</span><strong>{{ row.last_traffic_sync_at or "暂无" }}</strong></div>
     <div><span>长期续费至</span><strong>{{ row.renew_until_date or "未设置" }}</strong></div>
-    <div><span>租赁人邮箱</span><strong>{{ row.renter_email or "未填写" }}</strong></div>
+    <div><span>预计下一次重置时间</span><strong>{{ row.next_reset_at_text }}</strong></div>
   </div>
 
   <div class="server-actions">
