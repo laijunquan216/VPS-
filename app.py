@@ -6538,7 +6538,9 @@ def start_public_stock_server():
         log_system_event("public_stock", f"库存展示端口与管理面板端口冲突: {public_port}", level="error")
         return None
     try:
-        server = make_server(PANEL_HOST, public_port, public_app)
+        # 库存展示端对外公开，单线程容易被慢请求/阻塞请求拖死，导致 nginx 504。
+        # 改为 threaded=True，避免一个请求卡死时整个公开库存页不可用。
+        server = make_server(PANEL_HOST, public_port, public_app, threaded=True)
     except Exception as exc:
         log_system_event("public_stock", f"库存展示服务启动失败: {exc}", level="error")
         return None
