@@ -2722,17 +2722,6 @@ def list_email_history(limit=200):
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM email_history ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
 
-    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
-
-def update_scp_account_api_status(account_id, status, error_message=""):
-    now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
-    with closing(get_conn()) as conn:
-        conn.execute(
-            "UPDATE scp_accounts SET api_status=?, api_checked_at=?, api_last_error=?, updated_at=? WHERE id=?",
-            ((status or "unknown")[:16], now_text, str(error_message or "")[:500], now_text, account_id),
-        )
-        conn.commit()
-
 def update_scp_account_api_status(account_id, status, error_message=""):
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     with closing(get_conn()) as conn:
@@ -3424,6 +3413,19 @@ def connect_ssh(server_row, timeout=20):
         timeout=timeout,
     )
     return client
+
+
+def is_post_reset_environment_ready(client):
+    checks = [
+        "test -x /bin/sh || test -x /usr/bin/sh",
+        "command -v bash >/dev/null 2>&1 || command -v sh >/dev/null 2>&1",
+    ]
+    for cmd in checks:
+        _, stdout, _ = client.exec_command(cmd)
+        exit_code = stdout.channel.recv_exit_status()
+        if exit_code != 0:
+            return False
+    return True
 
 
 def wait_for_ssh_reconnect(server_row, output_lines, password_candidates, timeout_seconds=None, require_ready=False):
@@ -4696,54 +4698,6 @@ def compose_missing_renter_batch_notice(entries, now_dt=None):
 
 def run_scheduled_renew_notice_email(now_dt=None):
     now_dt = now_dt or datetime.now(TIMEZONE)
-    ts_text = now_dt.strftime("%Y-%m-%d %H:%M")
-    subject = f"[VPS面板] 续费提醒未发送（缺少租赁人邮箱）汇总 - {ts_text}"
-    lines = [
-        "以下服务器本应发送自动续费提醒，但因未填写租赁人邮箱而跳过。",
-        "请尽快联系客户确认是否续租。",
-        "",
-    ]
-    for idx, item in enumerate(entries, start=1):
-        lines.extend(
-            [
-                f"{idx}. 服务器名称：{item['server_name']}",
-                f"   刷新日：{item['reset_clock']}",
-                f"   本次预计重置时间：{item['reset_at']}（北京时间）",
-                f"   触发提醒档位：重置前{item['days_left']}天",
-                f"   租赁人：{item['renter_name']}",
-                "",
-            ]
-        )
-    lines.append("建议操作：尽快询问客户是否续租，并补充租赁人邮箱或将状态调整为不续租。")
-    return subject, "\n".join(lines)
-
-
-def run_scheduled_renew_notice_email(now_dt=None):
-    now_dt = now_dt or datetime.now(TIMEZONE)
-    ts_text = now_dt.strftime("%Y-%m-%d %H:%M")
-    subject = f"[VPS面板] 续费提醒未发送（缺少租赁人邮箱）汇总 - {ts_text}"
-    lines = [
-        "以下服务器本应发送自动续费提醒，但因未填写租赁人邮箱而跳过。",
-        "请尽快联系客户确认是否续租。",
-        "",
-    ]
-    for idx, item in enumerate(entries, start=1):
-        lines.extend(
-            [
-                f"{idx}. 服务器名称：{item['server_name']}",
-                f"   刷新日：{item['reset_clock']}",
-                f"   本次预计重置时间：{item['reset_at']}（北京时间）",
-                f"   触发提醒档位：重置前{item['days_left']}天",
-                f"   租赁人：{item['renter_name']}",
-                "",
-            ]
-        )
-    lines.append("建议操作：尽快询问客户是否续租，并补充租赁人邮箱或将状态调整为不续租。")
-    return subject, "\n".join(lines)
-
-
-def run_scheduled_renew_notice_email(now_dt=None):
-    now_dt = now_dt or datetime.now(TIMEZONE)
     cfg = get_global_config()
     notice_days = parse_renew_notice_days(cfg["renew_notice_days"] if cfg else "")
     if not notice_days:
@@ -5142,7 +5096,7 @@ def check_scheduled_reset_jobs(now_dt=None):
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
         if ok:
             with closing(get_conn()) as conn:
-                conn.execute("UPDATE servers SET last_scheduled_trigger_key = ? WHERE id = ?", (slot_key, row["id"]))
+                conn.execute("UPDATE servers SET last_scheduled_trigger_key = ? WHERE id = ?", (current_slot, row["id"]))
                 conn.commit()
         log_system_event("scheduled_reset", f"服务器[{row['name']}] 已触发定时重置任务", server_id=row["id"], details=msg)
         if not ok:
