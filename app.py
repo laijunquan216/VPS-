@@ -5142,7 +5142,7 @@ def check_scheduled_reset_jobs(now_dt=None):
         ok, msg, log_id = run_for_server(row["id"], trigger_type="scheduled", batch_key=batch_key)
         if ok:
             with closing(get_conn()) as conn:
-                conn.execute("UPDATE servers SET last_scheduled_trigger_key = ? WHERE id = ?", (slot_key, row["id"]))
+                conn.execute("UPDATE servers SET last_scheduled_trigger_key = ? WHERE id = ?", (current_slot, row["id"]))
                 conn.commit()
         log_system_event("scheduled_reset", f"服务器[{row['name']}] 已触发定时重置任务", server_id=row["id"], details=msg)
         if not ok:
