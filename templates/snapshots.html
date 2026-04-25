@@ -39,6 +39,14 @@
     <form method="post" action="/snapshots/settings" class="grid-form snapshot-card">
       <input type="hidden" name="server_id" value="{{ snapshot_server.id }}" />
       <label class="inline"><input type="checkbox" name="snapshot_auto_enabled" {% if snapshot_server.snapshot_auto_enabled %}checked{% endif %} /> 启用定时快照</label>
+      <p class="hint">
+        当前状态：
+        {% if snapshot_server.snapshot_auto_enabled %}
+          <strong class="md-red">已启用</strong>（命中 Cron 后会自动执行）
+        {% else %}
+          <strong>已关闭</strong>
+        {% endif %}
+      </p>
       <label>模式
         <select name="snapshot_auto_mode">
           <option value="online" {% if (snapshot_server.snapshot_auto_mode or 'online') == 'online' %}selected{% endif %}>在线</option>
@@ -51,6 +59,12 @@
       <p class="hint">例：<code>0 3 * * *</code> 每天03:00，<code>0 3 * * 0</code> 每周日03:00。</p>
       <button type="submit">保存定时设置</button>
     </form>
+    {% if snapshot_server.snapshot_auto_enabled %}
+    <form method="post" action="/snapshots/disable" class="grid-form snapshot-card" onsubmit="return confirm('确认关闭该服务器的定时快照？')">
+      <input type="hidden" name="server_id" value="{{ snapshot_server.id }}" />
+      <button type="submit" class="warn">一键关闭定时快照</button>
+    </form>
+    {% endif %}
 
     <form method="post" action="/snapshots/cleanup" class="grid-form snapshot-card">
       <input type="hidden" name="server_id" value="{{ snapshot_server.id }}" />
