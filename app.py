@@ -6486,6 +6486,20 @@ def update_snapshot_settings():
     return redirect(url_for("snapshot_center", server_id=server_id))
 
 
+@app.post("/snapshots/disable")
+@login_required
+def disable_snapshot_schedule():
+    server_id = int(request.form.get("server_id") or 0)
+    if not server_id:
+        flash("服务器ID无效", "error")
+        return redirect(url_for("snapshot_center"))
+    with closing(get_conn()) as conn:
+        conn.execute("UPDATE servers SET snapshot_auto_enabled = 0 WHERE id = ?", (server_id,))
+        conn.commit()
+    flash("定时快照已关闭", "success")
+    return redirect(url_for("snapshot_center", server_id=server_id))
+
+
 def start_public_stock_server():
     _, public_port = get_public_stock_settings()
     if public_port == PANEL_PORT:
