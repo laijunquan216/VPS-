@@ -76,6 +76,9 @@
     <form method="post" action="/servers/{{ row.id }}/run">
       <button type="submit">重置-部署PT</button>
     </form>
+    <form method="post" action="/servers/{{ row.id }}/restart" onsubmit="return confirm('该操作会重启服务器，短时间内可能断开连接，确认继续？')">
+      <button type="submit" class="secondary">重启服务器</button>
+    </form>
     <form method="post" action="/servers/{{ row.id }}/run-bin-reinstall" class="dd-form">
       <select name="reinstall_choice">
         <option value="debian-9">Debian 9</option>
