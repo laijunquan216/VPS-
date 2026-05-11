@@ -1124,7 +1124,7 @@ def scp_rest_login(account_row, timeout_seconds=60):
         raise
 
 
-def scp_rest_request(account_row, method, path, token=None, payload=None, endpoint_base=None, timeout_seconds=60):
+def scp_rest_request(account_row, method, path, token=None, payload=None, endpoint_base=None, timeout_seconds=60, content_type="application/json"):
     endpoint = (endpoint_base or "").rstrip("/") or _scp_rest_base_endpoint(account_row["api_endpoint"])
     url = f"{endpoint}/{path.lstrip('/')}"
     headers = {"Accept": "application/json"}
@@ -1133,7 +1133,7 @@ def scp_rest_request(account_row, method, path, token=None, payload=None, endpoi
         headers["X-Auth-Token"] = token
     data = None
     if payload is not None:
-        headers["Content-Type"] = "application/json"
+        headers["Content-Type"] = str(content_type or "application/json")
         data = json.dumps(payload).encode("utf-8")
     req = urlrequest.Request(url, data=data, headers=headers, method=method.upper())
     with urlrequest.urlopen(req, timeout=timeout_seconds) as resp:
@@ -1566,6 +1566,22 @@ def scp_get_task_status(server_id, task_uuid):
     if not uuid_text:
         raise ValueError("任务UUID不能为空")
     return scp_rest_request(account, "GET", f"tasks/{urlparse.quote(uuid_text)}", token=token, endpoint_base=endpoint_base)
+
+
+def scp_restart_server(server_id):
+    _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+    payload = {"state": "ON"}
+    data = scp_rest_request(
+        account,
+        "PATCH",
+        f"servers/{urlparse.quote(scp_server_id)}?stateOption=POWERCYCLE",
+        token=token,
+        payload=payload,
+        endpoint_base=endpoint_base,
+        content_type="application/merge-patch+json",
+    )
+    task_uuid = _scp_extract_task_uuid(data if isinstance(data, dict) else {})
+    return task_uuid, data
 
 
 def _snapshot_task_finished(state_text):
@@ -6368,6 +6384,38 @@ def run_now(server_id):
     ok, msg, _ = run_for_server(server_id)
     flash(msg, "success" if ok else "error")
     return redirect(url_for("details_page"))
+
+
+@app.route("/servers/<int:server_id>/restart", methods=["POST"])
+@login_required
+def restart_server(server_id):
+    row = get_server(server_id)
+    if not row:
+        flash("服务器不存在", "error")
+        return redirect(url_for("details_page"))
+    try:
+        task_uuid, task_data = scp_restart_server(server_id)
+        state_text = str((task_data or {}).get("state") or "").strip() if isinstance(task_data, dict) else ""
+        if task_uuid:
+            flash(f"服务器[{row['name']}] 重启任务已提交，任务ID: {task_uuid}，状态: {state_text or 'PENDING'}", "success")
+        else:
+            flash(f"服务器[{row['name']}] 重启任务已提交", "success")
+    except Exception as exc:
+        flash(f"服务器[{row['name']}] 重启失败: {exc}", "error")
+    return redirect(url_for("details_page"))
+
+
+@app.get("/api/tasks/<task_uuid>")
+@login_required
+def api_task_status(task_uuid):
+    server_id = int(request.args.get("server_id") or 0)
+    if not server_id:
+        return jsonify({"ok": False, "error": "missing server_id"}), 400
+    try:
+        payload = scp_get_task_status(server_id, task_uuid)
+        return jsonify({"ok": True, "task": payload})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.post("/snapshots/create-online")
