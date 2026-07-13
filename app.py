@@ -2812,19 +2812,24 @@ def _normalize_network_metrics_points(payload):
         dt_local = _parse_scp_metric_timestamp(ts_text)
         if not dt_local or not isinstance(metric_map, dict):
             continue
-        rx_bps = 0.0
-        tx_bps = 0.0
+        # The traffic page historically displays rx_bps as upload and tx_bps as
+        # download, so keep that internal shape while accepting both old
+        # RX/TX metric names and newer IN/OUT metric names from the SCP API.
+        upload_bps = 0.0
+        download_bps = 0.0
         for key, value in metric_map.items():
             try:
                 val = float(value or 0)
             except Exception:
                 continue
-            upper = str(key).upper()
-            if upper.endswith(" RX"):
-                rx_bps += val
-            elif upper.endswith(" TX"):
-                tx_bps += val
-        points.append({"ts": dt_local, "rx_bps": max(rx_bps, 0.0), "tx_bps": max(tx_bps, 0.0)})
+            upper = str(key).strip().upper()
+            parts = upper.split()
+            suffix = parts[-1] if parts else upper
+            if suffix in {"OUT", "TX"}:
+                upload_bps += val
+            elif suffix in {"IN", "RX"}:
+                download_bps += val
+        points.append({"ts": dt_local, "rx_bps": max(upload_bps, 0.0), "tx_bps": max(download_bps, 0.0)})
     points.sort(key=lambda item: item["ts"])
     return points
 
