@@ -31,16 +31,17 @@
   </form>
   {% else %}
 
+  <div class="rental-sort-toolbar">
+    <button type="button" id="sortByRefreshBtn" class="secondary rental-sort-btn">按临近时间排序</button>
+  </div>
+
   <div class="rental-table-header">
     <span>名称</span>
     <span>刷新日期</span>
     <span>上月租户</span>
     <span>目前租户</span>
     <span>下月租户</span>
-    <span class="rental-header-action">
-      操作
-      <button type="button" id="sortByRefreshBtn" class="secondary rental-sort-btn">按临近时间排序</button>
-    </span>
+    <span>操作</span>
   </div>
 
   <div class="rental-cards rental-cards-stacked">
