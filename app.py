@@ -1311,7 +1311,7 @@ def _scp_rest_list_server_images(account, endpoint_base, token, server_id):
     return options
 
 
-def _scp_rest_find_debian11_image(account, endpoint_base, token, server_id):
+def _scp_rest_find_debian_image(account, endpoint_base, token, server_id, target_version):
     paths = (f"servers/{server_id}/imageflavours", f"servers/{server_id}/images", "imageflavours")
     best = None
 
@@ -1351,15 +1351,17 @@ def _scp_rest_find_debian11_image(account, endpoint_base, token, server_id):
                 str(image_meta.get(k) or "") for k in ("name", "label", "displayName", "distribution", "version", "slug", "key")
             ).lower()
             all_text = f"{haystack} {image_haystack}".strip()
-            if "debian" not in all_text or ("11" not in all_text and "bullseye" not in all_text):
+            target_version = str(target_version or "").strip()
+            target_codename = {"11": "bullseye", "12": "bookworm"}.get(target_version, "")
+            if "debian" not in all_text or (target_version not in all_text and target_codename not in all_text):
                 continue
 
             score = 0
-            if "debian (11) bullseye" in all_text:
+            if target_codename and f"debian ({target_version}) {target_codename}" in all_text:
                 score += 50
-            if "bullseye" in all_text:
+            if target_codename and target_codename in all_text:
                 score += 20
-            if "debian" in all_text and "11" in all_text:
+            if "debian" in all_text and target_version in all_text:
                 score += 15
             if str(item.get("name") or "").strip().lower() == "minimal":
                 score += 5
@@ -1761,7 +1763,7 @@ def refresh_server_api_images(server_row, output_lines=None):
     return options
 
 
-def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
+def scp_reinstall_system(server_row, output_lines, target_system="debian11", preferred_image=None):
     if isinstance(server_row, sqlite3.Row):
         account_id = server_row["scp_account_id"]
         scp_server_id = str(server_row["scp_server_id"] or "").strip()
@@ -1769,6 +1771,10 @@ def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
         account_id = (server_row or {}).get("scp_account_id")
         scp_server_id = str((server_row or {}).get("scp_server_id") or "").strip()
     account = get_scp_account(account_id)
+    target_system = str(target_system or "debian11").strip().lower()
+    target_version = target_system.removeprefix("debian")
+    if target_system not in {"debian11", "debian12"}:
+        raise RuntimeError(f"不支持的SCP API重装系统: {target_system}")
 
     if scp_server_id and account:
         output_lines.append(f"已使用面板已配置SCP绑定: 账号[{account['name']}], server_id={scp_server_id}")
@@ -1802,16 +1808,16 @@ def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
             if preferred_image_id:
                 payload_variants.append({"imageId": int(preferred_image_id) if preferred_image_id.isdigit() else preferred_image_id})
         else:
-            image_pick = _scp_rest_find_debian11_image(account, endpoint_base, token, scp_server_id)
+            image_pick = _scp_rest_find_debian_image(account, endpoint_base, token, scp_server_id, target_version)
             flavour_id = (image_pick.get("flavour_id") or "").strip()
             image_id = (image_pick.get("image_id") or "").strip()
             if flavour_id or image_id:
                 output_lines.append(
-                    "SCP REST检测到 Debian11镜像候选: "
+                    f"SCP REST检测到 {target_system.capitalize()}镜像候选: "
                     f"flavour_id={flavour_id or '-'}, image_id={image_id or '-'}, name={image_pick.get('image_name') or '-'}"
                 )
             else:
-                output_lines.append("SCP REST未检测到明确 Debian11 镜像ID，将使用通用payload尝试")
+                output_lines.append(f"SCP REST未检测到明确 {target_system.capitalize()} 镜像ID，将使用通用payload尝试")
             if flavour_id:
                 payload_variants.append({"imageFlavourId": int(flavour_id) if str(flavour_id).isdigit() else flavour_id})
             if image_id:
@@ -1845,7 +1851,7 @@ def scp_reinstall_debian11(server_row, output_lines, preferred_image=None):
                         server_row["ssh_password"] = root_password
                         update_server_password(server_row["id"], root_password)
                         output_lines.append("SCP返回了root密码，已自动回写到面板并用于后续SSH重连")
-                    output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os=debian11, path={path}")
+                    output_lines.append(f"SCP REST重装请求已提交: request_id={request_id}, server_id={scp_server_id}, os={target_system}, path={path}")
                     return
             except Exception as exc:
                 output_lines.append(f"SCP REST重装调用失败 path={path}: {exc}")
@@ -2640,6 +2646,24 @@ def parse_bin_reinstall_choice(trigger_type):
     return None
 
 
+
+
+SCP_REINSTALL_TARGETS = {
+    "scp_api": "debian11",  # Backward compatibility for existing servers.
+    "scp_api_debian11": "debian11",
+    "scp_api_debian12": "debian12",
+}
+
+
+def normalize_reinstall_mode(value):
+    mode = (value or "ssh").strip().lower()
+    if mode == "ssh" or mode in SCP_REINSTALL_TARGETS:
+        return mode
+    raise ValueError("重置方式仅支持 SSH脚本、SCP REST API (Debian11) 或 SCP REST API (Debian12)")
+
+
+def get_scp_reinstall_target(reinstall_mode):
+    return SCP_REINSTALL_TARGETS.get((reinstall_mode or "").strip().lower(), "")
 
 
 def is_api_reinstall_trigger(trigger_type):
@@ -3855,12 +3879,15 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         generated_password = None
         original_password = mutable_server["ssh_password"]
         global_cfg = get_global_config()
-        reinstall_mode = (mutable_server.get("reinstall_mode") or "ssh").strip().lower()
-        if reinstall_mode not in ("ssh", "scp_api"):
-            output_lines.append(f"检测到未知重置模式[{reinstall_mode}]，已自动回退为 ssh")
+        raw_reinstall_mode = (mutable_server.get("reinstall_mode") or "ssh").strip().lower()
+        try:
+            reinstall_mode = normalize_reinstall_mode(raw_reinstall_mode)
+        except ValueError:
+            output_lines.append(f"检测到未知重置模式[{raw_reinstall_mode}]，已自动回退为 ssh")
             reinstall_mode = "ssh"
         if force_api_reinstall:
-            reinstall_mode = "scp_api"
+            reinstall_mode = get_scp_reinstall_target(reinstall_mode) and reinstall_mode or "scp_api"
+        scp_reinstall_target = get_scp_reinstall_target(reinstall_mode)
 
         reset_command = normalize_shell_command((global_cfg["reset_command"] or "").strip())
         ssh_command_2 = normalize_shell_command((global_cfg["ssh_command_2"] or "").strip())
@@ -3873,7 +3900,7 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             f"has_ssh2={bool(ssh_command_2)}, "
             f"has_ssh3={bool(ssh_command_3)}"
         )
-        if reinstall_mode == "scp_api":
+        if scp_reinstall_target:
             output_lines.append(
                 "SCP配置: "
                 f"scp_account_id={mutable_server.get('scp_account_id')}, "
@@ -3890,8 +3917,8 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             output_lines.append("已使用 bin456789 一键重装命令执行本次重置")
         panel_base_url = resolve_panel_base_url(global_cfg)
 
-        if reinstall_mode == "scp_api":
-            output_lines.append("SCP API 模式：跳过重置前SSH连通性要求，先执行API重置")
+        if scp_reinstall_target:
+            output_lines.append(f"SCP API 模式：跳过重置前SSH连通性要求，先执行API重置 {scp_reinstall_target.capitalize()}")
         else:
             client = connect_ssh(mutable_server)
             output_lines.append("SSH 连接成功")
@@ -3903,12 +3930,12 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
             update_server_password(mutable_server["id"], generated_password)
             output_lines.append(f"已为本次重装生成随机root密码: {generated_password}")
 
-        if reinstall_mode == "scp_api":
+        if scp_reinstall_target:
             reinstall_triggered = True
-            output_lines.append("本服务器已启用 SCP API 重置模式，准备调用SCP重装 Debian11")
+            output_lines.append(f"本服务器已启用 SCP API 重置模式，准备调用SCP重装 {scp_reinstall_target.capitalize()}")
             if force_api_reinstall and selected_api_image:
                 output_lines.append(f"一键API重置已指定镜像: {selected_api_image.get('name') or '-'}")
-            scp_reinstall_debian11(mutable_server, output_lines, preferred_image=selected_api_image)
+            scp_reinstall_system(mutable_server, output_lines, target_system=scp_reinstall_target, preferred_image=selected_api_image)
             output_lines.append("SCP重装命令已提交，等待后续重连")
             time.sleep(POST_REINSTALL_WAIT_SECONDS)
             client, connected_pwd = wait_for_ssh_reconnect(mutable_server, output_lines, [mutable_server["ssh_password"]], timeout_seconds=SSH_RECONNECT_TIMEOUT_SECONDS)
@@ -4023,7 +4050,10 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
         update_log(running_log_id, "success", summary, all_output)
         update_last_reset(server_row["id"])
         try:
-            if notify_on_success:
+            # The installer can print a successful shell exit while reporting
+            # component failures itself. The queue worker detects those markers
+            # and retries/finalizes the task, so do not send a false success email.
+            if notify_on_success and not has_pt_install_failure(all_output):
                 send_result_email(mutable_server, "success", summary, all_output)
         except Exception as mail_exc:
             output_lines.append(f"邮件通知发送失败: {mail_exc}")
@@ -4298,7 +4328,9 @@ def has_pt_install_failure(output_text):
         "filebrowser 安装失败",
         "pt环境安装失败",
         "vt 安装失败",
-        "✗",
+        "curl 安装失败",
+        "系统更新失败",
+        "docker 安装脚本下载失败",
     )
     return any(pattern in text for pattern in failure_patterns)
 
@@ -4521,6 +4553,16 @@ def task_worker_loop():
                             log_id=task["log_id"],
                         )
                         maybe_send_batch_email(task["batch_key"])
+                    else:
+                        try:
+                            send_result_email(
+                                row,
+                                "failed",
+                                f"任务失败：PT环境安装失败（已重试{pt_retry_limit}次）",
+                                (output or "") + f"\n\n系统提示: PT环境重装累计{pt_retry_limit}次仍失败，已停止自动重试",
+                            )
+                        except Exception as mail_exc:
+                            write_detailed_log("task_worker.pt_failure_email_failed", task_id=task_id, error=str(mail_exc))
                     continue
 
                 with closing(get_conn()) as conn:
@@ -6061,9 +6103,7 @@ def add_server():
         scp_account_id_raw = (form.get("scp_account_id") or "").strip()
         scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
         server_group_id = parse_int_form_field(form, "server_group_id", default=0, min_value=0)
-        reinstall_mode = (form.get("reinstall_mode") or "ssh").strip().lower()
-        if reinstall_mode not in ("ssh", "scp_api"):
-            raise ValueError("重置方式仅支持 ssh 或 scp_api")
+        reinstall_mode = normalize_reinstall_mode(form.get("reinstall_mode"))
     except ValueError as exc:
         flash(f"添加服务器失败: {exc}", "error")
         return redirect(url_for("settings_page"))
@@ -6128,9 +6168,7 @@ def update_server(server_id):
         scp_account_id_raw = (form.get("scp_account_id") or "").strip()
         scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
         server_group_id = parse_int_form_field(form, "server_group_id", default=0, min_value=0)
-        reinstall_mode = (form.get("reinstall_mode") or "ssh").strip().lower()
-        if reinstall_mode not in ("ssh", "scp_api"):
-            raise ValueError("重置方式仅支持 ssh 或 scp_api")
+        reinstall_mode = normalize_reinstall_mode(form.get("reinstall_mode"))
     except ValueError as exc:
         flash(f"更新服务器失败: {exc}", "error")
         return redirect(url_for("settings_page"))
