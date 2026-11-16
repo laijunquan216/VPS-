@@ -2009,6 +2009,8 @@ def list_detail_rows():
                    s.auto_reset, s.is_renewed, s.is_rented, s.renew_until_date, s.next_rent_status, s.sort_order,
                    s.period_upload_bytes, s.period_download_bytes, s.last_traffic_sync_at, s.traffic_throttled,
                    s.ssh_status, s.ssh_checked_at, s.scp_image_catalog, s.scp_selected_image,
+                   s.snapshot_auto_enabled, s.snapshot_auto_mode, s.snapshot_auto_disk_name,
+                   s.snapshot_keep_count, s.snapshot_schedule_cron,
                    l.summary, l.status, l.created_at AS latest_run_at,
                    q.status AS queue_status,
                    tq.status AS latest_task_status,
