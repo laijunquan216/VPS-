@@ -1520,8 +1520,11 @@ def scp_list_snapshots(server_id):
     return results
 
 
-def scp_create_snapshot(server_id, online_snapshot, name, description="", disk_name=""):
-    _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+def scp_create_snapshot(server_id, online_snapshot, name, description="", disk_name="", context=None):
+    if context is None:
+        _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+    else:
+        account, scp_server_id, endpoint_base, token = context
     payload = {
         "name": str(name or "").strip(),
         "description": str(description or "").strip() or ("Auto snapshot" if online_snapshot else "Offline snapshot"),
@@ -5019,6 +5022,16 @@ def run_scheduled_auto_delivery(now_dt=None):
                 conn.commit()
 
 
+def _snapshot_automation_is_enabled(server_id):
+    """Read the persisted switch immediately before an automatic snapshot action."""
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            "SELECT snapshot_auto_enabled FROM servers WHERE id = ?",
+            (server_id,),
+        ).fetchone()
+    return bool(row and int(row["snapshot_auto_enabled"] or 0) == 1)
+
+
 def _run_snapshot_automation_for_server(server_id, trigger_slot):
     with SNAPSHOT_JOB_LOCK:
         if server_id in SNAPSHOT_RUNNING_SERVERS:
@@ -5028,17 +5041,61 @@ def _run_snapshot_automation_for_server(server_id, trigger_slot):
         row = get_server(server_id)
         if not row:
             return
+        # The scheduler may have queued this thread just before the user disabled
+        # the schedule. Re-check the database here, not only in the scheduler query.
+        if not _snapshot_automation_is_enabled(server_id):
+            log_system_event(
+                "snapshot_auto",
+                f"服务器[{row['name']}] 定时快照已关闭，跳过尚未提交的自动快照",
+                server_id=server_id,
+            )
+            return
         mode = str(row["snapshot_auto_mode"] or "online").strip().lower()
         online = mode != "offline"
         disk_name = str(row["snapshot_auto_disk_name"] or "").strip()
         keep_count = int(row["snapshot_keep_count"] or 3)
         snapshot_name = datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
         desc = f"Auto snapshot {trigger_slot}"
-        task_uuid, _ = scp_create_snapshot(server_id, online, snapshot_name, desc, disk_name=disk_name)
+        # Resolve/login before the SQLite write lock; SCP login updates the DB.
+        _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+        # Serialize the final enabled check + SCP submission against the disable
+        # endpoint with SQLite's write lock.
+        with closing(get_conn()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            enabled_row = conn.execute(
+                "SELECT snapshot_auto_enabled FROM servers WHERE id = ?",
+                (server_id,),
+            ).fetchone()
+            if not enabled_row or int(enabled_row["snapshot_auto_enabled"] or 0) != 1:
+                conn.rollback()
+                log_system_event(
+                    "snapshot_auto",
+                    f"服务器[{row['name']}] 定时快照已关闭，取消自动快照提交",
+                    server_id=server_id,
+                )
+                return
+            try:
+                task_uuid, _ = scp_create_snapshot(
+                    server_id, online, snapshot_name, desc, disk_name=disk_name,
+                    context=(account, scp_server_id, endpoint_base, token),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         if task_uuid:
             final_task = scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=1800)
             if not _snapshot_task_success(final_task.get("state")):
                 raise RuntimeError(f"快照任务失败: {final_task.get('state')}")
+        # A submitted SCP task cannot necessarily be cancelled, but disabling the
+        # schedule must prevent the follow-up automatic cleanup from running.
+        if not _snapshot_automation_is_enabled(server_id):
+            log_system_event(
+                "snapshot_auto",
+                f"服务器[{row['name']}] 定时快照已关闭，跳过自动清理；已提交的快照任务可能仍会完成",
+                server_id=server_id,
+            )
+            return
         cleanup_result = scp_cleanup_old_snapshots(server_id, keep_count)
         log_system_event(
             "snapshot_auto",
@@ -6585,9 +6642,20 @@ def disable_snapshot_schedule():
         flash("服务器ID无效", "error")
         return redirect(url_for("snapshot_center"))
     with closing(get_conn()) as conn:
-        conn.execute("UPDATE servers SET snapshot_auto_enabled = 0 WHERE id = ?", (server_id,))
+        cursor = conn.execute(
+            "UPDATE servers SET snapshot_auto_enabled = 0 WHERE id = ?",
+            (server_id,),
+        )
         conn.commit()
-    flash("定时快照已关闭", "success")
+    if cursor.rowcount == 0:
+        flash("服务器不存在，未找到对应的定时快照设置", "error")
+        return redirect(url_for("snapshot_center"))
+    log_system_event(
+        "snapshot_auto",
+        f"服务器[{server_id}] 已关闭定时快照；后续尚未提交的自动快照将被跳过",
+        server_id=server_id,
+    )
+    flash("定时快照已关闭；尚未提交的自动快照将停止，已提交到服务商的任务无法保证撤销", "success")
     return redirect(url_for("snapshot_center", server_id=server_id))
 
 
