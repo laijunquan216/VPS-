@@ -5053,15 +5053,31 @@ def _run_snapshot_automation_for_server(server_id, trigger_slot):
         keep_count = int(row["snapshot_keep_count"] or 3)
         snapshot_name = datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
         desc = f"Auto snapshot {trigger_slot}"
-        # Last-moment guard: do not submit a new SCP snapshot task after disable.
-        if not _snapshot_automation_is_enabled(server_id):
-            log_system_event(
-                "snapshot_auto",
-                f"服务器[{row['name']}] 定时快照已关闭，取消自动快照提交",
-                server_id=server_id,
-            )
-            return
-        task_uuid, _ = scp_create_snapshot(server_id, online, snapshot_name, desc, disk_name=disk_name)
+        # Serialize the final enabled check + SCP submission against the disable
+        # endpoint with SQLite's write lock. Once disable returns, no later
+        # automatic submission can slip through this check/use window.
+        with closing(get_conn()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            enabled_row = conn.execute(
+                "SELECT snapshot_auto_enabled FROM servers WHERE id = ?",
+                (server_id,),
+            ).fetchone()
+            if not enabled_row or int(enabled_row["snapshot_auto_enabled"] or 0) != 1:
+                conn.rollback()
+                log_system_event(
+                    "snapshot_auto",
+                    f"服务器[{row['name']}] 定时快照已关闭，取消自动快照提交",
+                    server_id=server_id,
+                )
+                return
+            try:
+                task_uuid, _ = scp_create_snapshot(
+                    server_id, online, snapshot_name, desc, disk_name=disk_name
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         if task_uuid:
             final_task = scp_poll_task_until_finished(server_id, task_uuid, interval_seconds=3, timeout_seconds=1800)
             if not _snapshot_task_success(final_task.get("state")):
