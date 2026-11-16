@@ -1520,8 +1520,11 @@ def scp_list_snapshots(server_id):
     return results
 
 
-def scp_create_snapshot(server_id, online_snapshot, name, description="", disk_name=""):
-    _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+def scp_create_snapshot(server_id, online_snapshot, name, description="", disk_name="", context=None):
+    if context is None:
+        _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
+    else:
+        account, scp_server_id, endpoint_base, token = context
     payload = {
         "name": str(name or "").strip(),
         "description": str(description or "").strip() or ("Auto snapshot" if online_snapshot else "Offline snapshot"),
@@ -5053,9 +5056,10 @@ def _run_snapshot_automation_for_server(server_id, trigger_slot):
         keep_count = int(row["snapshot_keep_count"] or 3)
         snapshot_name = datetime.now(TIMEZONE).strftime("%Y%m%d%H%M%S")
         desc = f"Auto snapshot {trigger_slot}"
+        # Resolve/login before the SQLite write lock; SCP login updates the DB.
+        _, account, scp_server_id, endpoint_base, token = _get_snapshot_server_context(server_id)
         # Serialize the final enabled check + SCP submission against the disable
-        # endpoint with SQLite's write lock. Once disable returns, no later
-        # automatic submission can slip through this check/use window.
+        # endpoint with SQLite's write lock.
         with closing(get_conn()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             enabled_row = conn.execute(
@@ -5072,7 +5076,8 @@ def _run_snapshot_automation_for_server(server_id, trigger_slot):
                 return
             try:
                 task_uuid, _ = scp_create_snapshot(
-                    server_id, online, snapshot_name, desc, disk_name=disk_name
+                    server_id, online, snapshot_name, desc, disk_name=disk_name,
+                    context=(account, scp_server_id, endpoint_base, token),
                 )
                 conn.commit()
             except Exception:
