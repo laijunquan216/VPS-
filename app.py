@@ -5890,6 +5890,12 @@ def refresh_traffic_page_data():
     return redirect(url_for("traffic_page"))
 
 
+@app.route("/throttle-keys")
+@login_required
+def throttle_keys_page():
+    return render_template("controlled_api_keys.html", servers=[dict(row) for row in list_servers()])
+
+
 @app.route("/settings")
 @login_required
 def settings_page():
