@@ -5587,6 +5587,7 @@ def api_v1_instance_throttle(server_id):
         "ip": row["ip"],
         "throttled": bool(row["traffic_throttled"]),
         "updated_at": row["last_traffic_sync_at"] or "",
+        "status_available": _throttle_status_available(row["last_traffic_sync_at"]),
     })
 
 
