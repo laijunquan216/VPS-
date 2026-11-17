@@ -1,0 +1,239 @@
+{% extends 'base.html' %}
+{% set active = 'throttle_keys' %}
+{% set title = '限速密钥' %}
+{% block content %}
+<section class="panel">
+  <div class="section-head">
+    <div>
+      <h2>限速密钥</h2>
+      <p class="hint">为 Netcup Monitor Pro 等受控机创建独立 API 密钥，并限定可查询的服务器范围。</p>
+    </div>
+  </div>
+  <form id="create-key-form" class="settings-form-stack">
+    <section class="settings-block">
+      <h3>创建密钥</h3>
+      <div class="grid-form">
+        <label class="full">密钥名称
+          <input id="key-name" maxlength="80" required placeholder="例如：Netcup Monitor Pro - 德国节点" />
+        </label>
+        <div class="full">
+          <strong>授权服务器</strong>
+          <p class="hint">以下显示服务器名称和 IP。勾选一个或多个服务器，密钥只能访问所选服务器的限速状态。</p>
+          <div class="key-server-grid" id="key-server-list">
+            {% for server in servers %}
+            <label class="key-server-option">
+              <input type="checkbox" name="server_ids" value="{{ server.id }}" />
+              <span><strong>{{ server.name }}</strong><small>{{ server.ip }}</small></span>
+            </label>
+            {% else %}
+            <p>当前没有已配置的服务器。</p>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="full button-row">
+          <button type="submit" id="create-key-button" {% if not servers %}disabled{% endif %}>创建密钥</button>
+          <span id="create-key-status" class="hint" role="status" aria-live="polite"></span>
+        </div>
+      </div>
+    </section>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="section-head">
+    <div>
+      <h2>密钥历史记录</h2>
+      <p class="hint">显示已创建的所有密钥记录。密钥明文不会保存，历史记录中只显示前缀。</p>
+    </div>
+    <button type="button" class="secondary" id="refresh-keys-button">刷新记录</button>
+  </div>
+  <div id="key-history-loading" class="hint">正在读取密钥记录…</div>
+  <div class="table-wrap">
+    <table class="data-table" id="key-history-table">
+      <thead><tr><th>密钥名称</th><th>授权服务器</th><th>密钥标识</th><th>创建时间</th><th>最近使用</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="key-history-body"></tbody>
+    </table>
+  </div>
+  <p id="key-history-empty" class="hint" hidden>暂无密钥记录。</p>
+</section>
+
+<div id="new-key-modal" class="key-modal" hidden role="dialog" aria-modal="true" aria-labelledby="new-key-title">
+  <div class="key-modal-card">
+    <h2 id="new-key-title">密钥创建成功</h2>
+    <p class="hint">请立即复制并保存完整密钥。出于安全考虑，关闭窗口后将无法再次查看明文；如遗失，请撤销旧密钥并重新创建。</p>
+    <label for="new-key-token">完整 API Key</label>
+    <textarea id="new-key-token" rows="4" readonly spellcheck="false"></textarea>
+    <div class="button-row">
+      <button type="button" id="copy-new-key-button">复制密钥</button>
+      <button type="button" class="secondary" id="close-new-key-button">我已保存，关闭</button>
+    </div>
+    <p id="copy-key-status" class="hint" role="status" aria-live="polite"></p>
+  </div>
+</div>
+
+<style>
+.key-server-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:9px;margin-top:10px}
+.key-server-option{display:flex;align-items:center;gap:10px;padding:12px;border:1px solid var(--border-color,#d1d5db);border-radius:10px;cursor:pointer}
+.key-server-option span{display:flex;flex-direction:column;gap:3px}
+.key-server-option small{color:var(--muted-color,#6b7280)}
+.key-modal[hidden]{display:none}
+.key-modal{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center;padding:18px}
+.key-modal-card{width:min(680px,100%);background:var(--card-bg,#fff);color:var(--text-color,inherit);padding:24px;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.key-modal-card textarea{width:100%;box-sizing:border-box;margin:10px 0;padding:12px;font-family:monospace;user-select:all;overflow-wrap:anywhere}
+.table-wrap{width:100%;overflow-x:auto}
+#key-history-table{width:100%;border-collapse:collapse;min-width:760px}
+#key-history-table th,#key-history-table td{padding:11px 9px;border-bottom:1px solid var(--border-color,#e5e7eb);text-align:left;vertical-align:top}
+.key-status-active{color:#15803d;font-weight:700}.key-status-revoked{color:#b91c1c;font-weight:700}
+.key-scope-list{display:flex;flex-wrap:wrap;gap:5px}.key-scope-item{padding:3px 7px;border-radius:6px;background:var(--surface-color,#f3f4f6);font-size:.88em}
+@media(max-width:700px){.key-modal-card{padding:17px}}
+</style>
+
+<script>
+(() => {
+  const form = document.getElementById('create-key-form');
+  const nameInput = document.getElementById('key-name');
+  const status = document.getElementById('create-key-status');
+  const createButton = document.getElementById('create-key-button');
+  const historyBody = document.getElementById('key-history-body');
+  const loading = document.getElementById('key-history-loading');
+  const empty = document.getElementById('key-history-empty');
+  const modal = document.getElementById('new-key-modal');
+  const tokenBox = document.getElementById('new-key-token');
+  const copyStatus = document.getElementById('copy-key-status');
+  const serverNames = Object.fromEntries(
+    Array.from(document.querySelectorAll('#key-server-list input[name="server_ids"]')).map((input) => {
+      const label = input.closest('label');
+      return [input.value, label ? label.querySelector('strong').textContent.trim() : ('服务器 ' + input.value)];
+    })
+  );
+
+  const makeCell = (text) => {
+    const td = document.createElement('td');
+    td.textContent = text;
+    return td;
+  };
+
+  async function loadKeys() {
+    loading.hidden = false;
+    loading.textContent = '正在读取密钥记录…';
+    historyBody.replaceChildren();
+    empty.hidden = true;
+    try {
+      const response = await fetch('/api/controlled-api-keys', {headers:{'Accept':'application/json'}});
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '读取失败');
+      loading.hidden = true;
+      const keys = Array.isArray(data.keys) ? data.keys : [];
+      empty.hidden = keys.length !== 0;
+      keys.forEach((key) => {
+        const row = document.createElement('tr');
+        row.appendChild(makeCell(key.name || '未命名密钥'));
+        const scopeCell = document.createElement('td');
+        const scope = document.createElement('div');
+        scope.className = 'key-scope-list';
+        let ids = [];
+        try { ids = JSON.parse(key.server_ids_json || '[]'); } catch (_) {}
+        ids.forEach((id) => {
+          const item = document.createElement('span');
+          item.className = 'key-scope-item';
+          item.textContent = serverNames[String(id)] || ('已删除服务器（ID ' + id + '）');
+          scope.appendChild(item);
+        });
+        scopeCell.appendChild(scope);
+        row.appendChild(scopeCell);
+        row.appendChild(makeCell((key.token_prefix || '') + '••••••'));
+        row.appendChild(makeCell(key.created_at || '-'));
+        row.appendChild(makeCell(key.last_used_at || '从未使用'));
+        const revoked = Boolean(key.revoked_at);
+        const stateCell = makeCell(revoked ? ('已撤销 ' + key.revoked_at) : '活动中');
+        stateCell.className = revoked ? 'key-status-revoked' : 'key-status-active';
+        row.appendChild(stateCell);
+        const actionCell = document.createElement('td');
+        if (!revoked) {
+          const revoke = document.createElement('button');
+          revoke.type = 'button';
+          revoke.className = 'danger';
+          revoke.textContent = '撤销密钥';
+          revoke.addEventListener('click', async () => {
+            if (!window.confirm('确定撤销密钥“' + (key.name || '') + '”？撤销后使用该密钥的受控机将无法再访问主控机 API。')) return;
+            revoke.disabled = true;
+            try {
+              const result = await fetch('/api/controlled-api-keys/' + encodeURIComponent(key.id), {method:'DELETE',headers:{'Accept':'application/json'}});
+              const payload = await result.json();
+              if (!result.ok || !payload.ok) throw new Error(payload.error || '撤销失败');
+              await loadKeys();
+            } catch (error) {
+              window.alert('撤销失败：' + error.message);
+              revoke.disabled = false;
+            }
+          });
+          actionCell.appendChild(revoke);
+        } else {
+          actionCell.textContent = '—';
+        }
+        row.appendChild(actionCell);
+        historyBody.appendChild(row);
+      });
+    } catch (error) {
+      loading.hidden = false;
+      loading.textContent = '读取密钥记录失败：' + error.message;
+    }
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const name = nameInput.value.trim();
+    const serverIds = Array.from(form.querySelectorAll('input[name="server_ids"]:checked')).map((input) => Number(input.value));
+    if (!name) { status.textContent = '请填写密钥名称。'; nameInput.focus(); return; }
+    if (!serverIds.length) { status.textContent = '请至少勾选一台服务器。'; return; }
+    createButton.disabled = true;
+    status.textContent = '正在创建密钥…';
+    try {
+      const response = await fetch('/api/controlled-api-keys', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Accept':'application/json'},
+        body:JSON.stringify({name,server_ids:serverIds})
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '创建失败');
+      tokenBox.value = data.token || '';
+      copyStatus.textContent = '';
+      modal.hidden = false;
+      tokenBox.focus();
+      tokenBox.select();
+      status.textContent = '密钥创建成功。';
+      nameInput.value = '';
+      form.querySelectorAll('input[name="server_ids"]').forEach((input) => { input.checked = false; });
+      await loadKeys();
+    } catch (error) {
+      status.textContent = '创建失败：' + error.message;
+    } finally {
+      createButton.disabled = false;
+    }
+  });
+
+  async function copyToken() {
+    tokenBox.focus();
+    tokenBox.select();
+    tokenBox.setSelectionRange(0, tokenBox.value.length);
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(tokenBox.value);
+      } else if (!document.execCommand('copy')) {
+        throw new Error('浏览器拒绝复制');
+      }
+      copyStatus.textContent = '已复制到剪贴板。';
+    } catch (error) {
+      copyStatus.textContent = '自动复制失败。密钥仍在文本框中，请点击文本框后手动全选复制。';
+    }
+  }
+
+  document.getElementById('copy-new-key-button').addEventListener('click', copyToken);
+  const closeModal = () => { modal.hidden = true; tokenBox.value = ''; copyStatus.textContent = ''; };
+  document.getElementById('close-new-key-button').addEventListener('click', closeModal);
+  modal.addEventListener('click', (event) => { if (event.target === modal) closeModal(); });
+  document.getElementById('refresh-keys-button').addEventListener('click', loadKeys);
+  loadKeys();
+})();
+</script>
+{% endblock %}
