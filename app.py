@@ -1277,7 +1277,7 @@ def poll_scp_device_authorization(flow_id):
         if error_code == "slow_down":
             with SCP_DEVICE_FLOWS_LOCK:
                 flow["interval"] = min(flow.get("interval", 5) + 5, 60)
-        return jsonify({"status": "pending"})
+        return jsonify({"status": "pending", "interval": flow.get("interval", 5)})
     if error_code in ("access_denied", "authorization_declined"):
         with SCP_DEVICE_FLOWS_LOCK:
             flow["status"] = "denied"
