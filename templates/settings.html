@@ -26,7 +26,10 @@
         <label>当月流量数据采样间隔（分钟）
           <input name="traffic_sample_interval_minutes" type="number" min="1" max="1440" value="{{ global_cfg.traffic_sample_interval_minutes or 60 }}" />
         </label>
-        <p class="hint">例如填写 60，则每 60 分钟依次通过 SCP API 采集各服务器当月上传/下载流量及是否限速状态。</p>
+        <p class="hint">全局间隔是默认值。点击下方按钮会将该间隔应用到所有服务器，并清除已有的单机覆盖；之后可在服务器配置列表中为个别服务器设置不同间隔（1–1440分钟），留空或填0则继承全局设置。</p>
+        <div class="button-row">
+          <button type="submit" formaction="/global-traffic-settings" formmethod="post" formnovalidate class="secondary">应用全局采样设置到所有服务器</button>
+        </div>
       </div>
     </section>
 
@@ -274,6 +277,7 @@
     <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="0" required /></label>
     <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="2" required /></label>
     <label>重试退避秒数<input name="retry_backoff_seconds" value="60,180" placeholder="例如 60,180" /></label>
+    <label>当月流量数据采样间隔（分钟）<input name="traffic_sample_interval_minutes" type="number" min="0" max="1440" value="0" placeholder="留空或0：继承全局设置" /></label>
     <label>重置方式<select name="reinstall_mode"><option value="ssh" selected>SSH脚本</option><option value="scp_api">SCP REST API (Debian11)</option><option value="scp_api_debian12">SCP REST API (Debian12)</option></select></label>
     <label>SCP账号<select name="scp_account_id"><option value="">自动识别</option>{% for a in scp_accounts %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}</select></label>
     <label>SCP服务器ID（可选）<input name="scp_server_id" placeholder="留空按IP识别" /></label>
@@ -303,6 +307,7 @@
       <label>重置时间-分<input name="reset_minute" type="number" min="0" max="59" value="{{ s.reset_minute or 0 }}" required /></label>
       <label>失败重试次数<input name="max_retries" type="number" min="1" max="5" value="{{ s.max_retries or 2 }}" required /></label>
       <label>重试退避秒数<input name="retry_backoff_seconds" value="{{ s.retry_backoff_seconds or "60,180" }}" /></label>
+      <label>当月流量数据采样间隔（分钟）<input name="traffic_sample_interval_minutes" type="number" min="0" max="1440" value="{{ s.traffic_sample_interval_minutes or 0 }}" placeholder="0：继承全局设置" /></label>
       <label>重置方式<select name="reinstall_mode"><option value="ssh" {% if (s.reinstall_mode or "ssh") == "ssh" %}selected{% endif %}>SSH脚本</option><option value="scp_api" {% if s.reinstall_mode == "scp_api" or s.reinstall_mode == "scp_api_debian11" %}selected{% endif %}>SCP REST API (Debian11)</option><option value="scp_api_debian12" {% if s.reinstall_mode == "scp_api_debian12" %}selected{% endif %}>SCP REST API (Debian12)</option></select></label>
       <label>SCP账号<select name="scp_account_id"><option value="">自动识别</option>{% for a in scp_accounts %}<option value="{{ a.id }}" {% if s.scp_account_id == a.id %}selected{% endif %}>{{ a.name }}</option>{% endfor %}</select></label>
       <label>SCP服务器ID（可选）<input name="scp_server_id" value="{{ s.scp_server_id }}" placeholder="留空按IP识别" /></label>

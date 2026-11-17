@@ -473,6 +473,8 @@ def init_db():
         ensure_column(conn, "servers", "last_agent_tx_bytes INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "last_agent_report_at TEXT")
         ensure_column(conn, "servers", "last_traffic_sync_at TEXT")
+        ensure_column(conn, "servers", "traffic_sample_interval_minutes INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "servers", "last_traffic_sample_attempt_at TEXT")
         ensure_column(conn, "servers", "traffic_throttled INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "servers", "ssh_status TEXT NOT NULL DEFAULT 'unknown'")
         ensure_column(conn, "servers", "ssh_checked_at TEXT")
@@ -3194,13 +3196,15 @@ def refresh_server_traffic_via_scp(server_row):
     if not account:
         raise RuntimeError("SCP账号不存在")
 
-    endpoint_base, token = scp_rest_login(account)
+    # Traffic sampling is best-effort background work; keep each network wait bounded.
+    endpoint_base, token = scp_rest_login(account, timeout_seconds=15)
     payload = scp_rest_request(
         account,
         "GET",
         f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
         token=token,
         endpoint_base=endpoint_base,
+        timeout_seconds=15,
     )
 
     live = payload.get("serverLiveInfo") if isinstance(payload, dict) else {}
@@ -3250,31 +3254,64 @@ def refresh_server_traffic_via_scp(server_row):
 
 def refresh_all_traffic_data_via_scp(now_dt=None):
     cfg = get_global_config()
-    interval = int(cfg["traffic_sample_interval_minutes"] or 60) if cfg else 60
-    if interval <= 0:
-        return
+    global_interval = int(cfg["traffic_sample_interval_minutes"] or 60) if cfg else 60
+    if global_interval < 1:
+        global_interval = 60
 
     now_dt = now_dt or datetime.now(TIMEZONE)
-    minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
-    if minutes_since_midnight % interval != 0:
-        return
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=TIMEZONE)
 
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
 
     ok_count = 0
     fail_count = 0
+    skipped_count = 0
     for row in rows:
+        server_interval = int(row["traffic_sample_interval_minutes"] or 0)
+        interval = server_interval if server_interval > 0 else global_interval
+        last_attempt_text = row["last_traffic_sample_attempt_at"] or row["last_traffic_sync_at"] or ""
+        if last_attempt_text:
+            try:
+                last_attempt = datetime.strptime(last_attempt_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+                if (now_dt - last_attempt).total_seconds() < interval * 60:
+                    skipped_count += 1
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        attempt_text = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        with closing(get_conn()) as conn:
+            conn.execute(
+                "UPDATE servers SET last_traffic_sample_attempt_at=? WHERE id=?",
+                (attempt_text, row["id"]),
+            )
+            conn.commit()
+
         try:
             refresh_server_traffic_via_scp(row)
             ok_count += 1
-            log_system_event("traffic_sampling", f"流量采样成功: {row['name']} ({row['ip']})", server_id=row["id"])
+            log_system_event(
+                "traffic_sampling",
+                f"流量采样成功: {row['name']} ({row['ip']})，间隔 {interval} 分钟",
+                server_id=row["id"],
+            )
         except Exception as exc:
             fail_count += 1
-            log_system_event("traffic_sampling", f"流量采样失败: {row['name']} ({row['ip']})", level="error", server_id=row["id"], details=str(exc))
-            continue
+            log_system_event(
+                "traffic_sampling",
+                f"流量采样失败: {row['name']} ({row['ip']})",
+                level="error",
+                server_id=row["id"],
+                details=str(exc),
+            )
 
-    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+    if ok_count or fail_count:
+        log_system_event(
+            "traffic_sampling_summary",
+            f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台，未到采样时间{skipped_count}台",
+        )
 
 
 def refresh_scp_account_statuses():
@@ -3469,13 +3506,15 @@ def refresh_server_traffic_via_scp(server_row):
     if not account:
         raise RuntimeError("SCP账号不存在")
 
-    endpoint_base, token = scp_rest_login(account)
+    # Traffic sampling is best-effort background work; keep each network wait bounded.
+    endpoint_base, token = scp_rest_login(account, timeout_seconds=15)
     payload = scp_rest_request(
         account,
         "GET",
         f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
         token=token,
         endpoint_base=endpoint_base,
+        timeout_seconds=15,
     )
 
     live = payload.get("serverLiveInfo") if isinstance(payload, dict) else {}
@@ -3525,31 +3564,64 @@ def refresh_server_traffic_via_scp(server_row):
 
 def refresh_all_traffic_data_via_scp(now_dt=None):
     cfg = get_global_config()
-    interval = int(cfg["traffic_sample_interval_minutes"] or 60) if cfg else 60
-    if interval <= 0:
-        return
+    global_interval = int(cfg["traffic_sample_interval_minutes"] or 60) if cfg else 60
+    if global_interval < 1:
+        global_interval = 60
 
     now_dt = now_dt or datetime.now(TIMEZONE)
-    minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
-    if minutes_since_midnight % interval != 0:
-        return
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=TIMEZONE)
 
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM servers ORDER BY sort_order ASC, id ASC").fetchall()
 
     ok_count = 0
     fail_count = 0
+    skipped_count = 0
     for row in rows:
+        server_interval = int(row["traffic_sample_interval_minutes"] or 0)
+        interval = server_interval if server_interval > 0 else global_interval
+        last_attempt_text = row["last_traffic_sample_attempt_at"] or row["last_traffic_sync_at"] or ""
+        if last_attempt_text:
+            try:
+                last_attempt = datetime.strptime(last_attempt_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+                if (now_dt - last_attempt).total_seconds() < interval * 60:
+                    skipped_count += 1
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        attempt_text = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        with closing(get_conn()) as conn:
+            conn.execute(
+                "UPDATE servers SET last_traffic_sample_attempt_at=? WHERE id=?",
+                (attempt_text, row["id"]),
+            )
+            conn.commit()
+
         try:
             refresh_server_traffic_via_scp(row)
             ok_count += 1
-            log_system_event("traffic_sampling", f"流量采样成功: {row['name']} ({row['ip']})", server_id=row["id"])
+            log_system_event(
+                "traffic_sampling",
+                f"流量采样成功: {row['name']} ({row['ip']})，间隔 {interval} 分钟",
+                server_id=row["id"],
+            )
         except Exception as exc:
             fail_count += 1
-            log_system_event("traffic_sampling", f"流量采样失败: {row['name']} ({row['ip']})", level="error", server_id=row["id"], details=str(exc))
-            continue
+            log_system_event(
+                "traffic_sampling",
+                f"流量采样失败: {row['name']} ({row['ip']})",
+                level="error",
+                server_id=row["id"],
+                details=str(exc),
+            )
 
-    log_system_event("traffic_sampling_summary", f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台")
+    if ok_count or fail_count:
+        log_system_event(
+            "traffic_sampling_summary",
+            f"本轮流量采样完成，成功{ok_count}台，失败{fail_count}台，未到采样时间{skipped_count}台",
+        )
 
 
 def refresh_scp_account_statuses():
@@ -6420,6 +6492,35 @@ def update_global_tasks():
     return redirect(url_for("settings_page"))
 
 
+@app.route("/global-traffic-settings", methods=["POST"])
+@login_required
+def update_global_traffic_settings():
+    try:
+        interval = parse_int_form_field(
+            request.form,
+            "traffic_sample_interval_minutes",
+            default=60,
+            min_value=1,
+            max_value=1440,
+        )
+    except ValueError as exc:
+        flash(f"全局流量采样设置保存失败: {exc}", "error")
+        return redirect(url_for("settings_page"))
+
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE global_config SET traffic_sample_interval_minutes=?, updated_at=? WHERE id=1",
+            (interval, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        # Clicking the global button explicitly applies the global interval to every server.
+        # Per-server overrides can then be set individually in the server configuration list.
+        conn.execute("UPDATE servers SET traffic_sample_interval_minutes=0")
+        conn.commit()
+
+    flash(f"全局流量采样间隔已应用到所有服务器：每 {interval} 分钟采集一次", "success")
+    return redirect(url_for("settings_page"))
+
+
 @app.route("/notify/test", methods=["POST"])
 @login_required
 def test_notify_email():
@@ -6523,6 +6624,9 @@ def add_server():
         scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
         server_group_id = parse_int_form_field(form, "server_group_id", default=0, min_value=0)
         reinstall_mode = normalize_reinstall_mode(form.get("reinstall_mode"))
+        traffic_sample_interval_minutes = parse_int_form_field(
+            form, "traffic_sample_interval_minutes", default=0, min_value=0, max_value=1440
+        )
     except ValueError as exc:
         flash(f"添加服务器失败: {exc}", "error")
         return redirect(url_for("settings_page"))
@@ -6537,8 +6641,8 @@ def add_server():
 
         conn.execute(
             """
-            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, renter_email, server_group_id, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
-            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO servers(name, ip, ssh_port, ssh_user, ssh_password, reset_day, reset_hour, reset_minute, auto_reset, is_renewed, is_rented, renter_name, renter_email, server_group_id, sort_order, max_retries, retry_backoff_seconds, scp_account_id, scp_server_id, reinstall_mode, traffic_sample_interval_minutes, agent_token, period_key, period_upload_bytes, period_download_bytes, last_agent_rx_bytes, last_agent_tx_bytes, last_agent_report_at)
+            VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 form["name"].strip(),
@@ -6559,6 +6663,7 @@ def add_server():
                 scp_account_id,
                 (form.get("scp_server_id") or "").strip(),
                 reinstall_mode,
+                traffic_sample_interval_minutes,
                 "",
                 "",
                 0,
@@ -6588,6 +6693,9 @@ def update_server(server_id):
         scp_account_id = int(scp_account_id_raw) if scp_account_id_raw.isdigit() else None
         server_group_id = parse_int_form_field(form, "server_group_id", default=0, min_value=0)
         reinstall_mode = normalize_reinstall_mode(form.get("reinstall_mode"))
+        traffic_sample_interval_minutes = parse_int_form_field(
+            form, "traffic_sample_interval_minutes", default=0, min_value=0, max_value=1440
+        )
     except ValueError as exc:
         flash(f"更新服务器失败: {exc}", "error")
         return redirect(url_for("settings_page"))
@@ -6596,7 +6704,7 @@ def update_server(server_id):
         conn.execute(
             """
             UPDATE servers
-            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, renter_email=?, server_group_id=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?
+            SET name=?, ip=?, ssh_port=?, ssh_user=?, ssh_password=?, reset_day=?, reset_hour=?, reset_minute=?, auto_reset=?, renter_name=?, renter_email=?, server_group_id=?, sort_order=?, max_retries=?, retry_backoff_seconds=?, scp_account_id=?, scp_server_id=?, reinstall_mode=?, traffic_sample_interval_minutes=?
             WHERE id=?
             """,
             (
@@ -6618,6 +6726,7 @@ def update_server(server_id):
                 scp_account_id,
                 (form.get("scp_server_id") or "").strip(),
                 reinstall_mode,
+                traffic_sample_interval_minutes,
                 server_id,
             ),
         )
@@ -7044,13 +7153,22 @@ def start_scheduler():
     scheduler = BackgroundScheduler(
         timezone=TIMEZONE,
         executors={
-            "default": ThreadPoolExecutor(1),  # 重任务串行
-            "light": ThreadPoolExecutor(2),    # 轻任务并行
+            "default": ThreadPoolExecutor(1),  # 核心重任务串行，避免资源竞争
+            "light": ThreadPoolExecutor(2),    # 轻量定时任务
+            "sampling": ThreadPoolExecutor(1), # SCP流量采样独立线程池，不占用重置/轻任务线程
         },
     )
     scheduler.add_job(check_scheduled_reset_jobs, "cron", minute="*", max_instances=1, coalesce=True, executor="default")
     scheduler.add_job(check_lightweight_scheduled_jobs, "cron", minute="*", max_instances=1, coalesce=True, executor="light")
-    scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*", max_instances=1, coalesce=True, executor="light")
+    scheduler.add_job(
+        refresh_all_traffic_data_via_scp,
+        "cron",
+        minute="*",
+        max_instances=1,
+        coalesce=True,
+        executor="sampling",
+        misfire_grace_time=30,
+    )
     scheduler.start()
     return scheduler
 
