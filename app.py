@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import secrets
+import hashlib
 import zipfile
 import shlex
 import smtplib
@@ -306,6 +307,20 @@ def init_db():
                 last_error TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS controlled_api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                token_prefix TEXT NOT NULL DEFAULT '',
+                server_ids_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                revoked_at TEXT
             )
             """
         )
@@ -5456,7 +5471,7 @@ def public_stock_group_page(section, group_id):
 def require_login():
     if DETAILED_LOG_ENABLED:
         g._req_start = time.time()
-    public_endpoints = {"login_page", "login_submit", "static", "uploaded_data_file"}
+    public_endpoints = {"login_page", "login_submit", "static", "uploaded_data_file", "api_v1_instances", "api_v1_instance_throttle"}
     if request.endpoint in public_endpoints:
         return None
     if request.endpoint is None:
@@ -5485,6 +5500,136 @@ def detailed_request_log(response):
         logged_in=bool(session.get("logged_in")),
     )
     return response
+
+
+
+def _controlled_api_key_record():
+    auth = (request.headers.get("Authorization") or "").strip()
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            "SELECT * FROM controlled_api_keys WHERE token_hash = ? AND revoked_at IS NULL",
+            (token_hash,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE controlled_api_keys SET last_used_at = ? WHERE id = ?",
+                (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), row["id"]),
+            )
+            conn.commit()
+        return dict(row) if row else None
+
+
+def _controlled_api_allowed_ids(record):
+    try:
+        values = json.loads(record.get("server_ids_json") or "[]")
+        return {int(value) for value in values}
+    except Exception:
+        return set()
+
+
+@app.get("/api/v1/instances")
+def api_v1_instances():
+    record = _controlled_api_key_record()
+    if not record:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    allowed_ids = _controlled_api_allowed_ids(record)
+    if not allowed_ids:
+        return jsonify({"ok": True, "instances": []})
+    placeholders = ",".join("?" for _ in allowed_ids)
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            f"SELECT id, name, ip, traffic_throttled, last_traffic_sync_at FROM servers WHERE id IN ({placeholders}) ORDER BY sort_order, id",
+            tuple(sorted(allowed_ids)),
+        ).fetchall()
+    return jsonify({
+        "ok": True,
+        "instances": [{
+            "id": int(row["id"]),
+            "name": row["name"],
+            "ip": row["ip"],
+            "throttled": bool(row["traffic_throttled"]),
+            "updated_at": row["last_traffic_sync_at"] or "",
+        } for row in rows],
+    })
+
+
+@app.get("/api/v1/instances/<int:server_id>/throttle")
+def api_v1_instance_throttle(server_id):
+    record = _controlled_api_key_record()
+    if not record:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    if server_id not in _controlled_api_allowed_ids(record):
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    row = get_server(server_id)
+    if not row:
+        return jsonify({"ok": False, "error": "instance_not_found"}), 404
+    return jsonify({
+        "ok": True,
+        "server_id": server_id,
+        "name": row["name"],
+        "ip": row["ip"],
+        "throttled": bool(row["traffic_throttled"]),
+        "updated_at": row["last_traffic_sync_at"] or "",
+    })
+
+
+@app.post("/api/controlled-api-keys")
+@login_required
+def create_controlled_api_key():
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "Netcup Monitor Pro").strip()[:80]
+    try:
+        server_ids = sorted({int(value) for value in (payload.get("server_ids") or [])})
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "invalid_server_ids"}), 400
+    if not server_ids:
+        return jsonify({"ok": False, "error": "请至少选择一台服务器"}), 400
+    with closing(get_conn()) as conn:
+        placeholders = ",".join("?" for _ in server_ids)
+        rows = conn.execute(
+            f"SELECT id FROM servers WHERE id IN ({placeholders})",
+            tuple(server_ids),
+        ).fetchall()
+        valid_ids = {int(row["id"]) for row in rows}
+        if valid_ids != set(server_ids):
+            return jsonify({"ok": False, "error": "包含不存在的服务器"}), 400
+        token = secrets.token_urlsafe(40)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO controlled_api_keys(name, token_hash, token_prefix, server_ids_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (name, token_hash, token[:10], json.dumps(server_ids), now_text),
+        )
+        conn.commit()
+    return jsonify({"ok": True, "token": token, "name": name, "server_ids": server_ids})
+
+
+@app.get("/api/controlled-api-keys")
+@login_required
+def list_controlled_api_keys():
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            "SELECT id, name, token_prefix, server_ids_json, created_at, last_used_at, revoked_at FROM controlled_api_keys ORDER BY id DESC"
+        ).fetchall()
+    return jsonify({"ok": True, "keys": [dict(row) for row in rows]})
+
+
+@app.delete("/api/controlled-api-keys/<int:key_id>")
+@login_required
+def revoke_controlled_api_key(key_id):
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE controlled_api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), key_id),
+        )
+        conn.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/login", methods=["GET"])
