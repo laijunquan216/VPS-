@@ -3196,13 +3196,15 @@ def refresh_server_traffic_via_scp(server_row):
     if not account:
         raise RuntimeError("SCP账号不存在")
 
-    endpoint_base, token = scp_rest_login(account)
+    # Traffic sampling is best-effort background work; keep each network wait bounded.
+    endpoint_base, token = scp_rest_login(account, timeout_seconds=15)
     payload = scp_rest_request(
         account,
         "GET",
         f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
         token=token,
         endpoint_base=endpoint_base,
+        timeout_seconds=15,
     )
 
     live = payload.get("serverLiveInfo") if isinstance(payload, dict) else {}
@@ -3504,13 +3506,15 @@ def refresh_server_traffic_via_scp(server_row):
     if not account:
         raise RuntimeError("SCP账号不存在")
 
-    endpoint_base, token = scp_rest_login(account)
+    # Traffic sampling is best-effort background work; keep each network wait bounded.
+    endpoint_base, token = scp_rest_login(account, timeout_seconds=15)
     payload = scp_rest_request(
         account,
         "GET",
         f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
         token=token,
         endpoint_base=endpoint_base,
+        timeout_seconds=15,
     )
 
     live = payload.get("serverLiveInfo") if isinstance(payload, dict) else {}
@@ -7149,13 +7153,22 @@ def start_scheduler():
     scheduler = BackgroundScheduler(
         timezone=TIMEZONE,
         executors={
-            "default": ThreadPoolExecutor(1),  # 重任务串行
-            "light": ThreadPoolExecutor(2),    # 轻任务并行
+            "default": ThreadPoolExecutor(1),  # 核心重任务串行，避免资源竞争
+            "light": ThreadPoolExecutor(2),    # 轻量定时任务
+            "sampling": ThreadPoolExecutor(1), # SCP流量采样独立线程池，不占用重置/轻任务线程
         },
     )
     scheduler.add_job(check_scheduled_reset_jobs, "cron", minute="*", max_instances=1, coalesce=True, executor="default")
     scheduler.add_job(check_lightweight_scheduled_jobs, "cron", minute="*", max_instances=1, coalesce=True, executor="light")
-    scheduler.add_job(refresh_all_traffic_data_via_scp, "cron", minute="*", max_instances=1, coalesce=True, executor="light")
+    scheduler.add_job(
+        refresh_all_traffic_data_via_scp,
+        "cron",
+        minute="*",
+        max_instances=1,
+        coalesce=True,
+        executor="sampling",
+        misfire_grace_time=30,
+    )
     scheduler.start()
     return scheduler
 
