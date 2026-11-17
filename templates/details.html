@@ -126,6 +126,7 @@
 <section class="panel">
   <div class="section-head">
     <h2>服务器详情</h2>
+    <button type="button" class="secondary" onclick="createControlledApiKey()" data-server-ids="{{ (unrented_rows + rented_rows)|map(attribute='id')|list|tojson }}">生成受控机 API 密钥</button>
     <form method="post" action="/servers/refresh-api-images">
       <button type="submit">更新服务器API可用镜像</button>
     </form>
@@ -300,5 +301,24 @@ async function copySummary(rowId) {
   window.addEventListener('resize', updateActive);
   updateActive();
 })();
+</script>
+<script>
+async function createControlledApiKey() {
+  const button = document.querySelector('[onclick="createControlledApiKey()"]');
+  const ids = JSON.parse(button.dataset.serverIds || "[]");
+  if (!ids.length) { alert("当前没有可授权的服务器"); return; }
+  const name = prompt("请输入受控机名称（例如 Netcup Monitor Pro）", "Netcup Monitor Pro");
+  if (name === null) return;
+  try {
+    const response = await fetch("/api/controlled-api-keys", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, server_ids: ids})
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "生成失败");
+    alert("密钥仅显示这一次，请立即复制并妥善保存：\n\n" + result.token + "\n\n授权实例 ID：" + result.server_ids.join(", "));
+  } catch (error) { alert("生成 API 密钥失败：" + error.message); }
+}
 </script>
 {% endblock %}
