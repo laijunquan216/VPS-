@@ -307,13 +307,17 @@ async function createControlledApiKey() {
   const button = document.querySelector('[onclick="createControlledApiKey()"]');
   const ids = JSON.parse(button.dataset.serverIds || "[]");
   if (!ids.length) { alert("当前没有可授权的服务器"); return; }
+  const selection = prompt("请输入允许此受控机访问的 VPS ID（逗号分隔）；默认包含当前全部实例", ids.join(","));
+  if (selection === null) return;
+  const selectedIds = selection.split(/[,，\\s]+/).map(value => Number(value.trim())).filter(value => Number.isInteger(value) && value > 0);
+  if (!selectedIds.length) { alert("请至少输入一个有效 VPS ID"); return; }
   const name = prompt("请输入受控机名称（例如 Netcup Monitor Pro）", "Netcup Monitor Pro");
   if (name === null) return;
   try {
     const response = await fetch("/api/controlled-api-keys", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name, server_ids: ids})
+      body: JSON.stringify({name, server_ids: selectedIds})
     });
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.error || "生成失败");
