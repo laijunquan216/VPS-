@@ -5503,6 +5503,16 @@ def detailed_request_log(response):
 
 
 
+def _throttle_status_available(updated_at):
+    if not updated_at:
+        return False
+    try:
+        checked_at = datetime.strptime(str(updated_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+        return datetime.now(TIMEZONE) - checked_at <= timedelta(hours=3)
+    except Exception:
+        return False
+
+
 def _controlled_api_key_record():
     auth = (request.headers.get("Authorization") or "").strip()
     if not auth.lower().startswith("bearer "):
@@ -5555,6 +5565,7 @@ def api_v1_instances():
             "ip": row["ip"],
             "throttled": bool(row["traffic_throttled"]),
             "updated_at": row["last_traffic_sync_at"] or "",
+            "status_available": _throttle_status_available(row["last_traffic_sync_at"]),
         } for row in rows],
     })
 
