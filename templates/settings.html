@@ -140,6 +140,10 @@
           setStatus(data.message || '授权成功，正在刷新账号列表…');
           button.disabled = false;
           window.setTimeout(() => window.location.reload(), 1200);
+        } else if (data.status === 'pending' && data.interval && pollTimer) {
+          const nextInterval = Math.max(3000, Number(data.interval) * 1000);
+          clearInterval(pollTimer);
+          pollTimer = window.setInterval(poll, nextInterval);
         } else if (data.status === 'expired' || data.status === 'error') {
           clearInterval(pollTimer);
           flowId = '';
