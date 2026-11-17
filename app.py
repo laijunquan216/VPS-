@@ -76,6 +76,16 @@ os.makedirs(UPLOAD_DATA_DIR, exist_ok=True)
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
 
+
+def login_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login_page"))
+        return func(*args, **kwargs)
+
+    return wrapper
+
 DETAILED_LOGGER = logging.getLogger("vps_panel_detailed")
 DETAILED_LOG_LOCK = threading.Lock()
 
@@ -5439,14 +5449,7 @@ def public_stock_group_page(section, group_id):
     return redirect(url_for("public_stock_page"))
 
 
-def login_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        if not session.get("logged_in"):
-            return redirect(url_for("login_page"))
-        return func(*args, **kwargs)
 
-    return wrapper
 
 
 @app.before_request
