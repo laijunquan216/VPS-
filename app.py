@@ -140,6 +140,10 @@ TRAFFIC_REFRESH_STATE = {
 SNAPSHOT_JOB_LOCK = threading.Lock()
 SNAPSHOT_RUNNING_SERVERS = set()
 
+SCP_OIDC_BASE = "https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect"
+SCP_DEVICE_FLOWS = {}
+SCP_DEVICE_FLOWS_LOCK = threading.Lock()
+
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -1080,31 +1084,210 @@ def _scp_rest_extract_token(data):
     return None
 
 
+def _scp_oidc_post_form(path, form_data, timeout_seconds=30):
+    body = urlparse.urlencode(form_data).encode("utf-8")
+    req = urlrequest.Request(
+        f"{SCP_OIDC_BASE}/{path.lstrip('/')}",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_seconds) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urlerror.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw or "{}")
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            payload.setdefault("http_status", exc.code)
+            return payload
+        raise
+    return json.loads(raw or "{}")
+
+
 def _scp_rest_refresh_access_token(account_row, timeout_seconds=60):
     refresh_token = (account_row["refresh_token"] or "").strip()
     if not refresh_token:
         return None
 
-    token_url = "https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect/token"
-    body = urlparse.urlencode(
+    data = _scp_oidc_post_form(
+        "token",
         {
             "client_id": "scp",
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
-        }
-    ).encode("utf-8")
-    req = urlrequest.Request(
-        token_url,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-        method="POST",
+        },
+        timeout_seconds=timeout_seconds,
     )
-    with urlrequest.urlopen(req, timeout=timeout_seconds) as resp:
-        data = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
     token = _scp_rest_extract_token(data)
     if not token:
-        raise RuntimeError("SCP OIDC 刷新成功但未返回access_token")
+        detail = data.get("error_description") or data.get("error") or "未返回access_token"
+        raise RuntimeError(f"SCP OIDC 刷新失败: {detail}")
+
+    # Keycloak may rotate refresh tokens. Persist the replacement immediately
+    # so subsequent requests do not keep presenting an invalidated token.
+    rotated_refresh = str(data.get("refresh_token") or "").strip()
+    account_id = account_row["id"] if isinstance(account_row, sqlite3.Row) else account_row.get("id")
+    if rotated_refresh and rotated_refresh != refresh_token and account_id:
+        now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+        with closing(get_conn()) as conn:
+            conn.execute(
+                "UPDATE scp_accounts SET refresh_token=?, updated_at=? WHERE id=?",
+                (rotated_refresh, now_text, account_id),
+            )
+            conn.commit()
     return token
+
+
+def _scp_device_flow_owner():
+    owner = session.get("scp_device_flow_owner")
+    if not owner:
+        owner = secrets.token_urlsafe(24)
+        session["scp_device_flow_owner"] = owner
+    return owner
+
+
+@app.route("/scp-accounts/device/start", methods=["POST"])
+@login_required
+def start_scp_device_authorization():
+    form = request.get_json(silent=True) or request.form
+    name = str(form.get("name") or "").strip()
+    username = str(form.get("username") or "").strip()
+    api_endpoint = str(form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/scp-core/api/v1"
+    if not name or not username:
+        return jsonify({"status": "error", "message": "账号别名和 SCP 账号均为必填"}), 400
+
+    try:
+        data = _scp_oidc_post_form(
+            "auth/device",
+            {"client_id": "scp", "scope": "offline_access openid"},
+        )
+    except Exception as exc:
+        app.logger.exception("申请 Netcup Device Code 失败")
+        return jsonify({"status": "error", "message": f"无法申请 Netcup 授权码：{exc}"}), 502
+
+    required = ("device_code", "user_code")
+    if not all(data.get(key) for key in required):
+        detail = data.get("error_description") or data.get("error") or "Netcup 未返回设备授权码"
+        return jsonify({"status": "error", "message": str(detail)}), 502
+
+    flow_id = secrets.token_urlsafe(24)
+    expires_in = max(30, min(int(data.get("expires_in") or 600), 1800))
+    interval = max(2, min(int(data.get("interval") or 5), 30))
+    owner = _scp_device_flow_owner()
+    flow = {
+        "device_code": str(data["device_code"]),
+        "user_code": str(data["user_code"]),
+        "verification_uri": str(data.get("verification_uri") or "https://www.servercontrolpanel.de/"),
+        "verification_uri_complete": str(data.get("verification_uri_complete") or ""),
+        "name": name,
+        "username": username,
+        "api_endpoint": api_endpoint,
+        "owner": owner,
+        "expires_at": time.time() + expires_in,
+        "interval": interval,
+        "next_poll_at": 0,
+        "status": "pending",
+    }
+    with SCP_DEVICE_FLOWS_LOCK:
+        # Expired/completed flow cleanup keeps this in-memory registry bounded.
+        for key in list(SCP_DEVICE_FLOWS):
+            if SCP_DEVICE_FLOWS[key].get("expires_at", 0) < time.time() or SCP_DEVICE_FLOWS[key].get("status") != "pending":
+                SCP_DEVICE_FLOWS.pop(key, None)
+        SCP_DEVICE_FLOWS[flow_id] = flow
+
+    return jsonify({
+        "status": "pending",
+        "flow_id": flow_id,
+        "user_code": flow["user_code"],
+        "verification_uri": flow["verification_uri"],
+        "verification_uri_complete": flow["verification_uri_complete"],
+        "expires_in": expires_in,
+        "interval": interval,
+    })
+
+
+@app.route("/scp-accounts/device/<flow_id>/poll", methods=["POST"])
+@login_required
+def poll_scp_device_authorization(flow_id):
+    owner = _scp_device_flow_owner()
+    with SCP_DEVICE_FLOWS_LOCK:
+        flow = SCP_DEVICE_FLOWS.get(flow_id)
+        if not flow or flow.get("owner") != owner:
+            return jsonify({"status": "error", "message": "授权流程不存在或已过期，请重新发起"}), 404
+        if flow.get("status") == "completed":
+            return jsonify({"status": "success", "message": "SCP账号已添加"})
+        if flow.get("expires_at", 0) <= time.time():
+            flow["status"] = "expired"
+            return jsonify({"status": "expired", "message": "授权码已过期，请重新发起"})
+        if time.time() < flow.get("next_poll_at", 0):
+            return jsonify({"status": "pending"})
+        flow["next_poll_at"] = time.time() + flow["interval"]
+        device_code = flow["device_code"]
+
+    try:
+        data = _scp_oidc_post_form(
+            "token",
+            {
+                "client_id": "scp",
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": device_code,
+            },
+        )
+    except Exception as exc:
+        app.logger.warning("Netcup Device Code 轮询异常: %s", exc)
+        return jsonify({"status": "error", "message": "连接 Netcup 授权服务失败，请稍后重试"}), 502
+
+    if data.get("access_token") and data.get("refresh_token"):
+        refresh_token = str(data["refresh_token"]).strip()
+        now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+        with closing(get_conn()) as conn:
+            existing = conn.execute("SELECT id FROM scp_accounts WHERE username=? LIMIT 1", (flow["username"],)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE scp_accounts SET name=?, password='', refresh_token=?, api_endpoint=?, updated_at=? WHERE id=?",
+                    (flow["name"], refresh_token, flow["api_endpoint"], now_text, existing["id"]),
+                )
+                account_id = existing["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO scp_accounts(name, username, password, refresh_token, api_endpoint, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (flow["name"], flow["username"], "", refresh_token, flow["api_endpoint"], now_text, now_text),
+                )
+                account_id = cur.lastrowid
+            conn.commit()
+        with SCP_DEVICE_FLOWS_LOCK:
+            flow["status"] = "completed"
+            flow["device_code"] = ""
+        account = get_scp_account(account_id)
+        if account:
+            ok, message = check_scp_account_connection(account)
+            log_system_event("scp_account", f"Device Code 授权添加SCP账号: {flow['name']}", account_id=account_id)
+            return jsonify({
+                "status": "success",
+                "message": "授权成功，账号已保存" if ok else f"授权成功，账号已保存，但 API 检测失败：{message}",
+            })
+        return jsonify({"status": "success", "message": "授权成功，账号已保存"})
+
+    error_code = str(data.get("error") or "")
+    if error_code in ("authorization_pending", "slow_down"):
+        if error_code == "slow_down":
+            with SCP_DEVICE_FLOWS_LOCK:
+                flow["interval"] = min(flow.get("interval", 5) + 5, 60)
+        return jsonify({"status": "pending", "interval": flow.get("interval", 5)})
+    if error_code in ("access_denied", "authorization_declined"):
+        with SCP_DEVICE_FLOWS_LOCK:
+            flow["status"] = "denied"
+        return jsonify({"status": "error", "message": "你已拒绝 Netcup 授权"})
+    if error_code in ("expired_token", "device_code_expired"):
+        with SCP_DEVICE_FLOWS_LOCK:
+            flow["status"] = "expired"
+        return jsonify({"status": "expired", "message": "授权码已过期，请重新发起"})
+    detail = data.get("error_description") or error_code or "Netcup 未返回 Refresh Token"
+    return jsonify({"status": "error", "message": f"Netcup 授权失败：{detail}"})
 
 
 def scp_rest_login(account_row, timeout_seconds=60):
@@ -5979,8 +6162,19 @@ def update_scp_account(account_id):
     refresh_token = (form.get("refresh_token") or "").strip()
     api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/scp-core/api/v1"
 
-    if not name or not username or not refresh_token:
-        flash("更新SCP账号失败: 名称、账号、Refresh Token 均为必填", "error")
+    if not name or not username:
+        flash("更新SCP账号失败: 名称和账号均为必填", "error")
+        return redirect(url_for("settings_page"))
+    existing = get_scp_account(account_id)
+    if not existing:
+        flash("更新SCP账号失败: 账号不存在", "error")
+        return redirect(url_for("settings_page"))
+    # The token field is intentionally blank in the UI; blank means keep the
+    # stored credential rather than exposing it back into the HTML form.
+    if not refresh_token:
+        refresh_token = (existing["refresh_token"] or "").strip()
+    if not refresh_token:
+        flash("更新SCP账号失败: 请先完成 Netcup 授权或填写 Refresh Token", "error")
         return redirect(url_for("settings_page"))
 
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
