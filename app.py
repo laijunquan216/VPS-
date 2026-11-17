@@ -6162,8 +6162,19 @@ def update_scp_account(account_id):
     refresh_token = (form.get("refresh_token") or "").strip()
     api_endpoint = (form.get("api_endpoint") or "").strip() or "https://www.servercontrolpanel.de/scp-core/api/v1"
 
-    if not name or not username or not refresh_token:
-        flash("更新SCP账号失败: 名称、账号、Refresh Token 均为必填", "error")
+    if not name or not username:
+        flash("更新SCP账号失败: 名称和账号均为必填", "error")
+        return redirect(url_for("settings_page"))
+    existing = get_scp_account(account_id)
+    if not existing:
+        flash("更新SCP账号失败: 账号不存在", "error")
+        return redirect(url_for("settings_page"))
+    # The token field is intentionally blank in the UI; blank means keep the
+    # stored credential rather than exposing it back into the HTML form.
+    if not refresh_token:
+        refresh_token = (existing["refresh_token"] or "").strip()
+    if not refresh_token:
+        flash("更新SCP账号失败: 请先完成 Netcup 授权或填写 Refresh Token", "error")
         return redirect(url_for("settings_page"))
 
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
