@@ -5715,20 +5715,19 @@ def api_v1_pt_configs():
                 ORDER BY id DESC""",
             tuple(sorted(allowed_ids)),
         ).fetchall()
-    latest_by_server = {}
+    latest_pt_by_server = {}
     for log in logs:
         sid = int(log["server_id"])
-        if sid in latest_by_server:
+        if sid in latest_pt_by_server:
             continue
-        latest_by_server[sid] = log
+        parsed = _parse_pt_install_output(log["output"], None, log["created_at"])
+        if parsed:
+            latest_pt_by_server[sid] = parsed
 
     instances = []
     for server in servers:
         sid = int(server["id"])
-        log = latest_by_server.get(sid)
-        pt_config = _parse_pt_install_output(
-            log["output"], server, log["created_at"]
-        ) if log else None
+        pt_config = latest_pt_by_server.get(sid)
         instances.append({
             "id": sid,
             "name": server["name"],
