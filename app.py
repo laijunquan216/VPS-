@@ -5615,6 +5615,133 @@ def _controlled_api_allowed_ids(record):
         return set()
 
 
+
+def _parse_pt_install_output(output_text, server_row, log_created_at=""):
+    """从 PT-Seedbox 成功安装输出提取服务配置；不返回 root 密码。"""
+    text = str(output_text or "")
+    text = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text)
+    text = text.replace("\r", "")
+    if "安装完成" not in text or "qBittorrent" not in text:
+        return None
+
+    def section(start_marker, end_markers):
+        start = text.find(start_marker)
+        if start < 0:
+            return ""
+        end = len(text)
+        for marker in end_markers:
+            pos = text.find(marker, start + len(start_marker))
+            if pos >= 0:
+                end = min(end, pos)
+        return text[start:end]
+
+    def value(pattern, source):
+        match = re.search(pattern, source, re.IGNORECASE | re.MULTILINE)
+        return match.group(1).strip().strip("'\\\" ") if match else ""
+
+    def parse_service_url(raw):
+        raw = (raw or "").strip().rstrip(".,，。;；")
+        if not raw:
+            return None
+        if not raw.startswith(("http://", "https://")):
+            raw = "http://" + raw
+        try:
+            parsed = urlparse.urlparse(raw)
+            if not parsed.hostname or not parsed.port:
+                return None
+            return {"url": f"{parsed.scheme}://{parsed.netloc}", "host": parsed.hostname, "port": parsed.port}
+        except Exception:
+            return None
+
+    vertex_text = section("🌐 Vertex", ["🧩 qBittorrent", "📁 FileBrowser", "建议重启"])
+    qb_text = section("🧩 qBittorrent", ["📁 FileBrowser", "建议重启"])
+    fb_text = section("📁 FileBrowser", ["建议重启"])
+    vertex_url = parse_service_url(value(r"管理地址\s*:\s*(https?://[^\s]+)", vertex_text))
+    qb_url = parse_service_url(value(r"管理地址\s*:\s*(https?://[^\s]+)", qb_text))
+    fb_url = parse_service_url(value(r"管理地址\s*:\s*(https?://[^\s]+)", fb_text))
+    username = value(r"用户名\s*:\s*(.+)", vertex_text)
+    password = value(r"密码\s*:\s*(.+)", vertex_text)
+    reported_ip = value(r"IP address\s*:\s*([0-9a-fA-F:.]+)", text)
+    if not qb_url:
+        return None
+
+    result = {
+        "available": True,
+        "source": "pt-seedbox-install-log",
+        "log_created_at": log_created_at or "",
+        "reported_ip": reported_ip,
+        "qb": {
+            "host": qb_url["host"],
+            "port": qb_url["port"],
+            "url": qb_url["url"],
+            "user": username,
+            "password": password,
+            "credentials_available": bool(username and password),
+        },
+        "vertex": None,
+        "filebrowser": None,
+    }
+    if vertex_url and username and password:
+        result["vertex"] = {
+            "api_url": vertex_url["url"],
+            "api_user": username,
+            "api_password": password,
+            "container_name": "vertex",
+            "port": vertex_url["port"],
+        }
+    if fb_url:
+        result["filebrowser"] = {"url": fb_url["url"], "port": fb_url["port"]}
+    return result
+
+
+@app.get("/api/v1/pt-configs")
+def api_v1_pt_configs():
+    """返回 API Key 授权服务器的 PT-Seedbox 安装配置。密码仅通过此鉴权接口返回。"""
+    record = _controlled_api_key_record()
+    if not record:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    allowed_ids = _controlled_api_allowed_ids(record)
+    if not allowed_ids:
+        return jsonify({"ok": True, "instances": []})
+    placeholders = ",".join("?" for _ in allowed_ids)
+    with closing(get_conn()) as conn:
+        servers = conn.execute(
+            f"SELECT id, name, ip FROM servers WHERE id IN ({placeholders}) ORDER BY sort_order, id",
+            tuple(sorted(allowed_ids)),
+        ).fetchall()
+        logs = conn.execute(
+            f"""SELECT server_id, status, output, created_at FROM job_logs
+                WHERE server_id IN ({placeholders}) AND status='success'
+                ORDER BY id DESC""",
+            tuple(sorted(allowed_ids)),
+        ).fetchall()
+    latest_pt_by_server = {}
+    for log in logs:
+        sid = int(log["server_id"])
+        if sid in latest_pt_by_server:
+            continue
+        parsed = _parse_pt_install_output(log["output"], None, log["created_at"])
+        if parsed:
+            latest_pt_by_server[sid] = parsed
+
+    instances = []
+    for server in servers:
+        sid = int(server["id"])
+        pt_config = latest_pt_by_server.get(sid)
+        instances.append({
+            "id": sid,
+            "name": server["name"],
+            "ip": server["ip"],
+            "pt_config": pt_config,
+            "pt_config_available": bool(pt_config),
+        })
+    response = jsonify({"ok": True, "instances": instances})
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Vary"] = "Authorization"
+    return response
+
+
 @app.get("/api/v1/instances")
 def api_v1_instances():
     record = _controlled_api_key_record()
