@@ -5619,7 +5619,7 @@ def _controlled_api_allowed_ids(record):
 def _parse_pt_install_output(output_text, server_row, log_created_at=""):
     """从 PT-Seedbox 成功安装输出提取服务配置；不返回 root 密码。"""
     text = str(output_text or "")
-    text = re.sub(r"\x1b(?:[@-Z\\-_]|\\[[0-?]*[ -/]*[@-~])", "", text)
+    text = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text)
     text = text.replace("\r", "")
     if "安装完成" not in text or "qBittorrent" not in text:
         return None
@@ -5656,12 +5656,12 @@ def _parse_pt_install_output(output_text, server_row, log_created_at=""):
     vertex_text = section("🌐 Vertex", ["🧩 qBittorrent", "📁 FileBrowser", "建议重启"])
     qb_text = section("🧩 qBittorrent", ["📁 FileBrowser", "建议重启"])
     fb_text = section("📁 FileBrowser", ["建议重启"])
-    vertex_url = parse_service_url(value(r"管理地址\\s*:\\s*(https?://[^\\s]+)", vertex_text))
-    qb_url = parse_service_url(value(r"管理地址\\s*:\\s*(https?://[^\\s]+)", qb_text))
-    fb_url = parse_service_url(value(r"管理地址\\s*:\\s*(https?://[^\\s]+)", fb_text))
-    username = value(r"用户名\\s*:\\s*(.+)", vertex_text)
-    password = value(r"密码\\s*:\\s*(.+)", vertex_text)
-    reported_ip = value(r"IP address\\s*:\\s*([0-9a-fA-F:.]+)", text)
+    vertex_url = parse_service_url(value(r"管理地址\s*:\s*(https?://[^\s]+)", vertex_text))
+    qb_url = parse_service_url(value(r"管理地址\s*:\s*(https?://[^\s]+)", qb_text))
+    fb_url = parse_service_url(value(r"管理地址\s*:\s*(https?://[^\s]+)", fb_text))
+    username = value(r"用户名\s*:\s*(.+)", vertex_text)
+    password = value(r"密码\s*:\s*(.+)", vertex_text)
+    reported_ip = value(r"IP address\s*:\s*([0-9a-fA-F:.]+)", text)
     if not qb_url:
         return None
 
