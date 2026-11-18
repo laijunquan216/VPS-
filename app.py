@@ -5735,7 +5735,11 @@ def api_v1_pt_configs():
             "pt_config": pt_config,
             "pt_config_available": bool(pt_config),
         })
-    return jsonify({"ok": True, "instances": instances})
+    response = jsonify({"ok": True, "instances": instances})
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Vary"] = "Authorization"
+    return response
 
 
 @app.get("/api/v1/instances")
