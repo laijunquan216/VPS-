@@ -4311,7 +4311,24 @@ def run_remote(server_row, running_log_id, notify_on_failure=True, notify_on_suc
                 if data_zip_source == "uploaded":
                     selected_zip_url = (global_cfg["data_zip_url"] or "").strip()
                 elif data_zip_source == "local_pack":
-                    selected_zip_url = (global_cfg["local_vt_data_zip_url"] or "").strip()
+                    # 每次执行SSH任务2前尝试重新打包本机VT数据。
+                    # 打包成功后函数会更新托管链接；失败则保留并使用上一次成功的链接。
+                    try:
+                        local_vt_data_path = (global_cfg["local_vt_data_path"] or "").strip()
+                        selected_zip_url = package_local_vt_data_to_zip(local_vt_data_path)
+                        global_cfg = get_global_config()
+                        output_lines.append("本机VT数据自动打包成功，SSH任务2将使用最新压缩包")
+                    except Exception as pack_exc:
+                        fallback_cfg = get_global_config()
+                        selected_zip_url = (fallback_cfg["local_vt_data_zip_url"] or "").strip()
+                        if selected_zip_url:
+                            output_lines.append(
+                                f"本机VT数据自动打包失败，将回退使用上一次成功的压缩包继续执行SSH任务2: {pack_exc}"
+                            )
+                        else:
+                            output_lines.append(
+                                f"本机VT数据自动打包失败，且没有历史压缩包；不注入压缩包链接，仍继续执行SSH任务2: {pack_exc}"
+                            )
                 if selected_zip_url:
                     ssh_command_2 = _inject_data_zip_url_into_ssh2(ssh_command_2, selected_zip_url)
                     output_lines.append(f"SSH任务2已按数据源[{data_zip_source}]注入VT数据压缩包链接")
