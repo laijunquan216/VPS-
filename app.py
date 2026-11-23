@@ -911,19 +911,23 @@ def apply_monthly_rental_rollover_if_needed(now_dt=None):
                 current_email = str(row["renter_email"] or "").strip()
                 next_current_tenant = current_tenant if int(row["is_rented"] or 0) == 1 else ""
                 next_current_email = current_email if int(row["is_rented"] or 0) == 1 else ""
+                # 长期续费期间自动同步为已续租，并沿用当前租户作为下月租户。
+                # 到续费日前一个月后，交由定时任务按既有规则切回“未续租”提醒状态。
+                long_renew_active = now_dt.date() < _one_month_before(renew_until)
                 conn.execute(
                     """
                     UPDATE servers
                     SET last_month_tenant = ?,
                         renter_name = ?,
                         renter_email = ?,
-                        next_rent_status = 'unknown',
+                        next_rent_status = 'confirmed',
+                        is_renewed = ?,
                         delivery_email_sent_at = CASE WHEN ? <> '' THEN delivery_email_sent_at ELSE NULL END,
                         renew_notice_sent_keys = CASE WHEN ? <> '' THEN renew_notice_sent_keys ELSE '' END,
                         rental_rollover_key = ?
                     WHERE id = ?
                     """,
-                    (current_tenant, next_current_tenant, next_current_email, next_current_email, next_current_email, cycle_key, row["id"]),
+                    (current_tenant, next_current_tenant, next_current_email, 1 if long_renew_active else 0, next_current_email, next_current_email, cycle_key, row["id"]),
                 )
                 changed += 1
                 continue
@@ -2545,14 +2549,28 @@ def build_server_reset_datetime(server_row, ref_dt):
 
 def build_effective_reset_datetime(server_row, ref_dt):
     candidate = build_server_reset_datetime(server_row, ref_dt)
-    renew_until = _parse_date_text(server_row["renew_until_date"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("renew_until_date"))
-    if not renew_until:
+    is_sqlite_row = isinstance(server_row, sqlite3.Row)
+    row_data = server_row if is_sqlite_row else (server_row or {})
+    renew_until = _parse_date_text(
+        row_data["renew_until_date"] if is_sqlite_row else row_data.get("renew_until_date")
+    )
+
+    # 长期续费按续费截止日期顺延；不要再额外叠加一次普通续租跳过。
+    if renew_until:
+        safety = 0
+        while candidate.date() < renew_until and safety < 36:
+            candidate = build_server_reset_datetime(server_row, candidate + timedelta(minutes=1))
+            safety += 1
         return candidate
 
-    safety = 0
-    while candidate.date() < renew_until and safety < 36:
+    # 普通续租只跳过最近一次重置，预计重置时间显示到下一个周期。
+    is_renewed = (
+        int(row_data["is_renewed"] or 0)
+        if is_sqlite_row
+        else int(row_data.get("is_renewed") or 0)
+    )
+    if is_renewed:
         candidate = build_server_reset_datetime(server_row, candidate + timedelta(minutes=1))
-        safety += 1
     return candidate
 
 
@@ -6924,7 +6942,22 @@ def set_renew_until(server_id):
         if not row:
             flash("服务器不存在", "error")
             return redirect(url_for("details_page"))
-        conn.execute("UPDATE servers SET renew_until_date=? WHERE id=?", (date_text, server_id))
+
+        if renew_until and datetime.now(TIMEZONE).date() < renew_until:
+            # 设置未来的长期续费日期时，立即同步出租状态；临近到期的提醒窗口仍遵循原有规则。
+            long_renew_active = datetime.now(TIMEZONE).date() < _one_month_before(renew_until)
+            conn.execute(
+                """
+                UPDATE servers
+                SET renew_until_date = ?,
+                    is_renewed = ?,
+                    next_rent_status = 'confirmed'
+                WHERE id = ?
+                """,
+                (date_text, 1 if long_renew_active else 0, server_id),
+            )
+        else:
+            conn.execute("UPDATE servers SET renew_until_date=? WHERE id=?", (date_text, server_id))
         conn.commit()
     log_system_event("long_renew", f"服务器[{row['name']}] 设置长期续费至 {date_text or '空'}", server_id=server_id)
     flash(f"长期续费日期已更新为 {date_text or '未设置'}", "success")
