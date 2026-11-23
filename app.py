@@ -5934,6 +5934,8 @@ def home():
 @app.route("/details")
 @login_required
 def details_page():
+    # 详情页也执行长期续费状态同步，确保服务器状态徽标与出租管理一致。
+    apply_monthly_rental_rollover_if_needed()
     rows = list_detail_rows()
     normalized_rows = []
     now_dt = datetime.now(TIMEZONE)
