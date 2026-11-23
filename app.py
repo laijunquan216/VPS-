@@ -902,34 +902,56 @@ def apply_monthly_rental_rollover_if_needed(now_dt=None):
         changed = 0
         for row in rows:
             cycle_key = _server_rental_cycle_key(row, now_dt)
-            if str(row["rental_rollover_key"] or "").strip() == cycle_key:
-                continue
-
+            rollover_key = str(row["rental_rollover_key"] or "").strip()
             renew_until = _parse_date_text(row["renew_until_date"])
+
+            # 长期续费状态同步必须先于 rental_rollover_key 的幂等跳过判断。
+            # 这样旧数据即使本月已经迁移过，也会在访问出租管理时自动修正状态。
             if renew_until and now_dt.date() < renew_until:
                 current_tenant = str(row["renter_name"] or "").strip()
                 current_email = str(row["renter_email"] or "").strip()
-                next_current_tenant = current_tenant if int(row["is_rented"] or 0) == 1 else ""
-                next_current_email = current_email if int(row["is_rented"] or 0) == 1 else ""
-                # 长期续费期间自动同步为已续租，并沿用当前租户作为下月租户。
-                # 到续费日前一个月后，交由定时任务按既有规则切回“未续租”提醒状态。
+                is_rented = int(row["is_rented"] or 0) == 1
+                next_current_tenant = current_tenant if is_rented else ""
+                next_current_email = current_email if is_rented else ""
                 long_renew_active = now_dt.date() < _one_month_before(renew_until)
-                conn.execute(
-                    """
-                    UPDATE servers
-                    SET last_month_tenant = ?,
-                        renter_name = ?,
-                        renter_email = ?,
-                        next_rent_status = 'confirmed',
-                        is_renewed = ?,
-                        delivery_email_sent_at = CASE WHEN ? <> '' THEN delivery_email_sent_at ELSE NULL END,
-                        renew_notice_sent_keys = CASE WHEN ? <> '' THEN renew_notice_sent_keys ELSE '' END,
-                        rental_rollover_key = ?
-                    WHERE id = ?
-                    """,
-                    (current_tenant, next_current_tenant, next_current_email, 1 if long_renew_active else 0, next_current_email, next_current_email, cycle_key, row["id"]),
-                )
-                changed += 1
+                desired_is_renewed = 1 if long_renew_active else 0
+
+                if rollover_key != cycle_key:
+                    conn.execute(
+                        """
+                        UPDATE servers
+                        SET last_month_tenant = ?,
+                            renter_name = ?,
+                            renter_email = ?,
+                            next_rent_status = 'confirmed',
+                            is_renewed = ?,
+                            delivery_email_sent_at = CASE WHEN ? <> '' THEN delivery_email_sent_at ELSE NULL END,
+                            renew_notice_sent_keys = CASE WHEN ? <> '' THEN renew_notice_sent_keys ELSE '' END,
+                            rental_rollover_key = ?
+                        WHERE id = ?
+                        """,
+                        (current_tenant, next_current_tenant, next_current_email, desired_is_renewed, next_current_email, next_current_email, cycle_key, row["id"]),
+                    )
+                    changed += 1
+                elif (
+                    _normalize_next_rent_status(row["next_rent_status"]) != "confirmed"
+                    or int(row["is_renewed"] or 0) != desired_is_renewed
+                ):
+                    # 本月迁移已完成时，只修正续租标记，不重复改动租户资料。
+                    conn.execute(
+                        """
+                        UPDATE servers
+                        SET next_rent_status = 'confirmed',
+                            is_renewed = ?
+                        WHERE id = ?
+                        """,
+                        (desired_is_renewed, row["id"]),
+                    )
+                    changed += 1
+                continue
+
+            # 非长期续费记录仍按原有月度迁移幂等规则处理。
+            if rollover_key == cycle_key:
                 continue
 
             current_tenant = str(row["renter_name"] or "").strip()
