@@ -100,9 +100,12 @@ EOF
 chmod +x /usr/local/bin/vps-panel-update
 
 systemctl daemon-reload
-systemctl enable --now vps-panel.service
+systemctl enable vps-panel.service
+# 更新安装时重启面板服务即可，无需重启整台服务器
+systemctl restart vps-panel.service
 
 echo "[OK] 安装完成"
+echo "[INFO] 面板服务已重启"
 echo "[INFO] 访问地址: http://$(hostname -I | awk '{print $1}'):$PANEL_PORT"
 echo "[INFO] 服务状态: systemctl status vps-panel.service"
 echo "[INFO] 后续更新命令: sudo vps-panel-update"
