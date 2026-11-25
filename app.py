@@ -3535,14 +3535,9 @@ def _calc_daily_rows(points, now_dt):
 
 
 def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
-    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
-    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
-    if not account_id or not scp_server_id:
-        raise RuntimeError("缺少SCP账号绑定或服务器ID")
-
-    account = get_scp_account(account_id)
-    if not account:
-        raise RuntimeError("SCP账号不存在")
+    account, scp_server_id = ensure_scp_server_account_binding(server_row)
+    if not account or not scp_server_id:
+        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配")
 
     endpoint_base, token = scp_rest_login(account, timeout_seconds=timeout_seconds)
     now_dt = now_dt or datetime.now(TIMEZONE)
@@ -3595,14 +3590,9 @@ def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
     return windows, daily_rows, steps, samples
 
 def refresh_server_traffic_via_scp(server_row):
-    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
-    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
-    if not account_id or not scp_server_id:
-        raise RuntimeError("缺少SCP账号绑定或服务器ID")
-
-    account = get_scp_account(account_id)
-    if not account:
-        raise RuntimeError("SCP账号不存在")
+    account, scp_server_id = ensure_scp_server_account_binding(server_row)
+    if not account or not scp_server_id:
+        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配")
 
     # Traffic sampling is best-effort background work; keep each network wait bounded.
     endpoint_base, token = scp_rest_login(account, timeout_seconds=15)
