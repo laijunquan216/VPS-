@@ -3235,9 +3235,18 @@ def _calc_daily_rows(points, now_dt):
 
 
 def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
-    account, scp_server_id = ensure_scp_server_account_binding(server_row)
+    binding_diagnostics = []
+    try:
+        account, scp_server_id = ensure_scp_server_account_binding(server_row, binding_diagnostics)
+    except Exception as exc:
+        detail = "；".join(binding_diagnostics)
+        raise RuntimeError(f"SCP账号绑定检查失败: {exc}" + (f"；巡检详情: {detail}" if detail else "")) from exc
     if not account or not scp_server_id:
-        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配")
+        detail = "；".join(binding_diagnostics)
+        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配" + (f"；巡检详情: {detail}" if detail else ""))
+
+    if binding_diagnostics and any("自动迁移SCP绑定" in line for line in binding_diagnostics):
+        log_system_event("scp_auto_migration", f"{server_row['name']} ({server_row['ip']})：" + "；".join(binding_diagnostics), server_id=server_row["id"])
 
     endpoint_base, token = scp_rest_login(account, timeout_seconds=timeout_seconds)
     now_dt = now_dt or datetime.now(TIMEZONE)
@@ -3290,9 +3299,18 @@ def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
     return windows, daily_rows, steps, samples
 
 def refresh_server_traffic_via_scp(server_row):
-    account, scp_server_id = ensure_scp_server_account_binding(server_row)
+    binding_diagnostics = []
+    try:
+        account, scp_server_id = ensure_scp_server_account_binding(server_row, binding_diagnostics)
+    except Exception as exc:
+        detail = "；".join(binding_diagnostics)
+        raise RuntimeError(f"SCP账号绑定检查失败: {exc}" + (f"；巡检详情: {detail}" if detail else "")) from exc
     if not account or not scp_server_id:
-        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配")
+        detail = "；".join(binding_diagnostics)
+        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配" + (f"；巡检详情: {detail}" if detail else ""))
+
+    if binding_diagnostics and any("自动迁移SCP绑定" in line for line in binding_diagnostics):
+        log_system_event("scp_auto_migration", f"{server_row['name']} ({server_row['ip']})：" + "；".join(binding_diagnostics), server_id=server_row["id"])
 
     # Traffic sampling is best-effort background work; keep each network wait bounded.
     endpoint_base, token = scp_rest_login(account, timeout_seconds=15)
