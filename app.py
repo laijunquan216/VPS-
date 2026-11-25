@@ -1922,7 +1922,7 @@ def ensure_scp_server_account_binding(server_row, output_lines=None):
             detail = scp_rest_request(
                 current_account,
                 "GET",
-                f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
+                f"servers/{urlparse.quote(scp_server_id)}",
                 token=token,
                 endpoint_base=endpoint_base,
                 timeout_seconds=20,
