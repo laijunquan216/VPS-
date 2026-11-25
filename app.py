@@ -1398,7 +1398,11 @@ def _scp_extract_ips(server_item):
         val = server_item.get(key)
         if isinstance(val, str) and val.strip():
             ips.append(val.strip())
-    for key in ("ips", "ipAddresses", "addresses"):
+    # Netcup SCP REST server details expose assigned addresses as
+    # ipv4Addresses/ipv6Addresses (each item is an object containing "ip").
+    # Keep these fields in the exact-IP verification path so a valid candidate
+    # found by servers?ip=... can be safely confirmed before migration.
+    for key in ("ips", "ipAddresses", "ipv4Addresses", "ipv6Addresses", "addresses"):
         val = server_item.get(key)
         if isinstance(val, list):
             for entry in val:
