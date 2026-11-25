@@ -1680,20 +1680,9 @@ def _get_snapshot_server_context(server_id):
     if not row:
         raise ValueError("服务器不存在")
 
-    account_id = row["scp_account_id"] if isinstance(row, sqlite3.Row) else (row or {}).get("scp_account_id")
-    scp_server_id = str(row["scp_server_id"] if isinstance(row, sqlite3.Row) else (row or {}).get("scp_server_id") or "").strip()
-    account = get_scp_account(account_id) if account_id else None
-
-    if not scp_server_id:
-        output_lines = []
-        account_scope = [account] if account else None
-        account, scp_server_id = find_scp_server_id_by_ip(row["ip"], output_lines, account_candidates=account_scope)
-        if not account or not scp_server_id:
-            raise RuntimeError("未绑定SCP服务器ID，且无法按IP自动识别")
-        bind_scp_server(server_id, account["id"], scp_server_id)
-    elif not account:
-        raise RuntimeError("该服务器绑定的SCP账号不存在，请在设置页重新配置")
-
+    account, scp_server_id = ensure_scp_server_account_binding(row)
+    if not account or not scp_server_id:
+        raise RuntimeError("当前SCP账号中的服务器不可用，且巡检其他账号后仍未找到相同公网IP")
     endpoint_base, token = scp_rest_login(account)
     return dict(row), account, str(scp_server_id).strip(), endpoint_base, token
 
@@ -1913,6 +1902,107 @@ def scp_cleanup_old_snapshots(server_id, keep_count):
     return {"deleted": deleted, "skipped": skipped, "total_after": len(after_list), "skipped_active": len(skipped)}
 
 
+def ensure_scp_server_account_binding(server_row, output_lines=None):
+    """
+    Verify the saved SCP account/server binding first.
+    Only when that binding is unusable, scan other authorized accounts by exact public IP
+    and automatically persist a unique matching account/server ID.
+    """
+    row = dict(server_row) if isinstance(server_row, sqlite3.Row) else dict(server_row or {})
+    server_id = row.get("id")
+    ip_text = str(row.get("ip") or "").strip()
+    account_id = row.get("scp_account_id")
+    scp_server_id = str(row.get("scp_server_id") or "").strip()
+    current_account = get_scp_account(account_id) if account_id else None
+
+    # Existing binding takes priority. A successful detail API call means no migration.
+    if current_account and scp_server_id:
+        try:
+            endpoint_base, token = scp_rest_login(current_account)
+            detail = scp_rest_request(
+                current_account,
+                "GET",
+                f"servers/{urlparse.quote(scp_server_id)}?loadServerLiveInfo=true",
+                token=token,
+                endpoint_base=endpoint_base,
+                timeout_seconds=20,
+            )
+            if detail:
+                reported_ips = _scp_extract_ips(detail)
+                if not reported_ips or not ip_text or ip_text in reported_ips:
+                    if output_lines is not None:
+                        output_lines.append(
+                            f"当前SCP绑定可用，保持原账号[{current_account['name']}] server_id={scp_server_id}，不触发迁移"
+                        )
+                    return current_account, scp_server_id
+                if output_lines is not None:
+                    output_lines.append(
+                        f"当前SCP绑定返回IP与面板IP不一致，准备巡检其他账号: panel_ip={ip_text}, api_ips={reported_ips}"
+                    )
+            else:
+                if output_lines is not None:
+                    output_lines.append(f"当前SCP账号[{current_account['name']}]未返回服务器详情，准备巡检其他账号")
+        except Exception as exc:
+            if output_lines is not None:
+                output_lines.append(f"当前SCP绑定不可用（账号[{current_account['name']}]，server_id={scp_server_id}）：{exc}；开始巡检其他账号")
+
+    if not ip_text:
+        return None, None
+
+    # Search every other authorized account and require an exact IP match from its server detail.
+    matches = []
+    for candidate in list_scp_accounts():
+        candidate_id = candidate["id"]
+        if current_account and int(candidate_id) == int(current_account["id"]):
+            continue
+        try:
+            found_account, found_server_id = find_scp_server_id_by_ip(
+                ip_text, output_lines, account_candidates=[candidate]
+            )
+            if not found_account or not found_server_id:
+                continue
+            endpoint_base, token = scp_rest_login(found_account)
+            found_ips = _scp_rest_fetch_server_ips(
+                found_account, endpoint_base, token, found_server_id
+            )
+            if ip_text not in found_ips:
+                if output_lines is not None:
+                    output_lines.append(
+                        f"SCP账号[{found_account['name']}]发现候选server_id={found_server_id}，但详情IP无法精确确认，跳过"
+                    )
+                continue
+            matches.append((found_account, str(found_server_id)))
+        except Exception as exc:
+            if output_lines is not None:
+                output_lines.append(f"巡检SCP账号[{candidate['name']}]失败: {exc}")
+
+    # Do not guess if multiple accounts expose the same public IP.
+    unique_matches = {(int(account["id"]), server_id): (account, server_id) for account, server_id in matches}
+    if len(unique_matches) != 1:
+        if output_lines is not None:
+            if unique_matches:
+                labels = ", ".join(
+                    f"{account['name']}({server_id})" for account, server_id in unique_matches.values()
+                )
+                output_lines.append(f"多个SCP账号匹配到相同IP，存在歧义，不自动迁移: {labels}")
+            else:
+                output_lines.append(f"其他已授权SCP账号均未找到公网IP={ip_text}的服务器，保留原绑定")
+        return None, None
+
+    new_account, new_server_id = next(iter(unique_matches.values()))
+    if server_id:
+        bind_scp_server(server_id, new_account["id"], new_server_id)
+    row["scp_account_id"] = new_account["id"]
+    row["scp_server_id"] = new_server_id
+    if output_lines is not None:
+        old_name = current_account["name"] if current_account else "未绑定"
+        output_lines.append(
+            f"已根据公网IP自动迁移SCP绑定: {old_name} -> {new_account['name']}，"
+            f"ip={ip_text}, server_id={new_server_id}"
+        )
+    return new_account, new_server_id
+
+
 def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=None):
     ip_text = str(server_ip or "").strip()
     if not ip_text:
@@ -1970,23 +2060,11 @@ def find_scp_server_id_by_ip(server_ip, output_lines=None, account_candidates=No
 
 def refresh_server_api_images(server_row, output_lines=None):
     mutable_server = dict(server_row)
-    account = get_scp_account(mutable_server.get("scp_account_id"))
-    scp_server_id = (mutable_server.get("scp_server_id") or "").strip()
-
-    if not scp_server_id:
-        account_scope = [account] if account else None
-        account, scp_server_id = find_scp_server_id_by_ip(mutable_server.get("ip"), output_lines, account_candidates=account_scope)
-        if not account or not scp_server_id:
-            if account_scope:
-                raise RuntimeError(f"未能在指定SCP账号[{account_scope[0]['name']}]中按IP匹配到目标服务器")
-            raise RuntimeError("未能在已配置SCP账号中按IP匹配到目标服务器")
-        bind_scp_server(mutable_server["id"], account["id"], scp_server_id)
-        mutable_server["scp_server_id"] = scp_server_id
-        mutable_server["scp_account_id"] = account["id"]
-        if output_lines is not None:
-            output_lines.append(f"已按IP自动匹配SCP服务器并绑定: 账号[{account['name']}] server_id={scp_server_id}")
-    elif not account:
-        raise RuntimeError("已填写SCP服务器ID，但未绑定SCP账号，请在服务器设置中选择SCP账号")
+    account, scp_server_id = ensure_scp_server_account_binding(mutable_server, output_lines)
+    if not account or not scp_server_id:
+        raise RuntimeError("未能在当前或其他已授权SCP账号中按公网IP匹配到目标服务器")
+    mutable_server["scp_server_id"] = scp_server_id
+    mutable_server["scp_account_id"] = account["id"]
 
     endpoint_base, token = scp_rest_login(account)
     options = _scp_rest_list_server_images(account, endpoint_base, token, scp_server_id)
@@ -2009,25 +2087,15 @@ def scp_reinstall_system(server_row, output_lines, target_system="debian11", pre
     else:
         account_id = (server_row or {}).get("scp_account_id")
         scp_server_id = str((server_row or {}).get("scp_server_id") or "").strip()
-    account = get_scp_account(account_id)
     target_system = str(target_system or "debian11").strip().lower()
     target_version = target_system.removeprefix("debian")
     if target_system not in {"debian11", "debian12"}:
         raise RuntimeError(f"不支持的SCP API重装系统: {target_system}")
 
-    if scp_server_id and account:
-        output_lines.append(f"已使用面板已配置SCP绑定: 账号[{account['name']}], server_id={scp_server_id}")
-    elif scp_server_id and not account:
-        raise RuntimeError("已填写SCP服务器ID，但未绑定SCP账号，请在服务器设置中选择SCP账号")
-    else:
-        account_scope = [account] if account else None
-        account, scp_server_id = find_scp_server_id_by_ip(server_row["ip"], output_lines, account_candidates=account_scope)
-        if not account or not scp_server_id:
-            if account_scope:
-                raise RuntimeError(f"未能在指定SCP账号[{account_scope[0]['name']}]中按IP匹配到目标服务器")
-            raise RuntimeError("未能在已配置SCP账号中按IP匹配到目标服务器")
-        bind_scp_server(server_row["id"], account["id"], scp_server_id)
-        output_lines.append(f"已按IP自动匹配SCP服务器并绑定: 账号[{account['name']}] server_id={scp_server_id}")
+    account, scp_server_id = ensure_scp_server_account_binding(server_row, output_lines)
+    if not account or not scp_server_id:
+        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配")
+    output_lines.append(f"本次SCP API操作使用账号[{account['name']}], server_id={scp_server_id}")
 
     try:
         endpoint_base, token = scp_rest_login(account)
@@ -3167,14 +3235,9 @@ def _calc_daily_rows(points, now_dt):
 
 
 def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
-    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
-    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
-    if not account_id or not scp_server_id:
-        raise RuntimeError("缺少SCP账号绑定或服务器ID")
-
-    account = get_scp_account(account_id)
-    if not account:
-        raise RuntimeError("SCP账号不存在")
+    account, scp_server_id = ensure_scp_server_account_binding(server_row)
+    if not account or not scp_server_id:
+        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配")
 
     endpoint_base, token = scp_rest_login(account, timeout_seconds=timeout_seconds)
     now_dt = now_dt or datetime.now(TIMEZONE)
@@ -3227,14 +3290,9 @@ def _fetch_server_network_metrics(server_row, now_dt=None, timeout_seconds=60):
     return windows, daily_rows, steps, samples
 
 def refresh_server_traffic_via_scp(server_row):
-    account_id = server_row["scp_account_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_account_id")
-    scp_server_id = str(server_row["scp_server_id"] if isinstance(server_row, sqlite3.Row) else (server_row or {}).get("scp_server_id") or "").strip()
-    if not account_id or not scp_server_id:
-        raise RuntimeError("缺少SCP账号绑定或服务器ID")
-
-    account = get_scp_account(account_id)
-    if not account:
-        raise RuntimeError("SCP账号不存在")
+    account, scp_server_id = ensure_scp_server_account_binding(server_row)
+    if not account or not scp_server_id:
+        raise RuntimeError("当前SCP绑定不可用，且巡检其他已授权账号后未找到唯一的公网IP匹配")
 
     # Traffic sampling is best-effort background work; keep each network wait bounded.
     endpoint_base, token = scp_rest_login(account, timeout_seconds=15)
