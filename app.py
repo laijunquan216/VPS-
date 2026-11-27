@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import hashlib
+import hmac
 import zipfile
 import shlex
 import smtplib
@@ -75,7 +76,42 @@ UPLOAD_DATA_DIR = os.environ.get("VPS_PANEL_UPLOAD_DATA_DIR", os.path.join(os.ge
 os.makedirs(UPLOAD_DATA_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET", "change-me")
+FLASK_SECRET = (os.environ.get("FLASK_SECRET") or "").strip()
+if len(FLASK_SECRET) < 64 or FLASK_SECRET in {"change-me", "change-me-please"}:
+    raise RuntimeError("FLASK_SECRET must be a strong random value (at least 64 characters); run install_panel.sh to generate it")
+app.secret_key = FLASK_SECRET
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=str(os.environ.get("PANEL_COOKIE_SECURE", "0")).strip().lower() in {"1", "true", "yes", "on"},
+)
+
+def _uploaded_file_signature(filename):
+    return hmac.new(app.secret_key.encode("utf-8"), filename.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def _signed_uploaded_file_url(filename):
+    return url_for("uploaded_data_file", filename=filename, sig=_uploaded_file_signature(filename))
+
+def _same_origin_mutation():
+    source = (request.headers.get("Origin") or request.headers.get("Referer") or "").strip()
+    if not source or source.lower() == "null":
+        return False
+    try:
+        parsed = urlparse.urlsplit(source)
+        return bool(parsed.netloc and parsed.netloc.lower() == request.host.lower())
+    except Exception:
+        return False
+
+def _write_initial_admin_password(password):
+    password_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "initial_admin_password")
+    fd = os.open(password_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as password_file:
+        password_file.write(password + "\n")
+    try:
+        os.chmod(password_path, 0o600)
+    except OSError:
+        pass
+
 
 
 def login_required(func):
@@ -574,10 +610,26 @@ def init_db():
             )
         current_hash = conn.execute("SELECT panel_password_hash FROM global_config WHERE id = 1").fetchone()[0]
         if not current_hash:
+            initial_password = secrets.token_urlsafe(24)
             conn.execute(
                 "UPDATE global_config SET panel_password_hash = ?, updated_at = ? WHERE id = 1",
-                (generate_password_hash("admin"), datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
+                (generate_password_hash(initial_password), datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
             )
+            _write_initial_admin_password(initial_password)
+        # Re-sign stored ZIP download URLs when the signing key changes.
+        cfg = conn.execute("SELECT data_zip_url, local_vt_data_zip_url FROM global_config WHERE id = 1").fetchone()
+        for column in ("data_zip_url", "local_vt_data_zip_url"):
+            old_url = str(cfg[column] or "").strip() if cfg else ""
+            if not old_url:
+                continue
+            parsed_url = urlparse.urlsplit(old_url)
+            filename = os.path.basename(parsed_url.path)
+            if parsed_url.path.endswith("/files/" + filename) and filename.lower().endswith(".zip"):
+                query = dict(urlparse.parse_qsl(parsed_url.query, keep_blank_values=True))
+                query["sig"] = _uploaded_file_signature(filename)
+                new_url = urlparse.urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, urlparse.urlencode(query), parsed_url.fragment))
+                if new_url != old_url:
+                    conn.execute(f"UPDATE global_config SET {column} = ? WHERE id = 1", (new_url,))
         conn.commit()
 
 
@@ -2263,7 +2315,7 @@ def verify_panel_password(password):
     global_cfg = get_global_config()
     stored_hash = global_cfg["panel_password_hash"] if global_cfg else None
     if not stored_hash:
-        return password == "admin"
+        return False
     return check_password_hash(stored_hash, password)
 
 
@@ -2274,6 +2326,11 @@ def update_panel_password(new_password):
             (generate_password_hash(new_password), datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
+    password_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "initial_admin_password")
+    try:
+        os.remove(password_path)
+    except OSError:
+        pass
 
 
 def list_logs(limit=200):
@@ -2435,7 +2492,7 @@ def restore_backup_payload(payload):
                 global_cfg.get("local_setting_json_path", ""),
                 int(global_cfg.get("local_setting_json_enabled", 0) or 0),
                 int(global_cfg.get("api_failure_notify_enabled", 0) or 0),
-                global_cfg.get("panel_password_hash") or generate_password_hash("admin"),
+                global_cfg.get("panel_password_hash") or generate_password_hash(secrets.token_urlsafe(24)),
                 normalize_renew_notice_days_text(global_cfg.get("renew_notice_days", "5,2")),
                 (global_cfg.get("stock_page_title", "库存展示") or "库存展示").strip(),
                 int(global_cfg.get("public_stock_port", PUBLIC_STOCK_PORT) or PUBLIC_STOCK_PORT),
@@ -4586,7 +4643,7 @@ def save_uploaded_data_zip(file_storage, request_obj=None):
     file_storage.save(save_path)
 
     base_url = resolve_panel_base_url(get_global_config(), request_obj)
-    direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
+    direct_url = f"{base_url.rstrip('/')}" + _signed_uploaded_file_url(saved_name)
 
     with closing(get_conn()) as conn:
         conn.execute(
@@ -4690,7 +4747,7 @@ def package_local_vt_data_to_zip(source_dir, request_obj=None):
             zipf.write(uploaded_setting_path, setting_arcname)
 
     base_url = resolve_panel_base_url(get_global_config(), request_obj)
-    direct_url = f"{base_url.rstrip('/')}" + url_for("uploaded_data_file", filename=saved_name)
+    direct_url = f"{base_url.rstrip('/')}" + _signed_uploaded_file_url(saved_name)
     now_text = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     with closing(get_conn()) as conn:
@@ -5689,6 +5746,10 @@ def require_login():
     if DETAILED_LOG_ENABLED:
         g._req_start = time.time()
     public_endpoints = {"login_page", "login_submit", "static", "uploaded_data_file", "api_v1_instances", "api_v1_instance_throttle"}
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if request.endpoint == "login_submit" or session.get("logged_in"):
+            if not _same_origin_mutation():
+                return jsonify({"error": "csrf_origin_check_failed"}), 403
     if request.endpoint in public_endpoints:
         return None
     if request.endpoint is None:
@@ -6435,7 +6496,12 @@ def update_rental_reservation(server_id):
 
 @app.route("/files/<path:filename>")
 def uploaded_data_file(filename):
-    return send_from_directory(UPLOAD_DATA_DIR, filename, as_attachment=False)
+    safe_name = os.path.basename(filename)
+    signature = (request.args.get("sig") or "").strip()
+    expected = _uploaded_file_signature(safe_name)
+    if safe_name != filename or not safe_name.lower().endswith(".zip") or not hmac.compare_digest(signature, expected):
+        return jsonify({"error": "not_found"}), 404
+    return send_from_directory(UPLOAD_DATA_DIR, safe_name, as_attachment=False)
 
 
 @app.route("/settings/upload-local-setting-json", methods=["POST"])
