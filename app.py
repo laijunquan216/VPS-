@@ -5772,6 +5772,10 @@ def require_login():
 
 @app.after_request
 def detailed_request_log(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if not DETAILED_LOG_ENABLED:
         return response
     started = getattr(g, "_req_start", None)
