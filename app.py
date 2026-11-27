@@ -112,6 +112,11 @@ def _write_initial_admin_password(password):
     except OSError:
         pass
 
+def _generate_initial_admin_password_hash():
+    password = secrets.token_urlsafe(24)
+    _write_initial_admin_password(password)
+    return generate_password_hash(password)
+
 
 
 def login_required(func):
@@ -2492,7 +2497,7 @@ def restore_backup_payload(payload):
                 global_cfg.get("local_setting_json_path", ""),
                 int(global_cfg.get("local_setting_json_enabled", 0) or 0),
                 int(global_cfg.get("api_failure_notify_enabled", 0) or 0),
-                global_cfg.get("panel_password_hash") or generate_password_hash(secrets.token_urlsafe(24)),
+                global_cfg.get("panel_password_hash") or _generate_initial_admin_password_hash(),
                 normalize_renew_notice_days_text(global_cfg.get("renew_notice_days", "5,2")),
                 (global_cfg.get("stock_page_title", "库存展示") or "库存展示").strip(),
                 int(global_cfg.get("public_stock_port", PUBLIC_STOCK_PORT) or PUBLIC_STOCK_PORT),
@@ -6060,6 +6065,7 @@ def login_page():
 def login_submit():
     password = request.form.get("password", "")
     if verify_panel_password(password):
+        session.clear()
         session["logged_in"] = True
         flash("登录成功", "success")
         return redirect(url_for("details_page"))
