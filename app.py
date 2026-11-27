@@ -98,7 +98,12 @@ def _same_origin_mutation():
         return False
     try:
         parsed = urlparse.urlsplit(source)
-        return bool(parsed.netloc and parsed.netloc.lower() == request.host.lower())
+        forwarded_scheme = (request.headers.get("X-Forwarded-Proto") or request.scheme).split(",")[0].strip().lower()
+        return bool(
+            parsed.netloc
+            and parsed.netloc.lower() == request.host.lower()
+            and parsed.scheme.lower() == forwarded_scheme
+        )
     except Exception:
         return False
 
