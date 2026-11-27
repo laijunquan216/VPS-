@@ -87,6 +87,11 @@ EOF
 chmod 600 "$APP_DIR/.env"
 mkdir -p "$APP_DIR/uploaded_data"
 chmod 700 "$APP_DIR/uploaded_data"
+for sensitive_file in "$APP_DIR/panel.db" "$APP_DIR/panel.db-wal" "$APP_DIR/panel.db-shm" "$APP_DIR/initial_admin_password"; do
+  if [ -f "$sensitive_file" ]; then
+    chmod 600 "$sensitive_file"
+  fi
+done
 
 cat > /etc/systemd/system/vps-panel.service <<EOF
 [Unit]
@@ -130,5 +135,8 @@ systemctl restart vps-panel.service
 echo "[OK] 安装完成"
 echo "[INFO] 面板服务已重启"
 echo "[INFO] 面板默认仅监听 127.0.0.1:$PANEL_PORT，请通过 HTTPS 反向代理访问。"
+if [ -f "$APP_DIR/initial_admin_password" ]; then
+  echo "[SECURITY] 初始管理员密码文件: $APP_DIR/initial_admin_password (权限 600；首次登录后会自动删除)"
+fi
 echo "[INFO] 服务状态: systemctl status vps-panel.service"
 echo "[INFO] 后续更新命令: sudo vps-panel-update"
