@@ -15,7 +15,7 @@ EXISTING_FLASK_SECRET=""
 if [ -f "$APP_DIR/.env" ]; then
   EXISTING_FLASK_SECRET="$(sed -n 's/^FLASK_SECRET=//p' "$APP_DIR/.env" | tail -n 1)"
 fi
-if [ -n "${FLASK_SECRET:-}" ]; then
+if [ -n "${FLASK_SECRET:-}" ] && [ "${#FLASK_SECRET}" -ge 64 ] && [ "$FLASK_SECRET" != "change-me" ] && [ "$FLASK_SECRET" != "change-me-please" ]; then
   PANEL_FLASK_SECRET="$FLASK_SECRET"
 elif [ "${#EXISTING_FLASK_SECRET}" -ge 64 ] && [ "$EXISTING_FLASK_SECRET" != "change-me" ] && [ "$EXISTING_FLASK_SECRET" != "change-me-please" ]; then
   PANEL_FLASK_SECRET="$EXISTING_FLASK_SECRET"
