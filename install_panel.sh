@@ -6,9 +6,23 @@ SRC_DIR=${SRC_DIR:-/opt/vps-panel-src}
 REPO_URL=${REPO_URL:-https://github.com/laijunquan216/VPS-.git}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 PANEL_PORT=${PANEL_PORT:-5000}
-PANEL_HOST=${PANEL_HOST:-0.0.0.0}
+PANEL_HOST=${PANEL_HOST:-127.0.0.1}
 CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-60}
-FLASK_SECRET=${FLASK_SECRET:-change-me-please}
+PANEL_COOKIE_SECURE=${PANEL_COOKIE_SECURE:-0}
+
+# Preserve a previously generated strong key across updates; replace known weak defaults.
+EXISTING_FLASK_SECRET=""
+if [ -f "$APP_DIR/.env" ]; then
+  EXISTING_FLASK_SECRET="$(sed -n 's/^FLASK_SECRET=//p' "$APP_DIR/.env" | tail -n 1)"
+fi
+if [ -n "${FLASK_SECRET:-}" ]; then
+  PANEL_FLASK_SECRET="$FLASK_SECRET"
+elif [ "${#EXISTING_FLASK_SECRET}" -ge 64 ] && [ "$EXISTING_FLASK_SECRET" != "change-me" ] && [ "$EXISTING_FLASK_SECRET" != "change-me-please" ]; then
+  PANEL_FLASK_SECRET="$EXISTING_FLASK_SECRET"
+else
+  PANEL_FLASK_SECRET="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(32))')"
+  echo "[SECURITY] Generated a new random FLASK_SECRET."
+fi
 
 install_python_venv_deps() {
   if "$PYTHON_BIN" -m ensurepip --version >/dev/null 2>&1; then
@@ -58,13 +72,17 @@ pip install -r requirements.txt
 cat > "$APP_DIR/.env" <<EOF
 VPS_PANEL_DB=$APP_DIR/panel.db
 CHECK_INTERVAL_MINUTES=$CHECK_INTERVAL_MINUTES
-FLASK_SECRET=$FLASK_SECRET
+FLASK_SECRET=$PANEL_FLASK_SECRET
 PANEL_HOST=$PANEL_HOST
 PANEL_PORT=$PANEL_PORT
+PANEL_COOKIE_SECURE=$PANEL_COOKIE_SECURE
 SSH_RECONNECT_TIMEOUT_SECONDS=${SSH_RECONNECT_TIMEOUT_SECONDS:-1800}
 SSH_RETRY_INTERVAL_SECONDS=${SSH_RETRY_INTERVAL_SECONDS:-15}
 POST_REINSTALL_WAIT_SECONDS=${POST_REINSTALL_WAIT_SECONDS:-30}
 EOF
+chmod 600 "$APP_DIR/.env"
+mkdir -p "$APP_DIR/uploaded_data"
+chmod 700 "$APP_DIR/uploaded_data"
 
 cat > /etc/systemd/system/vps-panel.service <<EOF
 [Unit]
@@ -78,6 +96,7 @@ EnvironmentFile=$APP_DIR/.env
 ExecStart=$APP_DIR/.venv/bin/python $APP_DIR/app.py
 Restart=always
 RestartSec=3
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -106,6 +125,6 @@ systemctl restart vps-panel.service
 
 echo "[OK] 安装完成"
 echo "[INFO] 面板服务已重启"
-echo "[INFO] 访问地址: http://$(hostname -I | awk '{print $1}'):$PANEL_PORT"
+echo "[INFO] 面板默认仅监听 127.0.0.1:$PANEL_PORT，请通过 HTTPS 反向代理访问。"
 echo "[INFO] 服务状态: systemctl status vps-panel.service"
 echo "[INFO] 后续更新命令: sudo vps-panel-update"
